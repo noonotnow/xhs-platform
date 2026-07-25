@@ -1,122 +1,103 @@
-# XHS Platform — xhs.justlikekatie.com
+# XHS Platform (小红书)
 
-A custom XHS (小红书) platform for sharing visual notes and content.
+> A custom XHS social platform for curated content sharing with OAuth 2.0 API for cross-platform posting.
+
+## Overview
+
+XHS is a lightweight social platform built to enable programmatic posting through Connect Hub. It provides:
+
+- **User-facing web app** for creating and viewing text + image notes
+- **OAuth 2.0 server** for third-party integrations (Connect Hub)
+- **REST API** for note creation, retrieval, and management
+- **Public feed** with chronological timeline
 
 ## Tech Stack
 
-- **Framework**: Next.js 14 (App Router)
-- **Language**: TypeScript
-- **Database**: Vercel Postgres
-- **Image Storage**: Cloudflare R2 (S3-compatible)
-- **Auth**: JWT (jose) + bcrypt
-- **Deployment**: Vercel
+- **Framework:** Next.js 14 (App Router)
+- **Database:** PostgreSQL (Vercel Postgres)
+- **Auth:** JWT (custom) for user auth + custom OAuth 2.0 server for third-party
+- **Storage:** Cloudflare R2 (images)
+- **Deployment:** Vercel
 
-## Getting Started
+## Features
+
+### MVP (Phase 0)
+
+- User registration + login
+- Create text + image notes
+- Public chronological feed
+- User profiles
+- OAuth 2.0 authorization server
+- REST API with token authentication
+- Image upload via Cloudflare R2
+
+## Development
 
 ### Prerequisites
 
-- Node.js 18+
+- Node.js 20+
 - Vercel Postgres database
 - Cloudflare R2 bucket
+- Vercel account
 
 ### Setup
 
-1. Clone the repo and install dependencies:
-   ```bash
-   npm install
-   ```
-
-2. Copy `.env.example` to `.env.local` and fill in values:
-   ```bash
-   cp .env.example .env.local
-   ```
-
-3. Run the database migration:
-   ```bash
-   # Connect to your Vercel Postgres database and run:
-   psql $DATABASE_URL -f migrations/001_initial.sql
-   ```
-
-4. Run development server:
-   ```bash
-   npm run dev
-   ```
-
-## API Endpoints
-
-### Auth
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/auth/signup` | Register (email, password, name) |
-| POST | `/api/auth/login` | Login, returns JWT token |
-
-### Notes
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| POST | `/api/notes` | ✅ | Create a note |
-| GET | `/api/notes` | ❌ | List notes (paginated) |
-| GET | `/api/notes/:id` | ❌ | Get single note |
-
-### Upload
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| POST | `/api/upload` | ✅ | Upload image (returns CDN URL) |
-
-## Usage Examples
-
-### Sign up
 ```bash
-curl -X POST https://xhs.justlikekatie.com/api/auth/signup \
-  -H "Content-Type: application/json" \
-  -d '{"email": "katie@example.com", "password": "password123", "name": "Katie"}'
+git clone https://github.com/noonotnow/xhs-platform.git
+cd xhs-platform
+npm install
+cp .env.example .env.local
+# Edit .env.local with your credentials
+npm run dev
 ```
 
-### Create a note
+### Environment Variables
+
+See `.env.example` for required variables.
+
+## API Usage
+
+### Authentication
+
+All protected endpoints require Bearer token:
+
 ```bash
-curl -X POST https://xhs.justlikekatie.com/api/notes \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <token>" \
-  -d '{"content": "My first note! 🎉", "image_url": "https://images.xhs.justlikekatie.com/uploads/abc.jpg"}'
+curl -H "Authorization: Bearer <token>" https://xhs.justlikekatie.com/api/notes
 ```
 
-### Upload an image
+### Create Note
+
 ```bash
-curl -X POST https://xhs.justlikekatie.com/api/upload \
-  -H "Authorization: Bearer <token>" \
-  -F "file=@photo.jpg"
+POST /api/notes
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "content": "My first XHS note!",
+  "image_url": "https://images.xhs.justlikekatie.com/uploads/abc123.jpg"
+}
 ```
 
-## Project Structure
+### Get Feed
 
-```
-src/
-├── app/
-│   └── api/
-│       ├── auth/
-│       │   ├── signup/route.ts
-│       │   └── login/route.ts
-│       ├── notes/
-│       │   ├── route.ts
-│       │   └── [id]/route.ts
-│       └── upload/route.ts
-├── lib/
-│   ├── auth.ts      # JWT sign/verify + auth middleware
-│   ├── db.ts        # Vercel Postgres client
-│   └── r2.ts        # Cloudflare R2 upload helper
-migrations/
-└── 001_initial.sql  # Users + Notes tables
+```bash
+GET /api/notes?limit=20&page=1
 ```
 
-## Deployment
+Full API documentation: `docs/PLATFORM_SPEC.md`
 
-Push to main branch — Vercel auto-deploys. Ensure all environment variables are set in the Vercel dashboard.
+## Project Status
 
-## Week 1 Scope
+**Current Phase:** Week 1 MVP (Core Posting)
 
-- ✅ User signup/login with JWT auth
-- ✅ Create, list, and get notes via API
-- ✅ Image upload to Cloudflare R2
-- ✅ Vercel-ready deployment config
+**Domain:** xhs.justlikekatie.com
+
+## Related Projects
+
+- **Connect Hub** — Cross-platform posting cockpit (integration target)
+- **CREATE** — Content creation pipeline
+- **PLAN** — Content scheduling queue
+
+## License
+
+MIT
