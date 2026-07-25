@@ -1,10 +1,11 @@
 'use client';
 
 import { useState } from 'react';
+import { QRCodeSVG } from 'qrcode.react';
 
 export default function AdminPage() {
   const [token, setToken] = useState('');
-  const [qrData, setQrData] = useState<{ url?: string } | null>(null);
+  const [qrData, setQrData] = useState<{ url?: string; error?: string } | null>(null);
   const [sessionValid, setSessionValid] = useState<boolean | null>(null);
   const [publishForm, setPublishForm] = useState({
     title: '',
@@ -36,6 +37,10 @@ export default function AdminPage() {
     try {
       const res = await fetch('/api/xhs/login/qr', { headers });
       const data = await res.json();
+      if (data.error) {
+        setStatus(`Error: ${data.error}`);
+        return;
+      }
       setQrData(data);
       setStatus('Scan the QR code with your XHS app');
       pollLoginStatus();
@@ -121,13 +126,19 @@ export default function AdminPage() {
         <button onClick={startQRLogin} disabled={!token}>
           Start QR Login
         </button>
-        {qrData && (
+        {qrData && qrData.url && (
           <div style={{ marginTop: 12 }}>
-            <p>QR URL (encode as QR image):</p>
-            <code style={{ wordBreak: 'break-all', fontSize: 12 }}>{qrData.url}</code>
-            <p style={{ marginTop: 8, fontSize: 12, color: '#666' }}>
-              Use any QR generator to display this URL, then scan with XHS app.
-              Or open on your phone: <a href={qrData.url}>{qrData.url}</a>
+            <div style={{ background: '#fff', padding: 16, display: 'inline-block', borderRadius: 8, border: '1px solid #ddd' }}>
+              <QRCodeSVG value={qrData.url} size={256} level="M" />
+            </div>
+            <div style={{ marginTop: 12 }}>
+              <button onClick={startQRLogin} style={{ marginRight: 8 }}>
+                🔄 Refresh QR
+              </button>
+              <span style={{ fontSize: 12, color: '#666' }}>QR codes expire in ~60s</span>
+            </div>
+            <p style={{ marginTop: 8, fontSize: 12, color: '#666', wordBreak: 'break-all' }}>
+              Fallback URL: <a href={qrData.url}>{qrData.url}</a>
             </p>
           </div>
         )}
