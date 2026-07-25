@@ -5,6 +5,7 @@ import { QRCodeSVG } from 'qrcode.react';
 
 export default function AdminPage() {
   const [token, setToken] = useState('');
+  const [cookieStr, setCookieStr] = useState('');
   const [qrData, setQrData] = useState<{ url?: string } | null>(null);
   const [sessionValid, setSessionValid] = useState<boolean | null>(null);
   const [publishForm, setPublishForm] = useState({
@@ -40,6 +41,27 @@ export default function AdminPage() {
       setQrData(data);
       setStatus('Scan the QR code with your XHS app');
       pollLoginStatus();
+    } catch (e: unknown) {
+      setStatus(`Error: ${e instanceof Error ? e.message : 'Unknown error'}`);
+    }
+  }
+
+  async function loginWithCookie() {
+    if (!cookieStr.trim()) return;
+    setStatus('Saving cookie...');
+    try {
+      const res = await fetch('/api/xhs/login/cookie', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ cookie: cookieStr }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setStatus('Cookie saved! ✅ Check session to verify.');
+        setSessionValid(null);
+      } else {
+        setStatus(`Error: ${data.error}`);
+      }
     } catch (e: unknown) {
       setStatus(`Error: ${e instanceof Error ? e.message : 'Unknown error'}`);
     }
@@ -116,9 +138,27 @@ export default function AdminPage() {
         <p>XHS Session: {sessionValid === null ? '—' : sessionValid ? '✅ Valid' : '❌ Expired'}</p>
       </section>
 
+      {/* Cookie Login (manual) */}
+      <section style={{ marginBottom: 24, padding: 16, background: '#f9f9f9', borderRadius: 8, border: '1px solid #e0e0e0' }}>
+        <h2>2. XHS Cookie Login (easiest)</h2>
+        <p style={{ fontSize: 13, color: '#555', marginBottom: 8 }}>
+          Go to <a href="https://www.xiaohongshu.com" target="_blank" rel="noreferrer">xiaohongshu.com</a> → log in → 
+          open DevTools (F12) → Console → type <code>document.cookie</code> → copy the result
+        </p>
+        <textarea
+          placeholder="Paste your XHS cookie string here..."
+          value={cookieStr}
+          onChange={e => setCookieStr(e.target.value)}
+          style={{ width: '100%', padding: 8, marginBottom: 8, minHeight: 60, fontSize: 12 }}
+        />
+        <button onClick={loginWithCookie} disabled={!token || !cookieStr.trim()}>
+          Save Cookie
+        </button>
+      </section>
+
       {/* QR Login */}
       <section style={{ marginBottom: 24 }}>
-        <h2>2. XHS QR Login</h2>
+        <h2>3. XHS QR Login (alternative)</h2>
         <button onClick={startQRLogin} disabled={!token}>
           Start QR Login
         </button>
@@ -142,7 +182,7 @@ export default function AdminPage() {
 
       {/* Publish */}
       <section style={{ marginBottom: 24 }}>
-        <h2>3. Publish to XHS</h2>
+        <h2>4. Publish to XHS</h2>
         <form onSubmit={handlePublish}>
           <input
             placeholder="Title"

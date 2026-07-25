@@ -36,6 +36,14 @@ export async function getSessionStatus() {
   return microserviceRequest('/session/status');
 }
 
+export async function loginWithCookie(cookie: string) {
+  return microserviceRequest('/login/cookie', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cookie }),
+  });
+}
+
 export async function uploadImage(file: Buffer, filename: string) {
   if (!XHS_MICROSERVICE_URL) throw new Error('XHS_MICROSERVICE_URL not configured');
   const formData = new FormData();
