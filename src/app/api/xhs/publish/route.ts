@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAuthUser } from '@/lib/auth';
+import { requireXhsOperator } from '@/lib/xhs-operator-auth';
 import { publishNote, uploadImage } from '@/lib/xhs-microservice';
 
 export async function POST(request: NextRequest) {
-  const user = await getAuthUser(request);
-  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const unauthorized = await requireXhsOperator(request);
+  if (unauthorized) return unauthorized;
 
   try {
     const body = await request.json();

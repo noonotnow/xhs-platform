@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAuthUser } from '@/lib/auth';
+import { requireXhsOperator } from '@/lib/xhs-operator-auth';
 import { loginWithCookie } from '@/lib/xhs-microservice';
 
 export async function POST(request: NextRequest) {
-  const user = await getAuthUser(request);
-  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const unauthorized = await requireXhsOperator(request);
+  if (unauthorized) return unauthorized;
   try {
     const { cookie } = await request.json();
     const result = await loginWithCookie(cookie);

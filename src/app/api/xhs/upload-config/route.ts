@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAuthUser } from '@/lib/auth';
+import { requireXhsOperator } from '@/lib/xhs-operator-auth';
+import { createUploadGrant } from '@/lib/upload-grant';
 
 const MICROSERVICE_URL = process.env.XHS_MICROSERVICE_URL;
-const API_KEY = process.env.XHS_API_KEY || '';
+
+export const dynamic = 'force-dynamic';
 
 export async function GET(request: NextRequest) {
-  const user = await getAuthUser(request);
-  if (!user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const unauthorized = await requireXhsOperator(request);
+  if (unauthorized) return unauthorized;
 
   if (!MICROSERVICE_URL) {
     return NextResponse.json(
@@ -17,8 +17,18 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  return NextResponse.json({
-    uploadUrl: `${MICROSERVICE_URL}/upload`,
-    apiKey: API_KEY,
-  });
+  try {
+    const grant = createUploadGrant();
+    return NextResponse.json({
+      uploadUrl: `${MICROSERVICE_URL}/upload`,
+      uploadToken: grant.token,
+      expiresAt: grant.expiresAt,
+    });
+  } catch (error) {
+    console.error('Upload grant error:', error);
+    return NextResponse.json(
+      { error: 'Upload grants are not configured' },
+      { status: 503 },
+    );
+  }
 }

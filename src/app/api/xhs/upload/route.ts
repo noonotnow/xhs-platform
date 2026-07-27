@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAuthUser } from '@/lib/auth';
+import { requireXhsOperator } from '@/lib/xhs-operator-auth';
 import { uploadImage } from '@/lib/xhs-microservice';
 
 const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
@@ -10,10 +10,8 @@ const MAX_VIDEO_SIZE = 100 * 1024 * 1024; // 100MB
 
 export async function POST(request: NextRequest) {
   try {
-    const user = await getAuthUser(request);
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+    const unauthorized = await requireXhsOperator(request);
+    if (unauthorized) return unauthorized;
 
     const formData = await request.formData();
     const file = formData.get('file') as File | null;
