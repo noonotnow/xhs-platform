@@ -327,7 +327,7 @@ export default function AdminPage() {
         }
       } else {
         // Image publish flow
-        let files: string[] = [];
+        const files: string[] = [];
 
         if (uploadMode === 'file') {
           if (selectedFiles.length === 0) {
