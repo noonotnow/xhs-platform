@@ -335,7 +335,9 @@ export default function AdminPage() {
         });
         const data = await res.json();
         if (res.ok) {
-          let successMsg = `Video published! 🎉 ${data.note_id ? `Note ID: ${data.note_id}` : ''}`;
+          const noteId = data?.data?.id || data?.note_id || '';
+          const shareLink = data?.data?.share_link || data?.share_link || '';
+          let successMsg = `Video published! 🎉${noteId ? ` Note ID: ${noteId}` : ''}${shareLink ? ` | Link: ${shareLink}` : ''}`;
           if (data.warnings && data.warnings.length > 0) {
             successMsg += ` ⚠️ ${data.warnings.join('. ')}`;
           }
@@ -393,7 +395,9 @@ export default function AdminPage() {
         });
         const data = await res.json();
         if (res.ok) {
-          setStatus(`Published! 🎉 Note ID: ${data.note_id || JSON.stringify(data)}`);
+          const noteId = data?.data?.id || data?.note_id || '';
+          const shareLink = data?.data?.share_link || data?.share_link || '';
+          setStatus(`Published! 🎉${noteId ? ` Note ID: ${noteId}` : ''}${shareLink ? ` | Link: ${shareLink}` : ''}`);
           setStatusType('success');
           handleRemoveAllFiles();
           setPublishForm({ title: '', desc: '', image_urls: [''], post_time: '', topic_keywords: '' });
