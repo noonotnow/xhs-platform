@@ -74,3 +74,20 @@ export async function publishNote(options: PublishOptions) {
     body: JSON.stringify(options),
   });
 }
+
+export interface PublishVideoOptions {
+  title: string;
+  desc: string;
+  video_file: string;
+  cover_file?: string;
+  topic_keywords?: string[];
+  is_private?: boolean;
+}
+
+export async function publishVideo(options: PublishVideoOptions) {
+  return microserviceRequest('/publish-video', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(options),
+  });
+}
