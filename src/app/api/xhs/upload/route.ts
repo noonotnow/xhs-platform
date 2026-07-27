@@ -2,8 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthUser } from '@/lib/auth';
 import { uploadImage } from '@/lib/xhs-microservice';
 
-const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
-const MAX_SIZE = 10 * 1024 * 1024; // 10MB
+const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+const VIDEO_TYPES = ['video/mp4', 'video/quicktime', 'video/webm'];
+const ALLOWED_TYPES = [...IMAGE_TYPES, ...VIDEO_TYPES];
+const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
+const MAX_VIDEO_SIZE = 100 * 1024 * 1024; // 100MB
 
 export async function POST(request: NextRequest) {
   try {
@@ -21,14 +24,17 @@ export async function POST(request: NextRequest) {
 
     if (!ALLOWED_TYPES.includes(file.type)) {
       return NextResponse.json(
-        { error: 'Invalid file type. Allowed: JPEG, PNG, WebP' },
+        { error: 'Invalid file type. Allowed: JPEG, PNG, WebP, MP4, MOV, WebM' },
         { status: 400 }
       );
     }
 
-    if (file.size > MAX_SIZE) {
+    const isVideo = VIDEO_TYPES.includes(file.type);
+    const maxSize = isVideo ? MAX_VIDEO_SIZE : MAX_IMAGE_SIZE;
+
+    if (file.size > maxSize) {
       return NextResponse.json(
-        { error: 'File too large. Maximum size is 10MB' },
+        { error: `File too large. Maximum size is ${isVideo ? '100MB' : '10MB'}` },
         { status: 400 }
       );
     }
