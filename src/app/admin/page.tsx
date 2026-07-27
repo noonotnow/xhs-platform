@@ -16,7 +16,6 @@ function formatFileSize(bytes: number): string {
 }
 
 export default function AdminPage() {
-  const [token, setToken] = useState('');
   const [cookieStr, setCookieStr] = useState('');
   const [qrData, setQrData] = useState<{ url?: string } | null>(null);
   const [sessionValid, setSessionValid] = useState<boolean | null>(null);
@@ -55,11 +54,9 @@ export default function AdminPage() {
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'Authorization': `Bearer ${token}`,
   };
 
   async function checkSession() {
-    if (!token) return;
     try {
       const res = await fetch('/api/xhs/session', { headers });
       const data = await res.json();
@@ -235,31 +232,23 @@ export default function AdminPage() {
     if (coverInputRef.current) coverInputRef.current.value = '';
   }
 
-  // Cache the upload config so we only fetch it once per session
-  const uploadConfigRef = useRef<{ uploadUrl: string; apiKey: string } | null>(null);
-
-  async function getUploadConfig(): Promise<{ uploadUrl: string; apiKey: string }> {
-    if (uploadConfigRef.current) return uploadConfigRef.current;
-    const res = await fetch('/api/xhs/upload-config', {
-      headers: { 'Authorization': `Bearer ${token}` },
-    });
+  async function getUploadConfig(): Promise<{ uploadUrl: string; uploadToken: string }> {
+    const res = await fetch('/api/xhs/upload-config');
     if (!res.ok) {
       const data = await res.json();
       throw new Error(data.error || 'Failed to get upload config');
     }
-    const config = await res.json();
-    uploadConfigRef.current = config;
-    return config;
+    return res.json();
   }
 
   async function uploadFileToServer(file: File): Promise<string> {
     // Upload directly to the microservice, bypassing Vercel's 4.5MB body limit
-    const { uploadUrl, apiKey } = await getUploadConfig();
+    const { uploadUrl, uploadToken } = await getUploadConfig();
     const formData = new FormData();
     formData.append('file', file, file.name);
     const res = await fetch(uploadUrl, {
       method: 'POST',
-      headers: { 'X-API-Key': apiKey },
+      headers: { 'Authorization': `Upload ${uploadToken}` },
       body: formData,
     });
     if (!res.ok) {
@@ -322,7 +311,6 @@ export default function AdminPage() {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`,
           },
           body: JSON.stringify({
             title: publishForm.title,
@@ -389,7 +377,6 @@ export default function AdminPage() {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`,
           },
           body: JSON.stringify(publishBody),
         });
@@ -418,17 +405,10 @@ export default function AdminPage() {
     <div style={{ maxWidth: 600, margin: '40px auto', padding: 20, fontFamily: 'system-ui' }}>
       <h1>XHS Admin</h1>
 
-      {/* Auth */}
+      {/* Cloudflare Access authenticates the operator before this route renders. */}
       <section style={{ marginBottom: 24 }}>
-        <h2>1. Platform Login</h2>
-        <input
-          type="password"
-          placeholder="Paste your JWT token"
-          value={token}
-          onChange={e => setToken(e.target.value)}
-          style={{ width: '100%', padding: 8, marginBottom: 8 }}
-        />
-        <button onClick={checkSession} disabled={!token}>
+        <h2>1. XHS Session</h2>
+        <button onClick={checkSession}>
           Check XHS Session
         </button>
         <p>XHS Session: {sessionValid === null ? '—' : sessionValid ? '✅ Valid' : '❌ Expired'}</p>
@@ -447,7 +427,7 @@ export default function AdminPage() {
           onChange={e => setCookieStr(e.target.value)}
           style={{ width: '100%', padding: 8, marginBottom: 8, minHeight: 60, fontSize: 12 }}
         />
-        <button onClick={loginWithCookie} disabled={!token || !cookieStr.trim()}>
+        <button onClick={loginWithCookie} disabled={!cookieStr.trim()}>
           Save Cookie
         </button>
       </section>
@@ -455,7 +435,7 @@ export default function AdminPage() {
       {/* QR Login */}
       <section style={{ marginBottom: 24 }}>
         <h2>3. XHS QR Login (alternative)</h2>
-        <button onClick={startQRLogin} disabled={!token}>
+        <button onClick={startQRLogin}>
           Start QR Login
         </button>
         {qrData && qrData.url && (
@@ -897,10 +877,10 @@ export default function AdminPage() {
           {/* Publish button */}
           <button
             type="submit"
-            disabled={!token || !sessionValid || publishing}
+            disabled={!sessionValid || publishing}
             style={{
               width: '100%', padding: '12px 20px', fontSize: 15, fontWeight: 600,
-              background: (!token || !sessionValid || publishing) ? '#ccc' : contentType === 'video' ? '#7c3aed' : '#e74c3c',
+              background: (!sessionValid || publishing) ? '#ccc' : contentType === 'video' ? '#7c3aed' : '#e74c3c',
               color: '#fff', border: 'none', borderRadius: 8, cursor: publishing ? 'wait' : 'pointer',
               transition: 'background 0.2s',
             }}

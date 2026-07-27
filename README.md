@@ -15,7 +15,7 @@ XHS is a lightweight social platform built to enable programmatic posting throug
 
 - **Framework:** Next.js 14 (App Router)
 - **Database:** PostgreSQL (Vercel Postgres)
-- **Auth:** JWT (custom) for user auth + custom OAuth 2.0 server for third-party
+- **Auth:** Cloudflare Access for operators + legacy JWT/OAuth for existing API clients
 - **Storage:** Cloudflare R2 (images)
 - **Deployment:** Vercel
 
@@ -23,7 +23,6 @@ XHS is a lightweight social platform built to enable programmatic posting throug
 
 ### MVP (Phase 0)
 
-- User registration + login
 - Create text + image notes
 - Public chronological feed
 - User profiles
@@ -54,6 +53,29 @@ npm run dev
 ### Environment Variables
 
 See `.env.example` for required variables.
+
+The operator-only `/admin` and `/api/xhs/*` routes require a valid Cloudflare
+Access application assertion for an allowlisted email. Configure these values
+in Vercel:
+
+| Variable | Description |
+| --- | --- |
+| `CLOUDFLARE_ACCESS_TEAM_DOMAIN` | Access team domain, such as `team.cloudflareaccess.com`; the verified JWT issuer is `https://<team-domain>` |
+| `CLOUDFLARE_ACCESS_AUDIENCE` | Access application audience (`aud`) for the XHS admin application |
+| `CLOUDFLARE_ACCESS_OPERATOR_EMAILS` | Comma-separated operator email allowlist |
+| `UPLOAD_TOKEN_SECRET` | Long random secret shared with the XHS microservice for two-minute upload grants |
+
+`XHS_API_KEY` remains server-only and is used for Vercel-to-microservice
+login, session, and publish requests. Browser uploads use
+`Authorization: Upload <token>`; the token payload is compact JSON containing
+`exp`, `method`, `path`, and `nonce`, signed as
+`base64url(payload).base64url(HMAC-SHA256(payload_segment))` without padding.
+
+Deploy the microservice upload-token verifier and shared
+`UPLOAD_TOKEN_SECRET` first. Then configure the Cloudflare Access application
+and Vercel variables, deploy this application, and finally route the production
+admin hostname through Access. This avoids switching the browser to upload
+grants before the microservice accepts them.
 
 ## API Usage
 

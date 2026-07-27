@@ -131,8 +131,8 @@ CREATE INDEX comments_note_id_idx ON comments(note_id);
 
 ### Authentication
 ```
-POST /api/auth/signup    — Register new user
-POST /api/auth/login     — Login, returns JWT
+POST /api/auth/signup    — Disabled (410 Gone)
+POST /api/auth/login     — Disabled (410 Gone)
 POST /api/auth/logout    — Logout
 GET  /api/auth/session   — Check session
 ```
