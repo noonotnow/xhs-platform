@@ -235,16 +235,38 @@ export default function AdminPage() {
     if (coverInputRef.current) coverInputRef.current.value = '';
   }
 
-  async function uploadFileToServer(file: File): Promise<string> {
-    const formData = new FormData();
-    formData.append('file', file);
-    const res = await fetch('/api/xhs/upload', {
-      method: 'POST',
+  // Cache the upload config so we only fetch it once per session
+  const uploadConfigRef = useRef<{ uploadUrl: string; apiKey: string } | null>(null);
+
+  async function getUploadConfig(): Promise<{ uploadUrl: string; apiKey: string }> {
+    if (uploadConfigRef.current) return uploadConfigRef.current;
+    const res = await fetch('/api/xhs/upload-config', {
       headers: { 'Authorization': `Bearer ${token}` },
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      throw new Error(data.error || 'Failed to get upload config');
+    }
+    const config = await res.json();
+    uploadConfigRef.current = config;
+    return config;
+  }
+
+  async function uploadFileToServer(file: File): Promise<string> {
+    // Upload directly to the microservice, bypassing Vercel's 4.5MB body limit
+    const { uploadUrl, apiKey } = await getUploadConfig();
+    const formData = new FormData();
+    formData.append('file', file, file.name);
+    const res = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: { 'X-API-Key': apiKey },
       body: formData,
     });
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Upload failed: ${errText}`);
+    }
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Upload failed');
     return data.filepath;
   }
 
