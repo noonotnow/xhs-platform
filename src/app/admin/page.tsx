@@ -270,6 +270,19 @@ export default function AdminPage() {
           return;
         }
 
+        // Warn if no cover image
+        if (!coverFile) {
+          const proceed = window.confirm(
+            'No cover image selected.\n\n' +
+            'XHS will auto-generate a cover from the video, which often produces a low-quality or blank thumbnail.\n\n' +
+            'Publish without a cover image anyway?'
+          );
+          if (!proceed) {
+            setPublishing(false);
+            return;
+          }
+        }
+
         // Upload video
         setPublishProgress('Uploading video...');
         const videoFilepath = await uploadFileToServer(videoFile);
@@ -300,7 +313,11 @@ export default function AdminPage() {
         });
         const data = await res.json();
         if (res.ok) {
-          setStatus(`Video published! 🎉 ${data.note_id ? `Note ID: ${data.note_id}` : JSON.stringify(data)}`);
+          let successMsg = `Video published! 🎉 ${data.note_id ? `Note ID: ${data.note_id}` : ''}`;
+          if (data.warnings && data.warnings.length > 0) {
+            successMsg += ` ⚠️ ${data.warnings.join('. ')}`;
+          }
+          setStatus(successMsg);
           setStatusType('success');
           handleRemoveVideo();
           handleRemoveCover();
@@ -740,8 +757,11 @@ export default function AdminPage() {
 
               {/* Cover image drop zone */}
               <div style={{ marginBottom: 12 }}>
-                <div style={{ fontSize: 13, fontWeight: 500, color: '#555', marginBottom: 6 }}>
-                  📷 Cover Image <span style={{ fontWeight: 400, color: '#999' }}>(recommended)</span>
+                <div style={{ fontSize: 13, fontWeight: 500, color: '#555', marginBottom: 4 }}>
+                  📷 Cover Image <span style={{ fontWeight: 600, color: '#d97706' }}>— strongly recommended</span>
+                </div>
+                <div style={{ fontSize: 11, color: '#b45309', marginBottom: 6, lineHeight: 1.4 }}>
+                  ⚠️ Without a cover image, XHS auto-generates one which often results in a blank or low-quality thumbnail.
                 </div>
                 {!coverFile ? (
                   <div
