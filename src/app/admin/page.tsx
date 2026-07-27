@@ -1,7 +1,16 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
+
+const ACCEPTED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
 
 export default function AdminPage() {
   const [token, setToken] = useState('');
@@ -16,6 +25,16 @@ export default function AdminPage() {
     topic_keywords: '',
   });
   const [status, setStatus] = useState('');
+  const [statusType, setStatusType] = useState<'info' | 'success' | 'error'>('info');
+
+  // Image upload state
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [uploadMode, setUploadMode] = useState<'file' | 'url'>('file');
+  const [isPrivate, setIsPrivate] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -89,32 +108,120 @@ export default function AdminPage() {
     setTimeout(() => clearInterval(interval), 120000);
   }
 
+  const handleFileSelect = useCallback((file: File) => {
+    if (!ACCEPTED_TYPES.includes(file.type)) {
+      setStatus('Invalid file type. Please use JPG, PNG, or WebP.');
+      setStatusType('error');
+      return;
+    }
+    if (file.size > MAX_FILE_SIZE) {
+      setStatus('File too large. Maximum size is 10MB.');
+      setStatusType('error');
+      return;
+    }
+    setSelectedFile(file);
+    const url = URL.createObjectURL(file);
+    setImagePreview(url);
+    setStatus('');
+  }, []);
+
+  function handleRemoveFile() {
+    if (imagePreview) URL.revokeObjectURL(imagePreview);
+    setSelectedFile(null);
+    setImagePreview(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }
+
+  function handleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setDragOver(false);
+    const file = e.dataTransfer.files[0];
+    if (file) handleFileSelect(file);
+  }
+
+  function handleDragOver(e: React.DragEvent) {
+    e.preventDefault();
+    setDragOver(true);
+  }
+
+  function handleDragLeave(e: React.DragEvent) {
+    e.preventDefault();
+    setDragOver(false);
+  }
+
   async function handlePublish(e: React.FormEvent) {
     e.preventDefault();
-    setStatus('Publishing...');
+    setPublishing(true);
+    setStatus('');
+    setStatusType('info');
+
     try {
+      let files: string[] = [];
+
+      if (uploadMode === 'file') {
+        if (!selectedFile) {
+          setStatus('Please select an image file.');
+          setStatusType('error');
+          setPublishing(false);
+          return;
+        }
+        // Step 1: Upload image to XHS microservice
+        setStatus('Uploading image...');
+        const formData = new FormData();
+        formData.append('file', selectedFile);
+        const uploadRes = await fetch('/api/xhs/upload', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` },
+          body: formData,
+        });
+        const uploadData = await uploadRes.json();
+        if (!uploadRes.ok) {
+          throw new Error(uploadData.error || 'Upload failed');
+        }
+        files = [uploadData.filepath];
+      }
+
+      // Step 2: Publish
+      setStatus('Publishing to XHS...');
+      const publishBody: Record<string, unknown> = {
+        title: publishForm.title,
+        desc: publishForm.desc,
+        post_time: publishForm.post_time || undefined,
+        is_private: isPrivate,
+        topic_keywords: publishForm.topic_keywords
+          .split(',')
+          .map(k => k.trim())
+          .filter(Boolean),
+      };
+
+      if (uploadMode === 'file') {
+        publishBody.files = files;
+      } else {
+        publishBody.image_urls = publishForm.image_urls.filter(u => u.trim());
+      }
+
       const res = await fetch('/api/xhs/publish', {
         method: 'POST',
-        headers,
-        body: JSON.stringify({
-          title: publishForm.title,
-          desc: publishForm.desc,
-          image_urls: publishForm.image_urls.filter(u => u.trim()),
-          post_time: publishForm.post_time || undefined,
-          topic_keywords: publishForm.topic_keywords
-            .split(',')
-            .map(k => k.trim())
-            .filter(Boolean),
-        }),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify(publishBody),
       });
       const data = await res.json();
       if (res.ok) {
-        setStatus(`Published! 🎉 ${JSON.stringify(data)}`);
+        setStatus(`Published! 🎉 Note ID: ${data.note_id || JSON.stringify(data)}`);
+        setStatusType('success');
+        handleRemoveFile();
+        setPublishForm({ title: '', desc: '', image_urls: [''], post_time: '', topic_keywords: '' });
       } else {
-        setStatus(`Error: ${data.error}`);
+        throw new Error(data.error || 'Publish failed');
       }
     } catch (e: unknown) {
       setStatus(`Error: ${e instanceof Error ? e.message : 'Unknown error'}`);
+      setStatusType('error');
+    } finally {
+      setPublishing(false);
     }
   }
 
@@ -181,49 +288,203 @@ export default function AdminPage() {
       </section>
 
       {/* Publish */}
-      <section style={{ marginBottom: 24 }}>
-        <h2>4. Publish to XHS</h2>
+      <section style={{ marginBottom: 24, padding: 20, background: '#fff', borderRadius: 12, border: '1px solid #e0e0e0' }}>
+        <h2 style={{ marginTop: 0 }}>4. Publish to XHS</h2>
         <form onSubmit={handlePublish}>
+          {/* Title */}
           <input
-            placeholder="Title"
+            placeholder="Title *"
             value={publishForm.title}
             onChange={e => setPublishForm(p => ({ ...p, title: e.target.value }))}
-            style={{ width: '100%', padding: 8, marginBottom: 8 }}
+            required
+            style={{ width: '100%', padding: 10, marginBottom: 12, borderRadius: 6, border: '1px solid #d0d0d0', fontSize: 14, boxSizing: 'border-box' }}
           />
+
+          {/* Description */}
           <textarea
-            placeholder="Description / content"
+            placeholder="Description / content *"
             value={publishForm.desc}
             onChange={e => setPublishForm(p => ({ ...p, desc: e.target.value }))}
-            style={{ width: '100%', padding: 8, marginBottom: 8, minHeight: 100 }}
+            required
+            style={{ width: '100%', padding: 10, marginBottom: 12, borderRadius: 6, border: '1px solid #d0d0d0', minHeight: 100, fontSize: 14, resize: 'vertical', boxSizing: 'border-box' }}
           />
-          <input
-            placeholder="Image URL (from R2 or any URL)"
-            value={publishForm.image_urls[0]}
-            onChange={e => setPublishForm(p => ({ ...p, image_urls: [e.target.value] }))}
-            style={{ width: '100%', padding: 8, marginBottom: 8 }}
-          />
-          <input
-            placeholder="Schedule time (optional): 2026-07-25 12:00:00"
-            value={publishForm.post_time}
-            onChange={e => setPublishForm(p => ({ ...p, post_time: e.target.value }))}
-            style={{ width: '100%', padding: 8, marginBottom: 8 }}
-          />
+
+          {/* Image source toggle */}
+          <div style={{ display: 'flex', gap: 0, marginBottom: 12 }}>
+            <button
+              type="button"
+              onClick={() => setUploadMode('file')}
+              style={{
+                flex: 1, padding: '8px 12px', fontSize: 13, cursor: 'pointer',
+                border: '1px solid #d0d0d0', borderRadius: '6px 0 0 6px',
+                background: uploadMode === 'file' ? '#1a73e8' : '#f5f5f5',
+                color: uploadMode === 'file' ? '#fff' : '#333',
+                fontWeight: uploadMode === 'file' ? 600 : 400,
+              }}
+            >
+              📁 Upload File
+            </button>
+            <button
+              type="button"
+              onClick={() => setUploadMode('url')}
+              style={{
+                flex: 1, padding: '8px 12px', fontSize: 13, cursor: 'pointer',
+                border: '1px solid #d0d0d0', borderLeft: 'none', borderRadius: '0 6px 6px 0',
+                background: uploadMode === 'url' ? '#1a73e8' : '#f5f5f5',
+                color: uploadMode === 'url' ? '#fff' : '#333',
+                fontWeight: uploadMode === 'url' ? 600 : 400,
+              }}
+            >
+              🔗 Image URL
+            </button>
+          </div>
+
+          {/* File Upload Mode */}
+          {uploadMode === 'file' && (
+            <>
+              {!selectedFile ? (
+                <div
+                  onDrop={handleDrop}
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onClick={() => fileInputRef.current?.click()}
+                  style={{
+                    border: `2px dashed ${dragOver ? '#1a73e8' : '#ccc'}`,
+                    borderRadius: 10,
+                    padding: '32px 20px',
+                    textAlign: 'center',
+                    cursor: 'pointer',
+                    marginBottom: 12,
+                    background: dragOver ? '#e8f0fe' : '#fafafa',
+                    transition: 'all 0.2s ease',
+                  }}
+                >
+                  <div style={{ fontSize: 36, marginBottom: 8 }}>📷</div>
+                  <div style={{ fontSize: 14, color: '#555', marginBottom: 4 }}>
+                    <strong>Drag & drop</strong> an image here, or <span style={{ color: '#1a73e8', textDecoration: 'underline' }}>click to browse</span>
+                  </div>
+                  <div style={{ fontSize: 12, color: '#999' }}>
+                    JPG, PNG, WebP · Max 10MB
+                  </div>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".jpg,.jpeg,.png,.webp"
+                    onChange={e => {
+                      const file = e.target.files?.[0];
+                      if (file) handleFileSelect(file);
+                    }}
+                    style={{ display: 'none' }}
+                  />
+                </div>
+              ) : (
+                <div style={{
+                  border: '1px solid #d0d0d0', borderRadius: 10, padding: 12, marginBottom: 12,
+                  display: 'flex', alignItems: 'center', gap: 12, background: '#fafafa',
+                }}>
+                  {imagePreview && (
+                    <img
+                      src={imagePreview}
+                      alt="Preview"
+                      style={{ width: 80, height: 80, objectFit: 'cover', borderRadius: 8, border: '1px solid #e0e0e0' }}
+                    />
+                  )}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 14, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {selectedFile.name}
+                    </div>
+                    <div style={{ fontSize: 12, color: '#888', marginTop: 2 }}>
+                      {formatFileSize(selectedFile.size)}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleRemoveFile}
+                    style={{
+                      background: 'none', border: 'none', fontSize: 20, cursor: 'pointer',
+                      color: '#999', padding: '4px 8px', borderRadius: 4,
+                    }}
+                    title="Remove image"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+
+          {/* URL Mode */}
+          {uploadMode === 'url' && (
+            <input
+              placeholder="Image URL (from R2 or any public URL)"
+              value={publishForm.image_urls[0]}
+              onChange={e => setPublishForm(p => ({ ...p, image_urls: [e.target.value] }))}
+              style={{ width: '100%', padding: 10, marginBottom: 12, borderRadius: 6, border: '1px solid #d0d0d0', fontSize: 14, boxSizing: 'border-box' }}
+            />
+          )}
+
+          {/* Topics */}
           <input
             placeholder="Topics (comma separated): travel, food, lifestyle"
             value={publishForm.topic_keywords}
             onChange={e => setPublishForm(p => ({ ...p, topic_keywords: e.target.value }))}
-            style={{ width: '100%', padding: 8, marginBottom: 8 }}
+            style={{ width: '100%', padding: 10, marginBottom: 12, borderRadius: 6, border: '1px solid #d0d0d0', fontSize: 14, boxSizing: 'border-box' }}
           />
-          <button type="submit" disabled={!token || !sessionValid}>
-            Publish to XHS
+
+          {/* Private/Public toggle */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 14 }}>
+              <input
+                type="checkbox"
+                checked={isPrivate}
+                onChange={e => setIsPrivate(e.target.checked)}
+                style={{ width: 16, height: 16, cursor: 'pointer' }}
+              />
+              Private post
+            </label>
+            <span style={{ fontSize: 12, color: '#888' }}>
+              {isPrivate ? '🔒 Only you can see this' : '🌐 Public post'}
+            </span>
+          </div>
+
+          {/* Schedule time (collapsible) */}
+          <details style={{ marginBottom: 16 }}>
+            <summary style={{ cursor: 'pointer', fontSize: 13, color: '#666', marginBottom: 8 }}>
+              ⏰ Schedule for later (optional)
+            </summary>
+            <input
+              placeholder="Schedule time: 2026-07-25 12:00:00"
+              value={publishForm.post_time}
+              onChange={e => setPublishForm(p => ({ ...p, post_time: e.target.value }))}
+              style={{ width: '100%', padding: 10, borderRadius: 6, border: '1px solid #d0d0d0', fontSize: 14, boxSizing: 'border-box' }}
+            />
+          </details>
+
+          {/* Publish button */}
+          <button
+            type="submit"
+            disabled={!token || !sessionValid || publishing}
+            style={{
+              width: '100%', padding: '12px 20px', fontSize: 15, fontWeight: 600,
+              background: (!token || !sessionValid || publishing) ? '#ccc' : '#e74c3c',
+              color: '#fff', border: 'none', borderRadius: 8, cursor: publishing ? 'wait' : 'pointer',
+              transition: 'background 0.2s',
+            }}
+          >
+            {publishing ? '⏳ Publishing...' : '🚀 Publish to XHS'}
           </button>
         </form>
       </section>
 
       {/* Status */}
       {status && (
-        <section style={{ padding: 12, background: '#f0f0f0', borderRadius: 8, marginTop: 16 }}>
-          <strong>Status:</strong> {status}
+        <section style={{
+          padding: 14, borderRadius: 8, marginTop: 16, fontSize: 14,
+          background: statusType === 'success' ? '#e6f4ea' : statusType === 'error' ? '#fce8e6' : '#f0f0f0',
+          color: statusType === 'success' ? '#1e7e34' : statusType === 'error' ? '#c62828' : '#333',
+          border: `1px solid ${statusType === 'success' ? '#a8dab5' : statusType === 'error' ? '#f5c6cb' : '#d0d0d0'}`,
+        }}>
+          <strong>{statusType === 'success' ? '✅' : statusType === 'error' ? '❌' : 'ℹ️'}</strong> {status}
         </section>
       )}
     </div>

@@ -8,15 +8,17 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json();
-    const { title, desc, image_urls, post_time, topic_keywords, is_private } = body;
+    const { title, desc, image_urls, files: preUploadedFiles, post_time, topic_keywords, is_private } = body;
 
     if (!title || !desc) {
       return NextResponse.json({ error: 'title and desc are required' }, { status: 400 });
     }
 
-    // If image URLs are provided (from R2), download and upload to microservice
+    // Use pre-uploaded filepaths if provided, otherwise download from URLs
     const files: string[] = [];
-    if (image_urls && image_urls.length > 0) {
+    if (preUploadedFiles && preUploadedFiles.length > 0) {
+      files.push(...preUploadedFiles);
+    } else if (image_urls && image_urls.length > 0) {
       for (const url of image_urls) {
         const imgRes = await fetch(url);
         if (!imgRes.ok) throw new Error(`Failed to fetch image: ${url}`);
