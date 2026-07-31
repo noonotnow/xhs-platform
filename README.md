@@ -34,7 +34,7 @@ XHS is a lightweight social platform built to enable programmatic posting throug
 
 ### Prerequisites
 
-- Node.js 20+
+- Node.js 20.9+
 - Vercel Postgres database
 - Cloudflare R2 bucket
 - Vercel account
@@ -64,6 +64,7 @@ in Vercel:
 | `CLOUDFLARE_ACCESS_AUDIENCE` | Access application audience (`aud`) for the XHS admin application |
 | `CLOUDFLARE_ACCESS_OPERATOR_EMAILS` | Comma-separated operator email allowlist |
 | `UPLOAD_TOKEN_SECRET` | Long random secret shared with the XHS microservice for two-minute upload grants |
+| `PLAN_SECRET` | At least 32 random characters shared with Vibe Atlas for integration media uploads |
 
 `XHS_API_KEY` remains server-only and is used for Vercel-to-microservice
 login, session, and publish requests. Browser uploads use
@@ -78,6 +79,28 @@ admin hostname through Access. This avoids switching the browser to upload
 grants before the microservice accepts them.
 
 ## API Usage
+
+### Vibe Atlas media upload
+
+`POST /api/integrations/media` stores a decoded, static PNG, JPEG, or WebP file
+(maximum 4 MB and 16 megapixels) in the configured R2 bucket. Browser requests
+and preflight are allowed only from `https://fandom.justlikekatie.com`.
+
+```bash
+curl -X POST https://xhs.justlikekatie.com/api/integrations/media \
+  -H "Authorization: Bearer $PLAN_SECRET" \
+  -F "file=@share-card.png"
+```
+
+A successful upload returns HTTP 201 with the durable CDN URL:
+
+```json
+{ "url": "https://images.xhs.justlikekatie.com/uploads/..." }
+```
+
+The deployment requires `PLAN_SECRET` plus the existing `R2_ACCOUNT_ID`,
+`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, and
+`R2_PUBLIC_URL` values.
 
 ### Authentication
 
