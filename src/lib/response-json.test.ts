@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { responseJson } from '@/lib/response-json';
+import { responseJson, responseJsonOrThrow } from '@/lib/response-json';
 
 describe('responseJson', () => {
   it('parses JSON object responses', async () => {
@@ -35,6 +35,19 @@ describe('responseJson', () => {
     await expect(responseJson(response, 'POST /admin/api/ready-posts/id/publish'))
       .rejects.toThrow(
         'POST /admin/api/ready-posts/id/publish returned invalid JSON (502 Bad Gateway).',
+      );
+  });
+
+  it('rejects JSON HTTP errors instead of returning success-shaped data', async () => {
+    const response = new Response(JSON.stringify({ error: 'Unauthorized' }), {
+      status: 401,
+      statusText: 'Unauthorized',
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    await expect(responseJsonOrThrow(response, 'GET /admin/api/xhs/login/qr'))
+      .rejects.toThrow(
+        'GET /admin/api/xhs/login/qr failed (401 Unauthorized): Unauthorized',
       );
   });
 });
