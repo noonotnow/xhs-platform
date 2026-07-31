@@ -3,12 +3,31 @@
 import { useState, useRef, useCallback } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import ReadyPostsPanel from './ReadyPostsPanel';
+import { responseJsonOrThrow } from '@/lib/response-json';
 
 const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const VIDEO_TYPES = ['video/mp4', 'video/quicktime', 'video/webm'];
 const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
 const MAX_VIDEO_SIZE = 100 * 1024 * 1024; // 100MB
 const MAX_IMAGES = 9;
+
+interface ApiError {
+  error?: string;
+}
+
+interface SessionResponse extends ApiError {
+  valid?: boolean;
+}
+
+interface QrResponse extends ApiError {
+  url?: string;
+  qr_id?: string;
+  code?: string;
+}
+
+interface QrStatusResponse extends ApiError {
+  code_status?: number;
+}
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return bytes + ' B';
@@ -58,65 +77,91 @@ export default function AdminPage() {
   };
 
   async function checkSession() {
+    const path = '/admin/api/xhs/session';
     try {
-      const res = await fetch('/api/xhs/session', { headers });
-      const data = await res.json();
+      const res = await fetch(path, { headers });
+      const data = await responseJsonOrThrow<SessionResponse>(res, `GET ${path}`);
+      if (typeof data.valid !== 'boolean') {
+        throw new Error(`GET ${path} response did not include a boolean valid field.`);
+      }
       setSessionValid(data.valid);
+      setStatus(
+        data.valid
+          ? 'XHS session is valid.'
+          : `XHS session expired${data.error ? `: ${data.error}` : '.'}`,
+      );
+      setStatusType(data.valid ? 'success' : 'error');
     } catch (e: unknown) {
       setStatus(`Error: ${e instanceof Error ? e.message : 'Unknown error'}`);
+      setStatusType('error');
     }
   }
 
   async function startQRLogin() {
+    const path = '/admin/api/xhs/login/qr';
+    setQrData(null);
     setStatus('Getting QR code...');
+    setStatusType('info');
     try {
-      const res = await fetch('/api/xhs/login/qr', { headers });
-      const data = await res.json();
+      const res = await fetch(path, { headers });
+      const data = await responseJsonOrThrow<QrResponse>(res, `GET ${path}`);
+      if (typeof data.url !== 'string' || !data.url) {
+        throw new Error(`GET ${path} response did not include a QR URL.`);
+      }
       setQrData(data);
       setStatus('Scan the QR code with your XHS app');
+      setStatusType('info');
       pollLoginStatus();
     } catch (e: unknown) {
       setStatus(`Error: ${e instanceof Error ? e.message : 'Unknown error'}`);
+      setStatusType('error');
     }
   }
 
   async function loginWithCookie() {
     if (!cookieStr.trim()) return;
+    const path = '/admin/api/xhs/login/cookie';
     setStatus('Saving cookie...');
+    setStatusType('info');
     try {
-      const res = await fetch('/api/xhs/login/cookie', {
+      const res = await fetch(path, {
         method: 'POST',
         headers,
         body: JSON.stringify({ cookie: cookieStr }),
       });
-      const data = await res.json();
-      if (res.ok) {
-        setStatus('Cookie saved! ✅ Check session to verify.');
-        setSessionValid(null);
-      } else {
-        setStatus(`Error: ${data.error}`);
-      }
+      await responseJsonOrThrow<ApiError>(res, `POST ${path}`);
+      setStatus('Cookie saved! ✅ Check session to verify.');
+      setStatusType('success');
+      setSessionValid(null);
     } catch (e: unknown) {
       setStatus(`Error: ${e instanceof Error ? e.message : 'Unknown error'}`);
+      setStatusType('error');
     }
   }
 
   function pollLoginStatus() {
+    const path = '/admin/api/xhs/login/status';
     const interval = setInterval(async () => {
       try {
-        const res = await fetch('/api/xhs/login/status', { headers });
-        const data = await res.json();
+        const res = await fetch(path, { headers });
+        const data = await responseJsonOrThrow<QrStatusResponse>(res, `GET ${path}`);
+        if (typeof data.code_status !== 'number') {
+          throw new Error(`GET ${path} response did not include a numeric code_status field.`);
+        }
         if (data.code_status === 2) {
           setStatus('Login successful! ✅');
+          setStatusType('success');
           setSessionValid(true);
           setQrData(null);
           clearInterval(interval);
         } else if (data.code_status === 1) {
           setStatus('QR scanned, confirming...');
+          setStatusType('info');
         }
-      } catch {
+      } catch (e: unknown) {
         clearInterval(interval);
-        setStatus('Polling failed');
+        setStatus(`Polling failed: ${e instanceof Error ? e.message : 'Unknown error'}`);
+        setStatusType('error');
       }
     }, 2000);
     // Stop after 2 minutes

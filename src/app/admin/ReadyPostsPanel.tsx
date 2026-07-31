@@ -7,17 +7,12 @@ import type {
   ReadyXhsPostsResponse,
 } from '@/types/ready-post';
 import styles from './ReadyPostsPanel.module.css';
+import { responseJson } from '@/lib/response-json';
 
 interface ApiError {
   error?: string;
   code?: string;
   published?: PublishReadyPostResponse;
-}
-
-async function responseJson<T>(response: Response): Promise<T> {
-  const body: unknown = await response.json();
-  if (!body || typeof body !== 'object') throw new Error('Server returned invalid JSON');
-  return body as T;
 }
 
 export default function ReadyPostsPanel({
@@ -42,8 +37,12 @@ export default function ReadyPostsPanel({
     setLoading(true);
     setError('');
     try {
-      const response = await fetch('/api/xhs/ready-posts', { cache: 'no-store' });
-      const data = await responseJson<ReadyXhsPostsResponse & ApiError>(response);
+      const path = '/admin/api/ready-posts';
+      const response = await fetch(path, { cache: 'no-store' });
+      const data = await responseJson<ReadyXhsPostsResponse & ApiError>(
+        response,
+        `GET ${path}`,
+      );
       if (!response.ok) throw new Error(data.error || 'Failed to load ready posts');
       setPosts(data.posts);
       setWarnings(data.warnings);
@@ -77,8 +76,9 @@ export default function ReadyPostsPanel({
     setError('');
     setSuccess(null);
     try {
+      const path = `/admin/api/ready-posts/${encodeURIComponent(selected.id)}/publish`;
       const response = await fetch(
-        `/api/xhs/ready-posts/${encodeURIComponent(selected.id)}/publish`,
+        path,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -88,7 +88,10 @@ export default function ReadyPostsPanel({
           }),
         },
       );
-      const data = await responseJson<PublishReadyPostResponse & ApiError>(response);
+      const data = await responseJson<PublishReadyPostResponse & ApiError>(
+        response,
+        `POST ${path}`,
+      );
       if (!response.ok) {
         if (data.published) setSuccess(data.published);
         throw new Error(data.error || 'Publish failed');
