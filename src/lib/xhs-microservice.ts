@@ -1,6 +1,15 @@
 const XHS_MICROSERVICE_URL = process.env.XHS_MICROSERVICE_URL;
 const XHS_API_KEY = process.env.XHS_API_KEY;
 
+export class XhsMicroserviceHttpError extends Error {
+  constructor(
+    readonly status: number,
+    readonly responseBody: string,
+  ) {
+    super(`Microservice error ${status}: ${responseBody}`);
+  }
+}
+
 if (!XHS_MICROSERVICE_URL) {
   console.warn('XHS_MICROSERVICE_URL not set - microservice features disabled');
 }
@@ -9,6 +18,7 @@ async function microserviceRequest(path: string, options: RequestInit = {}) {
   if (!XHS_MICROSERVICE_URL) {
     throw new Error('XHS_MICROSERVICE_URL not configured');
   }
+
   const url = `${XHS_MICROSERVICE_URL}${path}`;
   const res = await fetch(url, {
     ...options,
@@ -19,9 +29,35 @@ async function microserviceRequest(path: string, options: RequestInit = {}) {
   });
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`Microservice error ${res.status}: ${body}`);
+    throw new XhsMicroserviceHttpError(res.status, body);
   }
   return res.json();
+}
+
+export interface PublishVideoUrlOptions {
+  video_url: string;
+  title: string;
+  caption: string;
+  tags?: string[];
+}
+
+export interface PublishVideoUrlResponse {
+  status: 'success';
+  note_id: string;
+  share_url: string;
+}
+
+export async function publishVideoUrl(
+  options: PublishVideoUrlOptions,
+): Promise<PublishVideoUrlResponse> {
+  if (!XHS_API_KEY) {
+    throw new Error('XHS_API_KEY not configured');
+  }
+  return microserviceRequest('/publish-video-url', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(options),
+  }) as Promise<PublishVideoUrlResponse>;
 }
 
 export async function getQRCode() {

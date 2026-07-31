@@ -65,6 +65,8 @@ in Vercel:
 | `CLOUDFLARE_ACCESS_OPERATOR_EMAILS` | Comma-separated operator email allowlist |
 | `UPLOAD_TOKEN_SECRET` | Long random secret shared with the XHS microservice for two-minute upload grants |
 | `PLAN_SECRET` | At least 32 random characters shared with Vibe Atlas for integration media uploads |
+| `NOTION_API_KEY` | Server-only Notion integration token with read/write access to the canonical Posts DB |
+| `NOTION_POSTS_DB_ID` | Canonical Posts database ID shared with the production CREATE workflow |
 
 `XHS_API_KEY` remains server-only and is used for Vercel-to-microservice
 login, session, and publish requests. Browser uploads use
@@ -77,6 +79,27 @@ Deploy the microservice upload-token verifier and shared
 and Vercel variables, deploy this application, and finally route the production
 admin hostname through Access. This avoids switching the browser to upload
 grants before the microservice accepts them.
+
+### Publish-ready CREATE packets
+
+The protected admin loads unpublished Rednote records whose canonical
+`Publish packet ready` property is checked. The server reads `Headline`,
+`Weibo text`, `Image URLs`, `Thumbnail`, `Series`, and `Status` using the same
+field aliases as CREATE. Only durable HTTPS MP4 assets under
+`images.xhs.justlikekatie.com/videos/assets/` can be sent to the microservice.
+
+Publishing is always manual: the operator selects a packet, reviews the media,
+and confirms the irreversible action. The browser calls this application only;
+the Notion token and `XHS_API_KEY` remain server-side. After the microservice
+confirms `{ status: "success", note_id, share_url }`, the server changes the
+Notion status to `Published`, stores `Rednote URL`, and stores `Rednote Note ID`
+when that property exists. It advances `Next action` only when the schema
+already contains `Backfill URL/metrics` (preferred) or `No action`. Apply
+`migrations/002_xhs_publish_receipts.sql` before deployment; the durable receipt
+prevents concurrent or repeated publication of the same Notion page.
+A successful XHS publish followed by a failed
+Notion backfill is reported as a blocking partial failure with the confirmed
+share URL so the operator does not publish twice.
 
 ## API Usage
 

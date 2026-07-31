@@ -2,6 +2,7 @@
 
 import { useState, useRef, useCallback } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
+import ReadyPostsPanel from './ReadyPostsPanel';
 
 const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const VIDEO_TYPES = ['video/mp4', 'video/quicktime', 'video/webm'];
@@ -456,9 +457,11 @@ export default function AdminPage() {
         )}
       </section>
 
+      <ReadyPostsPanel sessionValid={sessionValid} />
+
       {/* Publish */}
       <section style={{ marginBottom: 24, padding: 20, background: '#fff', borderRadius: 12, border: '1px solid #e0e0e0' }}>
-        <h2 style={{ marginTop: 0 }}>4. Publish to XHS</h2>
+        <h2 style={{ marginTop: 0 }}>5. Manual publish to XHS</h2>
         <form onSubmit={handlePublish}>
           {/* Title */}
           <input
