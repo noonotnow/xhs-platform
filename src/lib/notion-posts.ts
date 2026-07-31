@@ -24,7 +24,7 @@ const PROPERTY_ALIASES = {
   hasVideo: ['Has video', 'Has Video'],
   needsMedia: ['Needs media', 'Needs Media'],
   needsCaption: ['Needs caption', 'Needs Caption'],
-  tags: ['Series', 'Tags', 'Topics'],
+  tags: ['Tags', 'Topics', 'Hashtags'],
   xhsNoteId: ['XHS Note ID', 'XHS note ID', 'Rednote Note ID', 'Rednote note ID'],
   xhsShareUrl: [
     'XHS Share URL',

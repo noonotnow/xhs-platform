@@ -115,7 +115,7 @@ describe('Notion Posts mapping', () => {
       videoUrls: [
         'https://images.xhs.justlikekatie.com/videos/assets/6c/6ca0927b-66ef-4a90-8c6d-39f9e6db903b.mp4',
       ],
-      tags: ['BTS'],
+      tags: [],
       publishBlockers: [],
     });
   });
