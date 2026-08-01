@@ -17,6 +17,13 @@ vi.mock('@/lib/xhs-operator-auth', () => ({
 
 vi.mock('@/lib/notion-posts', () => ({
   listReadyXhsPosts: mocks.listReadyPosts,
+  normalizeNotionPostsError: (error: Error & { code?: string; status?: number }) =>
+    error.code && error.status
+      ? error
+      : Object.assign(new Error('Failed to load ready posts'), {
+        code: 'READY_POSTS_LOAD_FAILED',
+        status: 502,
+      }),
   NotionPostsError: class NotionPostsError extends Error {
     constructor(
       message: string,
@@ -92,6 +99,7 @@ import { GET as getQrCode } from '@/app/api/xhs/login/qr/route';
 import { GET as getLoginStatus } from '@/app/api/xhs/login/status/route';
 import { POST as postCookie } from '@/app/api/xhs/login/cookie/route';
 import { CREATOR_QR_UNAVAILABLE_DETAIL } from '@/lib/xhs-creator-login';
+import { NotionPostsError } from '@/lib/notion-posts';
 
 function request(path: string, init?: RequestInit) {
   return new NextRequest(`https://xhs.justlikekatie.com${path}`, init);
@@ -122,6 +130,26 @@ describe('protected XHS route handlers', () => {
     await expect(response.json()).resolves.toEqual({
       error: 'Failed to load ready posts',
       code: 'READY_POSTS_LOAD_FAILED',
+    });
+  });
+
+  it('preserves a recoverable Notion configuration failure as JSON', async () => {
+    mocks.listReadyPosts.mockRejectedValue(new NotionPostsError(
+      'The configured Notion integration cannot access the Posts database. ' +
+      'Reconnect the database to the integration, then refresh.',
+      'NOTION_DATABASE_UNAVAILABLE',
+      503,
+    ));
+
+    const response = await getReadyPosts(request('/api/xhs/ready-posts'));
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('content-type')).toContain('application/json');
+    await expect(response.json()).resolves.toEqual({
+      error:
+        'The configured Notion integration cannot access the Posts database. ' +
+        'Reconnect the database to the integration, then refresh.',
+      code: 'NOTION_DATABASE_UNAVAILABLE',
     });
   });
 

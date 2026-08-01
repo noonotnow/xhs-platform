@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { listReadyXhsPosts, NotionPostsError } from '@/lib/notion-posts';
+import { listReadyXhsPosts, normalizeNotionPostsError } from '@/lib/notion-posts';
 import { requireXhsOperator } from '@/lib/xhs-operator-auth';
 
 export const dynamic = 'force-dynamic';
@@ -33,9 +33,7 @@ export async function GET(request: NextRequest) {
     });
     return NextResponse.json(result, { headers: NO_STORE_HEADERS });
   } catch (error) {
-    const known = error instanceof NotionPostsError
-      ? error
-      : new NotionPostsError('Failed to load ready posts', 'READY_POSTS_LOAD_FAILED', 502);
+    const known = normalizeNotionPostsError(error);
     console.error('Ready posts request failed', {
       requestId,
       code: known.code,
