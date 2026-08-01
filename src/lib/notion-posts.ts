@@ -1,4 +1,10 @@
-import { Client, isFullDatabase, isFullPage } from '@notionhq/client';
+import {
+  APIErrorCode,
+  Client,
+  isFullDatabase,
+  isFullPage,
+  isNotionClientError,
+} from '@notionhq/client';
 import type {
   PageObjectResponse,
   QueryDatabaseParameters,
@@ -53,6 +59,30 @@ export class NotionPostsError extends Error {
   ) {
     super(message);
   }
+}
+
+export function normalizeNotionPostsError(error: unknown) {
+  if (error instanceof NotionPostsError) return error;
+  if (
+    isNotionClientError(error) &&
+    (
+      error.code === APIErrorCode.ObjectNotFound ||
+      error.code === APIErrorCode.RestrictedResource ||
+      error.code === APIErrorCode.Unauthorized
+    )
+  ) {
+    return new NotionPostsError(
+      'The configured Notion integration cannot access the Posts database. ' +
+      'Reconnect the database to the integration, then refresh.',
+      'NOTION_DATABASE_UNAVAILABLE',
+      503,
+    );
+  }
+  return new NotionPostsError(
+    'Failed to load ready posts',
+    'READY_POSTS_LOAD_FAILED',
+    502,
+  );
 }
 
 function getClient() {

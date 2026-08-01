@@ -1,13 +1,35 @@
 import { describe, expect, it } from 'vitest';
+import { APIErrorCode, APIResponseError } from '@notionhq/client';
 import type { PageObjectResponse } from '@notionhq/client/build/src/api-endpoints';
 import {
   buildReadyPostsQueryFilter,
   isCanonicalMediaVideo,
   buildPublishedProperties,
   mapReadyXhsPost,
+  normalizeNotionPostsError,
   publishedNextAction,
   resolvePostsSchema,
 } from '@/lib/notion-posts';
+
+describe('normalizeNotionPostsError', () => {
+  it('turns inaccessible database responses into a recoverable service error', () => {
+    const error = new APIResponseError({
+      code: APIErrorCode.ObjectNotFound,
+      status: 404,
+      message: 'Could not find database',
+      headers: new Headers(),
+      rawBodyText: '{}',
+    });
+
+    expect(normalizeNotionPostsError(error)).toMatchObject({
+      message:
+        'The configured Notion integration cannot access the Posts database. ' +
+        'Reconnect the database to the integration, then refresh.',
+      code: 'NOTION_DATABASE_UNAVAILABLE',
+      status: 503,
+    });
+  });
+});
 
 describe('buildReadyPostsQueryFilter', () => {
   it('limits the Notion query to publish-ready candidates', () => {
