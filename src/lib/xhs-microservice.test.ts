@@ -55,7 +55,7 @@ describe('publishVideoUrl', () => {
       video_url: 'https://images.xhs.justlikekatie.com/videos/assets/post.mp4',
       title: 'Post',
       caption: 'Caption',
-    })).rejects.toThrow('Microservice error 409: not logged in');
+    })).rejects.toThrow('XHS microservice request failed (409)');
   });
 
   it('extracts only sanitized JSON detail for browser-facing errors', async () => {

@@ -48,7 +48,16 @@ vi.mock('@/lib/xhs-microservice', () => ({
     ) {
       super(`Microservice error ${status}: ${responseBody}`);
       this.detail = 'Normal-account QR login is temporarily unavailable';
-      this.safeBody = JSON.parse(responseBody);
+      const body = JSON.parse(responseBody);
+      this.safeBody = {
+        ...(typeof body.valid === 'boolean' ? { valid: body.valid } : {}),
+        ...(body.session_type ? { session_type: body.session_type } : {}),
+        ...(typeof body.relogin_required === 'boolean'
+          ? { relogin_required: body.relogin_required }
+          : {}),
+        ...(body.error ? { error: body.error } : {}),
+        ...(typeof body.detail === 'string' ? { detail: body.detail } : {}),
+      };
     }
   },
   getSessionStatus: mocks.getSessionStatus,
@@ -125,6 +134,54 @@ describe('protected XHS route handlers', () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ valid: false });
+  });
+
+  it('sanitizes object-shaped session errors returned with a successful response', async () => {
+    mocks.getSessionStatus.mockResolvedValue({
+      valid: false,
+      session_type: 'rednote_creator',
+      relogin_required: true,
+      error: {
+        code: 'creator_session_invalid',
+        message: 'The creator session is invalid',
+      },
+      cookie: 'must-not-leak',
+    });
+
+    const response = await getSession(request('/api/xhs/session'));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      valid: false,
+      session_type: 'rednote_creator',
+      relogin_required: true,
+      error: {
+        code: 'creator_session_invalid',
+        message: 'The creator session is invalid',
+      },
+    });
+  });
+
+  it('preserves a structured creator-session validation outage status', async () => {
+    mocks.getSessionStatus.mockRejectedValue(new (
+      await import('@/lib/xhs-microservice')
+    ).XhsMicroserviceHttpError(502, JSON.stringify({
+      error: {
+        code: 'creator_session_validation_unavailable',
+        message: 'Creator validation is temporarily unavailable',
+      },
+      internal: 'must-not-leak',
+    })));
+
+    const response = await getSession(request('/api/xhs/session'));
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: 'creator_session_validation_unavailable',
+        message: 'Creator validation is temporarily unavailable',
+      },
+    });
   });
 
   it('fails QR start and status closed without requesting a QR URL', async () => {

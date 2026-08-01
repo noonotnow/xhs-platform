@@ -1,72 +1,18 @@
+import {
+  sanitizeCreatorSessionResponse,
+  type CreatorSessionResponse,
+} from '@/lib/xhs-creator-session';
+
 const XHS_MICROSERVICE_URL = process.env.XHS_MICROSERVICE_URL;
 const XHS_API_KEY = process.env.XHS_API_KEY;
 
-export interface SafeXhsMicroserviceError {
-  valid?: boolean;
-  session_type?: string;
-  relogin_required?: boolean;
-  validation?: {
-    method?: string;
-    host?: string;
-    path?: string;
-  };
-  error?: {
-    code?: string;
-    message?: string;
-  };
-  detail?: string;
-}
-
-function nonEmptyString(value: unknown) {
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
-}
-
-function sanitizedMicroserviceError(responseBody: string): SafeXhsMicroserviceError {
+function sanitizedMicroserviceError(responseBody: string): CreatorSessionResponse {
   try {
     const body: unknown = JSON.parse(responseBody);
     if (!body || typeof body !== 'object') {
       return { detail: 'XHS microservice request failed' };
     }
-
-    const record = body as Record<string, unknown>;
-    const validation = record.validation && typeof record.validation === 'object'
-      ? record.validation as Record<string, unknown>
-      : undefined;
-    const error = record.error && typeof record.error === 'object'
-      ? record.error as Record<string, unknown>
-      : undefined;
-
-    return {
-      ...(typeof record.valid === 'boolean' ? { valid: record.valid } : {}),
-      ...(nonEmptyString(record.session_type)
-        ? { session_type: nonEmptyString(record.session_type) }
-        : {}),
-      ...(typeof record.relogin_required === 'boolean'
-        ? { relogin_required: record.relogin_required }
-        : {}),
-      ...(validation ? {
-        validation: {
-          ...(nonEmptyString(validation.method)
-            ? { method: nonEmptyString(validation.method) }
-            : {}),
-          ...(nonEmptyString(validation.host)
-            ? { host: nonEmptyString(validation.host) }
-            : {}),
-          ...(nonEmptyString(validation.path)
-            ? { path: nonEmptyString(validation.path) }
-            : {}),
-        },
-      } : {}),
-      ...(error ? {
-        error: {
-          ...(nonEmptyString(error.code) ? { code: nonEmptyString(error.code) } : {}),
-          ...(nonEmptyString(error.message)
-            ? { message: nonEmptyString(error.message) }
-            : {}),
-        },
-      } : {}),
-      ...(nonEmptyString(record.detail) ? { detail: nonEmptyString(record.detail) } : {}),
-    };
+    return sanitizeCreatorSessionResponse(body);
   } catch {
     // Non-JSON upstream bodies are not safe to expose to the browser.
   }
@@ -75,13 +21,13 @@ function sanitizedMicroserviceError(responseBody: string): SafeXhsMicroserviceEr
 
 export class XhsMicroserviceHttpError extends Error {
   readonly detail: string;
-  readonly safeBody: SafeXhsMicroserviceError;
+  readonly safeBody: CreatorSessionResponse;
 
   constructor(
     readonly status: number,
     readonly responseBody: string,
   ) {
-    super(`Microservice error ${status}: ${responseBody}`);
+    super(`XHS microservice request failed (${status})`);
     this.safeBody = sanitizedMicroserviceError(responseBody);
     this.detail =
       this.safeBody.error?.message ||
