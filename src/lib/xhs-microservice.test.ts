@@ -68,4 +68,40 @@ describe('publishVideoUrl', () => {
     expect(error.detail)
       .toBe('Normal-account QR login is temporarily unavailable');
   });
+
+  it('allowlists the structured creator-session failure contract', async () => {
+    const { XhsMicroserviceHttpError } = await import('@/lib/xhs-microservice');
+    const error = new XhsMicroserviceHttpError(401, JSON.stringify({
+      valid: false,
+      session_type: 'rednote_creator',
+      validation: {
+        method: 'creator_profile',
+        host: 'creator.rednote.com',
+        path: '/api/galaxy/creator/home/personal_info',
+      },
+      relogin_required: true,
+      error: {
+        code: 'creator_session_invalid',
+        message: 'The creator session is invalid',
+      },
+      cookie: 'must-not-leak',
+      internal: 'must-not-leak',
+    }));
+
+    expect(error.safeBody).toEqual({
+      valid: false,
+      session_type: 'rednote_creator',
+      validation: {
+        method: 'creator_profile',
+        host: 'creator.rednote.com',
+        path: '/api/galaxy/creator/home/personal_info',
+      },
+      relogin_required: true,
+      error: {
+        code: 'creator_session_invalid',
+        message: 'The creator session is invalid',
+      },
+    });
+    expect(JSON.stringify(error.safeBody)).not.toContain('must-not-leak');
+  });
 });

@@ -40,6 +40,7 @@ vi.mock('@/lib/ready-post-publisher', () => ({
 vi.mock('@/lib/xhs-microservice', () => ({
   XhsMicroserviceHttpError: class XhsMicroserviceHttpError extends Error {
     readonly detail: string;
+    readonly safeBody: object;
 
     constructor(
       readonly status: number,
@@ -47,6 +48,7 @@ vi.mock('@/lib/xhs-microservice', () => ({
     ) {
       super(`Microservice error ${status}: ${responseBody}`);
       this.detail = 'Normal-account QR login is temporarily unavailable';
+      this.safeBody = JSON.parse(responseBody);
     }
   },
   getSessionStatus: mocks.getSessionStatus,
@@ -144,7 +146,10 @@ describe('protected XHS route handlers', () => {
   });
 
   it('executes the cookie handler without exposing the cookie to the browser response', async () => {
-    mocks.loginWithCookie.mockResolvedValue({ status: 'ok' });
+    mocks.loginWithCookie.mockResolvedValue({
+      valid: true,
+      session_type: 'rednote_creator',
+    });
 
     const response = await postCookie(request('/api/xhs/login/cookie', {
       method: 'POST',
@@ -154,6 +159,42 @@ describe('protected XHS route handlers', () => {
 
     expect(response.status).toBe(200);
     expect(mocks.loginWithCookie).toHaveBeenCalledWith('session=value');
-    await expect(response.json()).resolves.toEqual({ status: 'ok' });
+    await expect(response.json()).resolves.toEqual({
+      valid: true,
+      session_type: 'rednote_creator',
+    });
+  });
+
+  it('preserves a sanitized invalid-session response without exposing the cookie', async () => {
+    mocks.loginWithCookie.mockRejectedValue(new (
+      await import('@/lib/xhs-microservice')
+    ).XhsMicroserviceHttpError(401, JSON.stringify({
+      valid: false,
+      session_type: 'rednote_creator',
+      relogin_required: true,
+      error: {
+        code: 'creator_session_invalid',
+        message: 'The creator session is invalid',
+      },
+    })));
+
+    const response = await postCookie(request('/api/xhs/login/cookie', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cookie: 'sensitive=session' }),
+    }));
+
+    expect(response.status).toBe(401);
+    const responseBody = await response.json();
+    expect(responseBody).toEqual({
+      valid: false,
+      session_type: 'rednote_creator',
+      relogin_required: true,
+      error: {
+        code: 'creator_session_invalid',
+        message: 'The creator session is invalid',
+      },
+    });
+    expect(JSON.stringify(responseBody)).not.toContain('sensitive=session');
   });
 });

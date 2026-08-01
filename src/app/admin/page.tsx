@@ -2,8 +2,12 @@
 
 import { useState, useRef, useCallback } from 'react';
 import ReadyPostsPanel from './ReadyPostsPanel';
-import { responseJsonOrThrow } from '@/lib/response-json';
+import { responseJson, responseJsonOrThrow } from '@/lib/response-json';
 import { CREATOR_QR_UNAVAILABLE_DETAIL } from '@/lib/xhs-creator-login';
+import {
+  creatorCookieFailureMessage,
+  type CreatorSessionResponse,
+} from '@/lib/xhs-creator-session';
 
 const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const VIDEO_TYPES = ['video/mp4', 'video/quicktime', 'video/webm'];
@@ -100,8 +104,14 @@ export default function AdminPage() {
         headers,
         body: JSON.stringify({ cookie }),
       });
-      await responseJsonOrThrow<ApiError>(res, `POST ${path}`);
-      setStatus('Cookie saved! ✅ Check session to verify.');
+      const data = await responseJson<CreatorSessionResponse>(res, `POST ${path}`);
+      if (!res.ok) {
+        throw new Error(creatorCookieFailureMessage(data));
+      }
+      if (data.valid !== true) {
+        throw new Error(`POST ${path} did not confirm a valid creator session.`);
+      }
+      setStatus('Creator session validated and saved. ✅');
       setStatusType('success');
       setSessionValid(null);
     } catch (e: unknown) {
