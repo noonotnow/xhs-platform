@@ -4,7 +4,10 @@ import {
   loginWithCookie,
   XhsMicroserviceHttpError,
 } from '@/lib/xhs-microservice';
-import { sanitizeCreatorSessionResponse } from '@/lib/xhs-creator-session';
+import {
+  sanitizeCreatorCookieLoginErrorResponse,
+  sanitizeCreatorCookieLoginSuccessResponse,
+} from '@/lib/xhs-creator-session';
 
 export async function POST(request: NextRequest) {
   const unauthorized = await requireXhsOperator(request);
@@ -18,12 +21,21 @@ export async function POST(request: NextRequest) {
       );
     }
     const result = await loginWithCookie(cookie);
-    return NextResponse.json(sanitizeCreatorSessionResponse(result));
+    const safeResult = sanitizeCreatorCookieLoginSuccessResponse(result);
+    return NextResponse.json(
+      safeResult,
+      { status: safeResult.valid === true ? 200 : 502 },
+    );
   } catch (e: unknown) {
     if (e instanceof XhsMicroserviceHttpError) {
-      return NextResponse.json(e.safeBody, { status: e.status });
+      return NextResponse.json(
+        sanitizeCreatorCookieLoginErrorResponse(e.safeBody),
+        { status: e.status },
+      );
     }
-    const message = e instanceof Error ? e.message : 'Unknown error';
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json(
+      sanitizeCreatorCookieLoginErrorResponse(undefined),
+      { status: 500 },
+    );
   }
 }

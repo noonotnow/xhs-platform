@@ -37,48 +37,8 @@ vi.mock('@/lib/ready-post-publisher', () => ({
   },
 }));
 
-vi.mock('@/lib/xhs-microservice', () => ({
-  XhsMicroserviceHttpError: class XhsMicroserviceHttpError extends Error {
-    readonly detail: string;
-    readonly safeBody: object;
-
-    constructor(
-      readonly status: number,
-      readonly responseBody: string,
-    ) {
-      super(`Microservice error ${status}: ${responseBody}`);
-      this.detail = 'Normal-account QR login is temporarily unavailable';
-      const body = JSON.parse(responseBody);
-      this.safeBody = {
-        ...(typeof body.valid === 'boolean' ? { valid: body.valid } : {}),
-        ...(body.session_type ? { session_type: body.session_type } : {}),
-        ...(typeof body.relogin_required === 'boolean'
-          ? { relogin_required: body.relogin_required }
-          : {}),
-        ...(body.error ? {
-          error: {
-            ...(body.error.code ? { code: body.error.code } : {}),
-            ...(body.error.message ? { message: body.error.message } : {}),
-            ...([
-              'redirect',
-              'http_401',
-              'http_403',
-              'api_session_expired',
-            ].includes(body.error.reason)
-              ? { reason: body.error.reason }
-              : {}),
-            ...(Number.isSafeInteger(body.error.upstream_status)
-              ? { upstream_status: body.error.upstream_status }
-              : {}),
-            ...(Number.isSafeInteger(body.error.upstream_code)
-              ? { upstream_code: body.error.upstream_code }
-              : {}),
-          },
-        } : {}),
-        ...(typeof body.detail === 'string' ? { detail: body.detail } : {}),
-      };
-    }
-  },
+vi.mock('@/lib/xhs-microservice', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/xhs-microservice')>()),
   getSessionStatus: mocks.getSessionStatus,
   getQRCode: mocks.getQrCode,
   checkLoginStatus: mocks.checkLoginStatus,
@@ -93,7 +53,7 @@ import { GET as getLoginStatus } from '@/app/api/xhs/login/status/route';
 import { POST as postCookie } from '@/app/api/xhs/login/cookie/route';
 import { CREATOR_QR_UNAVAILABLE_DETAIL } from '@/lib/xhs-creator-login';
 
-function request(path: string, init?: RequestInit) {
+function request(path: string, init?: ConstructorParameters<typeof NextRequest>[1]) {
   return new NextRequest(`https://xhs.justlikekatie.com${path}`, init);
 }
 
@@ -238,6 +198,8 @@ describe('protected XHS route handlers', () => {
     mocks.loginWithCookie.mockResolvedValue({
       valid: true,
       session_type: 'rednote_creator',
+      cookie: 'submitted-cookie-canary',
+      validation: { host: 'untrusted-host' },
     });
 
     const response = await postCookie(request('/api/xhs/login/cookie', {
@@ -252,6 +214,35 @@ describe('protected XHS route handlers', () => {
       valid: true,
       session_type: 'rednote_creator',
     });
+  });
+
+  it('rejects an error-shaped successful cookie response without reflecting it', async () => {
+    mocks.loginWithCookie.mockResolvedValue({
+      valid: false,
+      session_type: 'untrusted-session-type',
+      error: {
+        code: 'creator_session_invalid',
+        message: 'untrusted-message-canary',
+      },
+      cookie: 'submitted-cookie-canary',
+    });
+
+    const response = await postCookie(request('/api/xhs/login/cookie', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cookie: 'submitted-cookie-canary' }),
+    }));
+
+    expect(response.status).toBe(502);
+    const responseBody = await response.json();
+    expect(responseBody).toEqual({
+      error: {
+        code: 'creator_session_status_unknown',
+        message: 'Creator session status could not be read safely.',
+      },
+    });
+    expect(JSON.stringify(responseBody)).not.toContain('untrusted');
+    expect(JSON.stringify(responseBody)).not.toContain('submitted-cookie-canary');
   });
 
   it('preserves a sanitized invalid-session response without exposing the cookie', async () => {
@@ -276,14 +267,101 @@ describe('protected XHS route handlers', () => {
     expect(response.status).toBe(401);
     const responseBody = await response.json();
     expect(responseBody).toEqual({
-      valid: false,
-      session_type: 'rednote_creator',
-      relogin_required: true,
       error: {
         code: 'creator_session_invalid',
-        message: 'The creator session is invalid',
+        message: 'Creator session is not authenticated; re-login is required.',
       },
     });
     expect(JSON.stringify(responseBody)).not.toContain('sensitive=session');
+  });
+
+  it('preserves a fixed cookie-ingestion error without exposing upstream fields', async () => {
+    mocks.loginWithCookie.mockRejectedValue(new (
+      await import('@/lib/xhs-microservice')
+    ).XhsMicroserviceHttpError(400, JSON.stringify({
+      detail: {
+        code: 'cookie_header_control_character',
+        message: 'untrusted-message-canary',
+        input: 'untrusted-input-canary',
+      },
+      headers: 'untrusted-header-canary',
+    })));
+
+    const response = await postCookie(request('/api/xhs/login/cookie', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cookie: 'submitted-cookie-canary' }),
+    }));
+
+    expect(response.status).toBe(400);
+    const responseBody = await response.json();
+    expect(responseBody).toEqual({
+      error: {
+        code: 'cookie_header_control_character',
+        message: 'Cookie request header contains an unsupported control character.',
+      },
+    });
+    expect(JSON.stringify(responseBody)).not.toContain('untrusted');
+    expect(JSON.stringify(responseBody)).not.toContain('submitted-cookie-canary');
+  });
+
+  it('replaces unknown cookie failures and unrelated fields with the generic error', async () => {
+    mocks.loginWithCookie.mockRejectedValue(new (
+      await import('@/lib/xhs-microservice')
+    ).XhsMicroserviceHttpError(400, JSON.stringify({
+      valid: false,
+      session_type: 'untrusted-session-type',
+      relogin_required: true,
+      validation: {
+        method: 'untrusted-method',
+        host: 'untrusted-host',
+        path: 'untrusted-path',
+      },
+      detail: {
+        code: 'cookie_header_future_code',
+        message: 'untrusted-message-canary',
+        input: 'untrusted-input-canary',
+      },
+    })));
+
+    const response = await postCookie(request('/api/xhs/login/cookie', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cookie: 'submitted-cookie-canary' }),
+    }));
+
+    expect(response.status).toBe(400);
+    const responseBody = await response.json();
+    expect(responseBody).toEqual({
+      error: {
+        code: 'creator_session_status_unknown',
+        message: 'Creator session status could not be read safely.',
+      },
+    });
+    expect(JSON.stringify(responseBody)).not.toContain('untrusted');
+    expect(JSON.stringify(responseBody)).not.toContain('submitted-cookie-canary');
+  });
+
+  it('replaces non-HTTP exception messages with the generic error', async () => {
+    mocks.loginWithCookie.mockRejectedValue(
+      new SyntaxError('untrusted-response-fragment-canary is not valid JSON'),
+    );
+
+    const response = await postCookie(request('/api/xhs/login/cookie', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cookie: 'submitted-cookie-canary' }),
+    }));
+
+    expect(response.status).toBe(500);
+    const responseBody = await response.json();
+    expect(responseBody).toEqual({
+      error: {
+        code: 'creator_session_status_unknown',
+        message: 'Creator session status could not be read safely.',
+      },
+    });
+    expect(JSON.stringify(responseBody)).not.toContain('untrusted');
+    expect(JSON.stringify(responseBody)).not.toContain('submitted-cookie-canary');
   });
 });

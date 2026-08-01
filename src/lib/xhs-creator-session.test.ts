@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CREATOR_COOKIE_ERROR_MESSAGES,
   creatorCookieFailureMessage,
   creatorSessionStatusPresentation,
+  sanitizeCreatorCookieLoginErrorResponse,
+  sanitizeCreatorCookieLoginSuccessResponse,
   sanitizeCreatorSessionResponse,
 } from '@/lib/xhs-creator-session';
 
@@ -31,6 +34,147 @@ describe('creatorCookieFailureMessage', () => {
       'creator_session_validation_unavailable: Creator validation is temporarily unavailable ' +
       'Your existing session was not replaced. Try again later.',
     );
+  });
+
+  it.each(Object.entries(CREATOR_COOKIE_ERROR_MESSAGES))(
+    'uses the fixed safe message and recovery for %s',
+    (code, fixedMessage) => {
+      const payload = {
+        detail: {
+          code,
+          message: 'untrusted-message-canary',
+          input: 'untrusted-input-canary',
+        },
+        headers: 'untrusted-header-canary',
+      };
+
+      expect(sanitizeCreatorSessionResponse(payload)).toEqual({
+        error: { code, message: fixedMessage },
+      });
+      const rendered = creatorCookieFailureMessage(payload);
+      expect(rendered).toContain(`${code}: ${fixedMessage}`);
+      expect(rendered).toContain('Copy value');
+      expect(rendered).not.toContain('untrusted');
+    },
+  );
+
+  it('replaces unknown cookie codes and messages with the generic safe error', () => {
+    const normalized = sanitizeCreatorSessionResponse({
+      detail: {
+        code: 'cookie_header_future_code',
+        message: 'untrusted-message-canary',
+        submitted_name: 'untrusted-name-canary',
+      },
+    });
+
+    expect(normalized).toEqual({
+      error: {
+        code: 'creator_session_status_unknown',
+        message: 'Creator session status could not be read safely.',
+      },
+    });
+    expect(JSON.stringify(normalized)).not.toContain('untrusted');
+  });
+
+  it('does not expose default FastAPI validation input or metadata', () => {
+    const normalized = sanitizeCreatorSessionResponse({
+      detail: [{
+        type: 'string_type',
+        loc: ['body', 'cookie'],
+        msg: 'Input should be a valid string',
+        input: { submitted: 'untrusted-input-canary' },
+      }],
+    });
+
+    expect(normalized).toEqual({
+      error: {
+        code: 'creator_session_status_unknown',
+        message: 'Creator session status could not be read safely.',
+      },
+    });
+    expect(JSON.stringify(normalized)).not.toContain('untrusted');
+    expect(JSON.stringify(normalized)).not.toContain('string_type');
+  });
+
+  it('reduces cookie-login failures to one locally fixed error pair', () => {
+    expect(sanitizeCreatorCookieLoginErrorResponse({
+      valid: false,
+      session_type: 'untrusted-session-type',
+      relogin_required: true,
+      validation: {
+        method: 'untrusted-method',
+        host: 'untrusted-host',
+        path: 'untrusted-path',
+      },
+      error: {
+        code: 'creator_session_invalid',
+        message: 'untrusted-message-canary',
+        reason: 'http_403',
+        upstream_status: 403,
+      },
+    })).toEqual({
+      error: {
+        code: 'creator_session_invalid',
+        message: 'Creator session is not authenticated; re-login is required.',
+      },
+    });
+  });
+
+  it('reduces unknown cookie-login structures to the exact generic error', () => {
+    const normalized = sanitizeCreatorCookieLoginErrorResponse({
+      valid: false,
+      session_type: 'untrusted-session-type',
+      relogin_required: true,
+      validation: {
+        method: 'untrusted-method',
+        host: 'untrusted-host',
+        path: 'untrusted-path',
+      },
+      detail: {
+        code: 'cookie_header_future_code',
+        message: 'untrusted-message-canary',
+        input: 'untrusted-input-canary',
+      },
+    });
+
+    expect(normalized).toEqual({
+      error: {
+        code: 'creator_session_status_unknown',
+        message: 'Creator session status could not be read safely.',
+      },
+    });
+    expect(JSON.stringify(normalized)).not.toContain('untrusted');
+  });
+
+  it('returns only the exact cookie-login success contract', () => {
+    expect(sanitizeCreatorCookieLoginSuccessResponse({
+      valid: true,
+      session_type: 'rednote_creator',
+      cookie: 'untrusted-cookie-canary',
+      validation: { host: 'untrusted-host' },
+    })).toEqual({
+      valid: true,
+      session_type: 'rednote_creator',
+    });
+  });
+
+  it('rejects malformed cookie-login success payloads without reflecting fields', () => {
+    const normalized = sanitizeCreatorCookieLoginSuccessResponse({
+      valid: false,
+      session_type: 'untrusted-session-type',
+      error: {
+        code: 'creator_session_invalid',
+        message: 'untrusted-message-canary',
+      },
+    });
+
+    expect(normalized).toEqual({
+      error: {
+        code: 'creator_session_status_unknown',
+        message: 'Creator session status could not be read safely.',
+      },
+    });
+    expect(JSON.stringify(normalized)).not.toContain('untrusted');
   });
 
   it('allowlists and unwraps object-shaped detail errors', () => {
