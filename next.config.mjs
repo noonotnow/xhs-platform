@@ -8,6 +8,24 @@ const nextConfig = {
       },
     ],
   },
+  async rewrites() {
+    return {
+      beforeFiles: [
+        {
+          source: '/admin/api/ready-posts',
+          destination: '/api/xhs/ready-posts',
+        },
+        {
+          source: '/admin/api/ready-posts/:path*',
+          destination: '/api/xhs/ready-posts/:path*',
+        },
+        {
+          source: '/admin/api/xhs/:path*',
+          destination: '/api/xhs/:path*',
+        },
+      ],
+    };
+  },
 };
 
 export default nextConfig;

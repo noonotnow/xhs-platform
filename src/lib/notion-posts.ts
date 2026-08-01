@@ -1,6 +1,7 @@
 import { Client, isFullDatabase, isFullPage } from '@notionhq/client';
 import type {
   PageObjectResponse,
+  QueryDatabaseParameters,
   QueryDatabaseResponse,
   UpdatePageParameters,
 } from '@notionhq/client/build/src/api-endpoints';
@@ -12,6 +13,9 @@ type PropertyMap = Record<string, {
 }>;
 type PageProperty = PageObjectResponse['properties'][string];
 type PropertyUpdates = UpdatePageParameters['properties'];
+type DatabaseFilter = NonNullable<QueryDatabaseParameters['filter']>;
+
+const NOTION_TIMEOUT_MS = 10_000;
 
 const PROPERTY_ALIASES = {
   headline: ['Headline', 'Name', 'Title'],
@@ -60,7 +64,7 @@ function getClient() {
       503,
     );
   }
-  return new Client({ auth });
+  return new Client({ auth, timeoutMs: NOTION_TIMEOUT_MS });
 }
 
 function getDatabaseId() {
@@ -265,26 +269,77 @@ async function loadSchema(client: Client) {
   };
 }
 
-async function queryAllPages(client: Client) {
-  const pages: PageObjectResponse[] = [];
-  let cursor: string | undefined;
-  do {
-    const response: QueryDatabaseResponse = await client.databases.query({
-      database_id: getDatabaseId(),
-      page_size: 100,
-      start_cursor: cursor,
-      sorts: [{ timestamp: 'last_edited_time', direction: 'descending' }],
-    });
-    pages.push(...response.results.filter(isFullPage));
-    cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
-  } while (cursor);
-  return pages;
+export function buildReadyPostsQueryFilter(
+  propertyName: string | null,
+  propertyType: string | undefined,
+): DatabaseFilter | undefined {
+  return propertyName && propertyType === 'checkbox'
+    ? { property: propertyName, checkbox: { equals: true } }
+    : undefined;
 }
 
-export async function listReadyXhsPosts() {
+async function queryReadyCandidatePages(
+  client: Client,
+  schema: ResolvedSchema,
+  properties: PropertyMap,
+) {
+  const filter = buildReadyPostsQueryFilter(
+    schema.publishPacketReady,
+    schema.publishPacketReady
+      ? properties[schema.publishPacketReady]?.type
+      : undefined,
+  );
+  const response: QueryDatabaseResponse = await client.databases.query({
+    database_id: getDatabaseId(),
+    page_size: 100,
+    sorts: [{ timestamp: 'last_edited_time', direction: 'descending' }],
+    ...(filter ? { filter } : {}),
+  });
+  if (response.has_more) {
+    throw new NotionPostsError(
+      'More than 100 publish-ready posts were found; reduce the ready queue before retrying',
+      'READY_POSTS_LIMIT_EXCEEDED',
+      503,
+    );
+  }
+  return response.results.filter(isFullPage);
+}
+
+async function notionBoundary<T>(
+  boundary: 'schema' | 'query',
+  requestId: string,
+  operation: () => Promise<T>,
+) {
+  const startedAt = Date.now();
+  console.info('Ready posts Notion boundary started', { requestId, boundary });
+  try {
+    const result = await operation();
+    console.info('Ready posts Notion boundary completed', {
+      requestId,
+      boundary,
+      durationMs: Date.now() - startedAt,
+    });
+    return result;
+  } catch (error) {
+    console.error('Ready posts Notion boundary failed', {
+      requestId,
+      boundary,
+      durationMs: Date.now() - startedAt,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+}
+
+export async function listReadyXhsPosts(
+  { requestId = crypto.randomUUID() }: { requestId?: string } = {},
+) {
   const client = getClient();
-  const { resolved, duplicateAliases, warnings } = await loadSchema(client);
-  const posts = (await queryAllPages(client))
+  const schema = await notionBoundary('schema', requestId, () => loadSchema(client));
+  const { resolved, duplicateAliases, warnings, properties } = schema;
+  const pages = await notionBoundary('query', requestId, () =>
+    queryReadyCandidatePages(client, resolved, properties));
+  const posts = pages
     .filter((page) => isReadyRednotePost(page, resolved))
     .map((page) => mapReadyXhsPost(page, resolved, duplicateAliases));
   return { posts, warnings };

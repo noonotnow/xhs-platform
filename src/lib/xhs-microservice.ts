@@ -1,12 +1,33 @@
 const XHS_MICROSERVICE_URL = process.env.XHS_MICROSERVICE_URL;
 const XHS_API_KEY = process.env.XHS_API_KEY;
 
+function sanitizedMicroserviceDetail(responseBody: string) {
+  try {
+    const body: unknown = JSON.parse(responseBody);
+    if (
+      body &&
+      typeof body === 'object' &&
+      'detail' in body &&
+      typeof body.detail === 'string' &&
+      body.detail.trim()
+    ) {
+      return body.detail.trim();
+    }
+  } catch {
+    // Non-JSON upstream bodies are not safe to expose to the browser.
+  }
+  return 'XHS microservice request failed';
+}
+
 export class XhsMicroserviceHttpError extends Error {
+  readonly detail: string;
+
   constructor(
     readonly status: number,
     readonly responseBody: string,
   ) {
     super(`Microservice error ${status}: ${responseBody}`);
+    this.detail = sanitizedMicroserviceDetail(responseBody);
   }
 }
 
@@ -47,6 +68,12 @@ export interface PublishVideoUrlResponse {
   share_url: string;
 }
 
+export interface QrCodeResponse {
+  qr_id: string;
+  code: string;
+  url: string;
+}
+
 export async function publishVideoUrl(
   options: PublishVideoUrlOptions,
 ): Promise<PublishVideoUrlResponse> {
@@ -60,8 +87,8 @@ export async function publishVideoUrl(
   }) as Promise<PublishVideoUrlResponse>;
 }
 
-export async function getQRCode() {
-  return microserviceRequest('/login/qr');
+export async function getQRCode(): Promise<QrCodeResponse> {
+  return microserviceRequest('/login/qr') as Promise<QrCodeResponse>;
 }
 
 export async function checkLoginStatus() {

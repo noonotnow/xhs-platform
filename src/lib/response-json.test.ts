@@ -50,4 +50,20 @@ describe('responseJson', () => {
         'GET /admin/api/xhs/login/qr failed (401 Unauthorized): Unauthorized',
       );
   });
+
+  it('surfaces a sanitized microservice detail on non-2xx responses', async () => {
+    const response = new Response(JSON.stringify({
+      detail: 'Normal-account QR login is temporarily unavailable',
+    }), {
+      status: 503,
+      statusText: 'Service Unavailable',
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    await expect(responseJsonOrThrow(response, 'GET /admin/api/xhs/login/qr'))
+      .rejects.toThrow(
+        'GET /admin/api/xhs/login/qr failed (503 Service Unavailable): ' +
+        'Normal-account QR login is temporarily unavailable',
+      );
+  });
 });
