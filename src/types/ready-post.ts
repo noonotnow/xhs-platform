@@ -11,6 +11,7 @@ export interface ReadyXhsPost {
   mediaUrls: string[];
   imageUrls: string[];
   videoUrls: string[];
+  compatibilityTrialVideoUrls?: string[];
   thumbnailUrl: string;
   tags: string[];
   scheduledDate?: string;

@@ -94,12 +94,20 @@ describe('local publish job routes', () => {
   });
 
   it('claims one job and requires its rotating token for results', async () => {
-    mocks.claim.mockResolvedValue({ id: jobId, claimToken });
+    mocks.claim.mockResolvedValue({
+      id: jobId,
+      claimToken,
+      compatibilityTrial: 'unverified_mov',
+    });
     const claimResponse = await claimJob(request('/api/local-publish-jobs/next', {
       headers: { Authorization: `Bearer ${workerToken}` },
     }));
     expect(claimResponse.status).toBe(200);
-    await expect(claimResponse.json()).resolves.toMatchObject({ id: jobId, claimToken });
+    await expect(claimResponse.json()).resolves.toMatchObject({
+      id: jobId,
+      claimToken,
+      compatibilityTrial: 'unverified_mov',
+    });
 
     const result = {
       status: 'failed',

@@ -86,6 +86,21 @@ describe('local publish atomic claim storage', () => {
     expect(mocks.sql).toHaveBeenCalledTimes(1);
   });
 
+  it('returns the immutable MOV trial marker to the worker', async () => {
+    mocks.sql.mockResolvedValue({
+      rows: [{
+        ...claimedRow(),
+        snapshot: { ...snapshot, compatibilityTrial: 'unverified_mov' },
+      }],
+      rowCount: 1,
+    });
+
+    await expect(claimNextStoredLocalPublishJob(7_200)).resolves.toMatchObject({
+      compatibilityTrial: 'unverified_mov',
+      mediaUrl: snapshot.mediaUrl,
+    });
+  });
+
   it('returns the original job for an identical idempotency key', async () => {
     const reorderedSnapshot = {
       notionLastEditedTime: snapshot.notionLastEditedTime,

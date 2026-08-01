@@ -3,6 +3,7 @@ import { APIErrorCode, APIResponseError } from '@notionhq/client';
 import type { PageObjectResponse } from '@notionhq/client/build/src/api-endpoints';
 import {
   buildReadyPostsQueryFilter,
+  isCanonicalMediaMov,
   isCanonicalMediaVideo,
   buildPublishedProperties,
   mapReadyXhsPost,
@@ -132,6 +133,37 @@ function pageFixture(): PageObjectResponse {
 }
 
 describe('Notion Posts mapping', () => {
+  it('separates canonical MEDIA MOV registrations from certified MP4 videos', () => {
+    const fixture = pageFixture();
+    fixture.properties['Image URLs'] = {
+      id: 'media',
+      type: 'rich_text',
+      rich_text: richText(
+        'https://images.xhs.justlikekatie.com/videos/assets/6c/trial.mov',
+      ),
+    };
+    fixture.properties['Needs media'] = {
+      id: 'needs-media',
+      type: 'checkbox',
+      checkbox: true,
+    };
+    const { resolved, duplicateAliases } = resolvePostsSchema(
+      Object.fromEntries(
+        Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
+      ),
+    );
+    const post = mapReadyXhsPost(fixture, resolved, duplicateAliases);
+
+    expect(isCanonicalMediaMov(post.mediaUrls[0])).toBe(true);
+    expect(isCanonicalMediaVideo(post.mediaUrls[0])).toBe(false);
+    expect(post.videoUrls).toEqual([]);
+    expect(post.compatibilityTrialVideoUrls).toEqual([post.mediaUrls[0]]);
+    expect(post.publishBlockers).toEqual([
+      'Needs media is still checked',
+      'No canonical HTTPS Rednote media is attached',
+    ]);
+  });
+
   it('uses CREATE canonical aliases and exposes a publishable MEDIA video', () => {
     const fixture = pageFixture();
     const { resolved, duplicateAliases } = resolvePostsSchema(

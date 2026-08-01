@@ -1,4 +1,5 @@
 export type LocalPublishMediaType = 'image' | 'video';
+export type LocalPublishCompatibilityTrial = 'unverified_mov';
 export type LocalPublishJobStatus =
   | 'queued'
   | 'claimed'
@@ -16,6 +17,7 @@ export interface LocalPublishSnapshot {
   mediaType: LocalPublishMediaType;
   mediaIndex: number;
   mediaUrl: string;
+  compatibilityTrial?: LocalPublishCompatibilityTrial;
   thumbnailUrl?: string;
   scheduledDate?: string;
   notionLastEditedTime: string;
@@ -25,6 +27,7 @@ export interface LocalPublishJobSummary {
   id: string;
   notionPageId: string;
   status: LocalPublishJobStatus;
+  compatibilityTrial?: LocalPublishCompatibilityTrial;
   errorCode?: string;
   errorMessage?: string;
   noteId?: string;

@@ -47,6 +47,7 @@ type MediaChoice = {
   type: LocalPublishMediaType;
   index: number;
   url: string;
+  compatibilityTrial?: 'unverified_mov';
 };
 
 function tagsFromInput(value: string) {
@@ -58,18 +59,27 @@ function tagsFromInput(value: string) {
 
 function jobStatusCopy(job: LocalPublishJobSummary | undefined) {
   if (!job) return null;
+  const movTrial = job.compatibilityTrial === 'unverified_mov';
   if (job.status === 'queued') {
     return {
-      tone: 'pending',
-      title: 'Queued for the Mac worker',
-      detail: 'Waiting for the local browser worker. This post is not published.',
+      tone: movTrial ? 'warning' : 'pending',
+      title: movTrial
+        ? 'Unverified MOV staging trial queued'
+        : 'Queued for the Mac worker',
+      detail: movTrial
+        ? 'Waiting for Creator staging. MOV is not certified and this post is not published.'
+        : 'Waiting for the local browser worker. This post is not published.',
     };
   }
   if (job.status === 'claimed') {
     return {
-      tone: 'pending',
-      title: 'Claimed by the Mac worker',
-      detail: 'Browser staging or human review is in progress. This post is not published yet.',
+      tone: movTrial ? 'warning' : 'pending',
+      title: movTrial
+        ? 'Unverified MOV staging trial claimed'
+        : 'Claimed by the Mac worker',
+      detail: movTrial
+        ? 'Creator staging or human review is in progress. Publishing still requires the exact job approval.'
+        : 'Browser staging or human review is in progress. This post is not published yet.',
     };
   }
   if (job.status === 'ambiguous') {
@@ -121,12 +131,24 @@ export default function ReadyPostsPanel() {
     if (!selected) return [];
     return [
       ...selected.videoUrls.map((url, index) => ({ type: 'video' as const, index, url })),
+      ...(selected.compatibilityTrialVideoUrls ?? []).map((url, index) => ({
+        type: 'video' as const,
+        index,
+        url,
+        compatibilityTrial: 'unverified_mov' as const,
+      })),
       ...selected.imageUrls.map((url, index) => ({ type: 'image' as const, index, url })),
     ];
   }, [selected]);
   const selectedMedia = mediaChoices.find(
-    (choice) => `${choice.type}:${choice.index}` === mediaKey,
+    (choice) => `${choice.compatibilityTrial ?? choice.type}:${choice.index}` === mediaKey,
   ) ?? mediaChoices[0];
+  const isMovCompatibilityTrial = selectedMedia?.compatibilityTrial === 'unverified_mov';
+  const movTrialHasUnrelatedBlockers = selected?.publishBlockers.some(
+    (blocker) =>
+      blocker !== 'Needs media is still checked' &&
+      blocker !== 'No canonical HTTPS Rednote media is attached',
+  ) ?? true;
   const canonicalVideoUrl = selected ? getCanonicalVideoUrl(selected.videoUrls) : undefined;
   const currentJob = selected
     ? jobs.find((job) => job.notionPageId === selected.id)
@@ -221,9 +243,11 @@ export default function ReadyPostsPanel() {
     setFinalTags(selected?.tags.join(', ') ?? '');
     const firstChoice = selected?.videoUrls.length
       ? 'video:0'
-      : selected?.imageUrls.length
-        ? 'image:0'
-        : '';
+      : selected?.compatibilityTrialVideoUrls?.length
+        ? 'unverified_mov:0'
+        : selected?.imageUrls.length
+          ? 'image:0'
+          : '';
     setMediaKey(firstChoice);
     setCopyStatus(null);
   }, [selected]);
@@ -231,8 +255,13 @@ export default function ReadyPostsPanel() {
   async function queueSelected() {
     if (!selected || !selectedMedia) return;
     const confirmed = window.confirm(
-      `Queue "${finalTitle.trim()}" for the local RedNote browser?\n\n` +
-      'The Mac worker may stage this packet, but a human still reviews and approves the final publish in Creator. Queueing does not mark it Published.',
+      isMovCompatibilityTrial
+        ? `Queue "${finalTitle.trim()}" as an UNVERIFIED MOV COMPATIBILITY STAGING TRIAL?\n\n` +
+          'RedNote compatibility is not certified. The Mac worker may only stage the MOV. ' +
+          `If Creator accepts staging, a human must still type PUBLISH <jobId> before any Publish click. ` +
+          'A staging failure must be reported without clicking Publish.'
+        : `Queue "${finalTitle.trim()}" for the local RedNote browser?\n\n` +
+          'The Mac worker may stage this packet, but a human still reviews and approves the final publish in Creator. Queueing does not mark it Published.',
     );
     if (!confirmed) return;
 
@@ -252,6 +281,7 @@ export default function ReadyPostsPanel() {
           notionPageId: selected.id,
           lastEditedTime: selected.lastEditedTime,
           confirmed: true,
+          ...(isMovCompatibilityTrial ? { compatibilityTrialConfirmed: true } : {}),
           title: finalTitle,
           caption: finalCaption,
           tags: reviewedTags,
@@ -338,8 +368,12 @@ export default function ReadyPostsPanel() {
                   <span className={styles.postTitle}>{post.headline || 'Untitled post'}</span>
                   <span className={styles.postMeta}>
                     {job ? `Local job: ${job.status}` : post.status || 'No status'} ·{' '}
-                    {post.videoUrls.length + post.imageUrls.length} trusted asset
-                    {post.videoUrls.length + post.imageUrls.length === 1 ? '' : 's'}
+                    {post.videoUrls.length +
+                      (post.compatibilityTrialVideoUrls?.length ?? 0) +
+                      post.imageUrls.length} trusted asset
+                    {post.videoUrls.length +
+                      (post.compatibilityTrialVideoUrls?.length ?? 0) +
+                      post.imageUrls.length === 1 ? '' : 's'}
                   </span>
                 </button>
               );
@@ -382,6 +416,16 @@ export default function ReadyPostsPanel() {
                 <ul className={styles.blockers}>
                   {selected.publishBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}
                 </ul>
+              )}
+
+              {(selected.compatibilityTrialVideoUrls?.length ?? 0) > 0 && (
+                <div className={styles.compatibilityTrialWarning} role="note">
+                  <strong>Unverified MOV compatibility trial available</strong>
+                  <p>
+                    This trusted canonical MEDIA registration is still media-blocked. It is not
+                    certified or publish-ready. Select the MOV only to test Creator staging.
+                  </p>
+                </div>
               )}
 
               <section className={styles.localQueue} aria-labelledby="local-queue-heading">
@@ -447,16 +491,23 @@ export default function ReadyPostsPanel() {
                   <label className={styles.reviewField}>
                     <span>Trusted media</span>
                     <select
-                      value={selectedMedia ? `${selectedMedia.type}:${selectedMedia.index}` : ''}
+                      value={selectedMedia
+                        ? `${selectedMedia.compatibilityTrial ?? selectedMedia.type}:${selectedMedia.index}`
+                        : ''}
                       onChange={(event) => setMediaKey(event.target.value)}
                       disabled={hasActiveJob}
                     >
                       {mediaChoices.map((choice) => (
                         <option
-                          key={`${choice.type}:${choice.index}`}
-                          value={`${choice.type}:${choice.index}`}
+                          key={`${choice.compatibilityTrial ?? choice.type}:${choice.index}`}
+                          value={`${choice.compatibilityTrial ?? choice.type}:${choice.index}`}
                         >
-                          {choice.type === 'video' ? 'Video' : 'Image'} {choice.index + 1}
+                          {choice.compatibilityTrial
+                            ? 'MOV compatibility trial'
+                            : choice.type === 'video'
+                              ? 'Video'
+                              : 'Image'}{' '}
+                          {choice.index + 1}
                         </option>
                       ))}
                     </select>
@@ -471,14 +522,27 @@ export default function ReadyPostsPanel() {
                   disabled={
                     queueing ||
                     hasActiveJob ||
-                    selected.publishBlockers.length > 0 ||
+                    (isMovCompatibilityTrial
+                      ? movTrialHasUnrelatedBlockers
+                      : selected.publishBlockers.length > 0) ||
                     !selectedMedia ||
                     !finalTitle.trim() ||
                     !finalCaption.trim()
                   }
                 >
-                  {queueing ? 'Queueing…' : 'Queue for local RedNote browser'}
+                  {queueing
+                    ? 'Queueing…'
+                    : isMovCompatibilityTrial
+                      ? 'Queue unverified MOV staging trial'
+                      : 'Queue for local RedNote browser'}
                 </button>
+                {isMovCompatibilityTrial && (
+                  <p className={styles.compatibilityTrialNotice}>
+                    Staging trial only. Queueing does not certify MOV, clear media blockers, or
+                    authorize publishing. Publish still requires the exact worker-displayed
+                    <code> PUBLISH &lt;jobId&gt;</code> approval.
+                  </p>
+                )}
                 <p className={styles.queueNotice}>
                   Queueing and browser staging are not publication. The worker must wait for
                   explicit human approval, verify the exact live post, and report its note ID

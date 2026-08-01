@@ -199,6 +199,18 @@ export function isCanonicalMediaVideo(url: string) {
   }
 }
 
+export function isCanonicalMediaMov(url: string) {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' &&
+      parsed.hostname === 'images.xhs.justlikekatie.com' &&
+      parsed.pathname.startsWith('/videos/assets/') &&
+      parsed.pathname.toLowerCase().endsWith('.mov');
+  } catch {
+    return false;
+  }
+}
+
 export function isCanonicalMediaImage(url: string) {
   try {
     const parsed = new URL(url);
@@ -254,6 +266,7 @@ export function mapReadyXhsPost(
     mediaUrls,
     imageUrls: mediaUrls.filter(isCanonicalMediaImage),
     videoUrls: mediaUrls.filter(isCanonicalMediaVideo),
+    compatibilityTrialVideoUrls: mediaUrls.filter(isCanonicalMediaMov),
     thumbnailUrl: urls(property(page, schema, 'thumbnail'))[0] ?? '',
     tags: values(property(page, schema, 'tags')),
     scheduledDate: date(property(page, schema, 'scheduledDate')) || undefined,

@@ -81,6 +81,9 @@ export function jobSummary(job: StoredLocalPublishJob): LocalPublishJobSummary {
     id: job.id,
     notionPageId: job.notionPageId,
     status: job.status,
+    ...(job.snapshot.compatibilityTrial
+      ? { compatibilityTrial: job.snapshot.compatibilityTrial }
+      : {}),
     ...(job.errorCode ? { errorCode: job.errorCode } : {}),
     ...(job.errorMessage ? { errorMessage: job.errorMessage } : {}),
     ...(job.noteId ? { noteId: job.noteId } : {}),
@@ -218,6 +221,9 @@ export async function claimNextStoredLocalPublishJob(
     platform: job.snapshot.platform,
     mediaType: job.snapshot.mediaType,
     mediaUrl: job.snapshot.mediaUrl,
+    ...(job.snapshot.compatibilityTrial
+      ? { compatibilityTrial: job.snapshot.compatibilityTrial }
+      : {}),
     ...(job.snapshot.thumbnailUrl ? { thumbnailUrl: job.snapshot.thumbnailUrl } : {}),
     ...(job.snapshot.scheduledDate ? { scheduledDate: job.snapshot.scheduledDate } : {}),
     claimToken: row.claim_token,

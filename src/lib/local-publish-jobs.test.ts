@@ -89,6 +89,20 @@ describe('local publish job orchestration', () => {
     expect(getPost).toHaveBeenCalledOnce();
   });
 
+  it('does not reuse a normal idempotency request for a MOV trial', async () => {
+    const getPost = vi.fn();
+    const findByIdempotencyKey = vi.fn().mockResolvedValue(stored('queued'));
+    const insert = vi.fn();
+
+    await expect(queueLocalPublishJob(
+      { ...queueBody, compatibilityTrialConfirmed: true },
+      '44444444-4444-4444-8444-444444444444',
+      { getPost, findByIdempotencyKey, insert },
+    )).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+    expect(getPost).not.toHaveBeenCalled();
+    expect(insert).not.toHaveBeenCalled();
+  });
+
   it('accepts only the exact RedNote explore URL for the same note ID', () => {
     expect(parseLocalPublishWorkerResult({
       status: 'succeeded',

@@ -159,7 +159,10 @@ export async function queueLocalPublishJob(
       existing.snapshot.caption === input.caption &&
       isDeepStrictEqual(existing.snapshot.tags, input.tags) &&
       existing.snapshot.mediaType === input.media.type &&
-      existing.snapshot.mediaIndex === input.media.index;
+      existing.snapshot.mediaIndex === input.media.index &&
+      existing.snapshot.compatibilityTrial === (
+        input.compatibilityTrialConfirmed ? 'unverified_mov' : undefined
+      );
     if (!matches) {
       throw new LocalPublishJobError(
         'Idempotency-Key was already used for a different request',

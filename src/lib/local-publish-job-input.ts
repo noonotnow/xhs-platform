@@ -1,5 +1,6 @@
 import {
   isCanonicalMediaImage,
+  isCanonicalMediaMov,
   isCanonicalMediaVideo,
 } from '@/lib/notion-posts';
 import type { ReadyXhsPost } from '@/types/ready-post';
@@ -13,6 +14,12 @@ const MAX_CAPTION_LENGTH = 5_000;
 const MAX_TAG_LENGTH = 100;
 const MAX_TAGS = 20;
 const CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+const MOV_COMPATIBILITY_BLOCKER = 'No canonical HTTPS Rednote media is attached';
+const MOV_MEDIA_STATE_BLOCKER = 'Needs media is still checked';
+const MOV_TRIAL_ALLOWED_BLOCKERS = new Set([
+  MOV_COMPATIBILITY_BLOCKER,
+  MOV_MEDIA_STATE_BLOCKER,
+]);
 
 export class LocalPublishJobError extends Error {
   constructor(
@@ -83,6 +90,7 @@ export interface QueueLocalPublishInput {
   notionPageId: string;
   lastEditedTime: string;
   confirmed: true;
+  compatibilityTrialConfirmed: boolean;
   title: string;
   caption: string;
   tags: string[];
@@ -110,6 +118,7 @@ export function parseQueueLocalPublishInput(value: unknown): QueueLocalPublishIn
     notionPageId,
     lastEditedTime,
     confirmed: true,
+    compatibilityTrialConfirmed: body.compatibilityTrialConfirmed === true,
     title: cleanText(body.title, 'title', MAX_TITLE_LENGTH),
     caption: cleanText(body.caption, 'caption', MAX_CAPTION_LENGTH),
     tags: cleanTags(body.tags),
@@ -128,19 +137,44 @@ export function buildLocalPublishSnapshot(
       409,
     );
   }
-  if (post.publishBlockers.length > 0) {
+  const compatibilityTrial = input.compatibilityTrialConfirmed;
+  if (!compatibilityTrial && post.publishBlockers.length > 0) {
     throw new LocalPublishJobError(
       `Post cannot be queued: ${post.publishBlockers.join('; ')}`,
       'PUBLISH_BLOCKED',
       422,
     );
   }
+  if (compatibilityTrial) {
+    const unrelatedBlockers = post.publishBlockers.filter(
+      (blocker) => !MOV_TRIAL_ALLOWED_BLOCKERS.has(blocker),
+    );
+    if (
+      !post.publishPacketReady ||
+      unrelatedBlockers.length > 0
+    ) {
+      const blockers = unrelatedBlockers.length > 0
+        ? unrelatedBlockers.join('; ')
+        : 'the packet has not completed review';
+      throw new LocalPublishJobError(
+        `MOV compatibility trial cannot be queued: ${blockers}`,
+        'COMPATIBILITY_TRIAL_BLOCKED',
+        422,
+      );
+    }
+  }
 
-  const candidates = input.media.type === 'video' ? post.videoUrls : post.imageUrls;
+  const candidates = compatibilityTrial
+    ? post.compatibilityTrialVideoUrls ?? []
+    : input.media.type === 'video'
+      ? post.videoUrls
+      : post.imageUrls;
   const mediaUrl = candidates[input.media.index];
-  const validMedia = input.media.type === 'video'
-    ? isCanonicalMediaVideo(mediaUrl ?? '')
-    : isCanonicalMediaImage(mediaUrl ?? '');
+  const validMedia = compatibilityTrial
+    ? input.media.type === 'video' && isCanonicalMediaMov(mediaUrl ?? '')
+    : input.media.type === 'video'
+      ? isCanonicalMediaVideo(mediaUrl ?? '')
+      : isCanonicalMediaImage(mediaUrl ?? '');
   if (!mediaUrl || !validMedia) {
     throw new LocalPublishJobError(
       'The selected media is not a trusted canonical HTTPS asset',
@@ -162,6 +196,7 @@ export function buildLocalPublishSnapshot(
     mediaType: input.media.type,
     mediaIndex: input.media.index,
     mediaUrl,
+    ...(compatibilityTrial ? { compatibilityTrial: 'unverified_mov' as const } : {}),
     ...(thumbnailUrl ? { thumbnailUrl } : {}),
     ...(post.scheduledDate ? { scheduledDate: post.scheduledDate } : {}),
     notionLastEditedTime: post.lastEditedTime,

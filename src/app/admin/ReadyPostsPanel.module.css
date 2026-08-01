@@ -182,6 +182,39 @@
   color: #9f1239;
 }
 
+.compatibilityTrialWarning,
+.compatibilityTrialNotice {
+  color: #713f12;
+  background: #fffbeb;
+  border: 1px solid #f59e0b;
+  border-radius: 8px;
+}
+
+.compatibilityTrialWarning {
+  margin: 10px 0 14px;
+  padding: 11px 12px;
+}
+
+.compatibilityTrialWarning strong {
+  display: block;
+  font-size: 0.875rem;
+}
+
+.compatibilityTrialWarning p,
+.compatibilityTrialNotice {
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.compatibilityTrialWarning p {
+  margin: 4px 0 0;
+}
+
+.compatibilityTrialNotice {
+  margin: 10px 0 0;
+  padding: 9px 10px;
+}
+
 .publishButton {
   padding: 10px 16px;
   color: #fff;

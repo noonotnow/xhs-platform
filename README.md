@@ -91,6 +91,15 @@ and not `Published`, and builds an immutable snapshot from canonical HTTPS media
 Client-provided media URLs and Notion metadata are never accepted. The operator
 can edit only the final reviewed title, caption, tags, and trusted media choice.
 
+Trusted canonical MEDIA `.mov` registrations remain compatibility-unverified and
+are not added to the normal ready video set. Admin exposes a separate warning and
+staging-trial action only for these MOV assets. Queueing that lane requires a
+second explicit compatibility-trial confirmation; the server re-reads Notion and
+accepts only a reviewed packet whose blockers are limited to `Needs media` and
+the absence of certified canonical media. Missing title/caption, incomplete
+packet review, untrusted media, schema ambiguity, and every unrelated blocker
+still fail closed. Normal MP4 and image readiness rules are unchanged.
+
 Apply the required queue migration before deploying the publishing pipeline:
 
 ```bash
@@ -116,11 +125,16 @@ The local worker contract is:
 1. `GET /api/local-publish-jobs/next` with
    `Authorization: Bearer <LOCAL_PUBLISH_WORKER_TOKEN>`. HTTP 204 means the queue
    is empty. A claim returns the immutable publish fields plus `claimToken` and
-   `claimExpiresAt`.
+   `claimExpiresAt`. An unverified MOV trial additionally returns
+   `"compatibilityTrial":"unverified_mov"`; normal jobs omit this field.
 2. Stage the asset and reviewed copy at `https://creator.rednote.com`, wait for
    explicit human approval, publish, confirm `/publish/success`, find the exact
    post in `/new/note-manager`, and verify
    `https://www.rednote.com/explore/{noteId}`.
+   For `unverified_mov`, a Creator staging rejection must be reported as failed
+   without clicking Publish. If staging succeeds, the worker must still wait for
+   the existing exact `PUBLISH <jobId>` human approval before any Publish click;
+   it must never auto-publish.
 3. `POST /api/local-publish-jobs/{id}/result` with the bearer token and
    `X-Local-Publish-Claim-Token: <claimToken>`. The only accepted bodies are
    `{"status":"succeeded","noteId":"...","shareUrl":"https://www.rednote.com/explore/..."}`
@@ -136,6 +150,10 @@ published `Next action`) before the job becomes `succeeded`. If Notion backfill
 fails, retry the identical success report with the same claim token; do not
 publish again. Queued, claimed, failed, expired, or malformed results never mark
 Notion as Published.
+
+The compatibility marker is stored inside the immutable JSONB job snapshot and
+shown in the operator audit. No additional database migration is required beyond
+`003_local_publish_jobs.sql`.
 
 Posts created outside this queue can be reconciled by the same trusted worker:
 
