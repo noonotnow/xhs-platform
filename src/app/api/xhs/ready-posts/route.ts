@@ -5,6 +5,7 @@ import { requireXhsOperator } from '@/lib/xhs-operator-auth';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 export const runtime = 'nodejs';
+export const maxDuration = 30;
 
 const NO_STORE_HEADERS = {
   'Cache-Control': 'private, no-store, max-age=0, must-revalidate',
@@ -13,16 +14,34 @@ const NO_STORE_HEADERS = {
 };
 
 export async function GET(request: NextRequest) {
+  const requestId = crypto.randomUUID();
+  console.info('Ready posts request started', {
+    requestId,
+    path: request.nextUrl.pathname,
+  });
   const unauthorized = await requireXhsOperator(request);
-  if (unauthorized) return unauthorized;
+  if (unauthorized) {
+    console.warn('Ready posts request unauthorized', { requestId });
+    return unauthorized;
+  }
 
   try {
-    return NextResponse.json(await listReadyXhsPosts(), { headers: NO_STORE_HEADERS });
+    const result = await listReadyXhsPosts({ requestId });
+    console.info('Ready posts request completed', {
+      requestId,
+      postCount: result.posts.length,
+    });
+    return NextResponse.json(result, { headers: NO_STORE_HEADERS });
   } catch (error) {
     const known = error instanceof NotionPostsError
       ? error
       : new NotionPostsError('Failed to load ready posts', 'READY_POSTS_LOAD_FAILED', 502);
-    if (!(error instanceof NotionPostsError)) console.error('Ready posts load failed:', error);
+    console.error('Ready posts request failed', {
+      requestId,
+      code: known.code,
+      status: known.status,
+      error: error instanceof Error ? error.message : String(error),
+    });
     return NextResponse.json(
       { error: known.message, code: known.code },
       { status: known.status, headers: NO_STORE_HEADERS },

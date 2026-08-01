@@ -1,9 +1,22 @@
 import { Pool, QueryResultRow } from 'pg';
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || process.env.POSTGRES_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined,
-});
+let pool: Pool | null = null;
+
+export function getPool() {
+  if (pool) return pool;
+
+  const connectionString = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+  if (!connectionString) {
+    throw new Error('DATABASE_URL or POSTGRES_URL is not configured');
+  }
+  pool = new Pool({
+    connectionString,
+    ssl: process.env.NODE_ENV === 'production'
+      ? { rejectUnauthorized: false }
+      : undefined,
+  });
+  return pool;
+}
 
 /**
  * Tagged template literal that mirrors the @vercel/postgres `sql` interface.
@@ -18,7 +31,5 @@ export async function sql<T extends QueryResultRow = QueryResultRow>(
     (acc, str, i) => acc + (i > 0 ? `$${i}` : '') + str,
     '',
   );
-  return pool.query<T>(text, values);
+  return getPool().query<T>(text, values);
 }
-
-export { pool };

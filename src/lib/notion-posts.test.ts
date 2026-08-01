@@ -1,12 +1,27 @@
 import { describe, expect, it } from 'vitest';
 import type { PageObjectResponse } from '@notionhq/client/build/src/api-endpoints';
 import {
+  buildReadyPostsQueryFilter,
   isCanonicalMediaVideo,
   buildPublishedProperties,
   mapReadyXhsPost,
   publishedNextAction,
   resolvePostsSchema,
 } from '@/lib/notion-posts';
+
+describe('buildReadyPostsQueryFilter', () => {
+  it('limits the Notion query to publish-ready candidates', () => {
+    expect(buildReadyPostsQueryFilter('Publish packet ready', 'checkbox')).toEqual({
+      property: 'Publish packet ready',
+      checkbox: { equals: true },
+    });
+  });
+
+  it('falls back to client-side filtering for an incompatible schema', () => {
+    expect(buildReadyPostsQueryFilter('Publish packet ready', 'formula')).toBeUndefined();
+    expect(buildReadyPostsQueryFilter(null, undefined)).toBeUndefined();
+  });
+});
 
 function richText(content: string) {
   return [{
