@@ -4,6 +4,7 @@ import { useState, useRef, useCallback } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import ReadyPostsPanel from './ReadyPostsPanel';
 import { responseJsonOrThrow } from '@/lib/response-json';
+import { canonicalCreatorQrUrl } from '@/lib/xhs-qr';
 
 const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const VIDEO_TYPES = ['video/mp4', 'video/quicktime', 'video/webm'];
@@ -13,6 +14,7 @@ const MAX_IMAGES = 9;
 
 interface ApiError {
   error?: string;
+  detail?: string;
 }
 
 interface SessionResponse extends ApiError {
@@ -105,10 +107,8 @@ export default function AdminPage() {
     try {
       const res = await fetch(path, { headers });
       const data = await responseJsonOrThrow<QrResponse>(res, `GET ${path}`);
-      if (typeof data.url !== 'string' || !data.url) {
-        throw new Error(`GET ${path} response did not include a QR URL.`);
-      }
-      setQrData(data);
+      const url = canonicalCreatorQrUrl(data.url);
+      setQrData({ url });
       setStatus('Scan the QR code with your XHS app');
       setStatusType('info');
       pollLoginStatus();
@@ -119,15 +119,17 @@ export default function AdminPage() {
   }
 
   async function loginWithCookie() {
-    if (!cookieStr.trim()) return;
+    const cookie = cookieStr.trim();
+    if (!cookie) return;
     const path = '/admin/api/xhs/login/cookie';
+    setCookieStr('');
     setStatus('Saving cookie...');
     setStatusType('info');
     try {
       const res = await fetch(path, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ cookie: cookieStr }),
+        body: JSON.stringify({ cookie }),
       });
       await responseJsonOrThrow<ApiError>(res, `POST ${path}`);
       setStatus('Cookie saved! ✅ Check session to verify.');
@@ -462,13 +464,20 @@ export default function AdminPage() {
 
       {/* Cookie Login (manual) */}
       <section style={{ marginBottom: 24, padding: 16, background: '#f9f9f9', borderRadius: 8, border: '1px solid #e0e0e0' }}>
-        <h2>2. XHS Cookie Login (easiest)</h2>
+        <h2>2. Manual Rednote cookie login</h2>
         <p style={{ fontSize: 13, color: '#555', marginBottom: 8 }}>
-          Go to <a href="https://www.xiaohongshu.com" target="_blank" rel="noreferrer">xiaohongshu.com</a> → log in → 
-          open DevTools (F12) → Console → type <code>document.cookie</code> → copy the result
+          Sign in at{' '}
+          <a href="https://creator.rednote.com/login" target="_blank" rel="noreferrer">
+            creator.rednote.com/login
+          </a>
+          . In DevTools Network, select a fresh authenticated request and copy only
+          {' '}Request Headers → Cookie in <code>name=value; name=value</code> format.
         </p>
         <textarea
-          placeholder="Paste your XHS cookie string here..."
+          aria-label="Fresh authenticated Request Headers Cookie value"
+          autoComplete="off"
+          spellCheck={false}
+          placeholder="name=value; name=value"
           value={cookieStr}
           onChange={e => setCookieStr(e.target.value)}
           style={{ width: '100%', padding: 8, marginBottom: 8, minHeight: 60, fontSize: 12 }}
@@ -495,9 +504,6 @@ export default function AdminPage() {
               </button>
               <span style={{ fontSize: 12, color: '#666' }}>QR codes expire in ~60s</span>
             </div>
-            <p style={{ marginTop: 8, fontSize: 12, color: '#666', wordBreak: 'break-all' }}>
-              Fallback URL: <a href={qrData.url}>{qrData.url}</a>
-            </p>
           </div>
         )}
       </section>

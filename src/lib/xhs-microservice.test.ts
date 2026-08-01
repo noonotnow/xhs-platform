@@ -57,4 +57,26 @@ describe('publishVideoUrl', () => {
       caption: 'Caption',
     })).rejects.toThrow('Microservice error 409: not logged in');
   });
+
+  it('extracts only sanitized JSON detail for browser-facing errors', async () => {
+    vi.stubEnv('XHS_MICROSERVICE_URL', 'https://microservice.example');
+    vi.stubEnv('XHS_API_KEY', 'server-secret');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        detail: 'Normal-account QR login is temporarily unavailable',
+        internal: 'do not expose',
+      }), { status: 503 }),
+    ));
+    const { getQRCode, XhsMicroserviceHttpError } =
+      await import('@/lib/xhs-microservice');
+
+    try {
+      await getQRCode();
+      throw new Error('Expected getQRCode to fail');
+    } catch (error) {
+      expect(error).toBeInstanceOf(XhsMicroserviceHttpError);
+      expect((error as InstanceType<typeof XhsMicroserviceHttpError>).detail)
+        .toBe('Normal-account QR login is temporarily unavailable');
+    }
+  });
 });

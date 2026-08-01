@@ -38,9 +38,10 @@ export async function responseJsonOrThrow<T extends object>(
   const body = await responseJson<T>(response, requestLabel);
   if (response.ok) return body;
 
-  const error = 'error' in body && typeof body.error === 'string'
-    ? body.error
-    : 'Request failed';
+  const error =
+    ('error' in body && typeof body.error === 'string' && body.error.trim()) ||
+    ('detail' in body && typeof body.detail === 'string' && body.detail.trim()) ||
+    'Request failed';
   throw new Error(
     `${requestLabel} failed (${response.status} ${response.statusText || 'Unknown status'}): ${error}`,
   );

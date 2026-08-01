@@ -38,6 +38,17 @@ vi.mock('@/lib/ready-post-publisher', () => ({
 }));
 
 vi.mock('@/lib/xhs-microservice', () => ({
+  XhsMicroserviceHttpError: class XhsMicroserviceHttpError extends Error {
+    readonly detail: string;
+
+    constructor(
+      readonly status: number,
+      readonly responseBody: string,
+    ) {
+      super(`Microservice error ${status}: ${responseBody}`);
+      this.detail = 'Normal-account QR login is temporarily unavailable';
+    }
+  },
   getSessionStatus: mocks.getSessionStatus,
   getQRCode: mocks.getQrCode,
   checkLoginStatus: mocks.checkLoginStatus,
@@ -114,16 +125,56 @@ describe('protected XHS route handlers', () => {
   });
 
   it('executes QR start and status handlers', async () => {
-    mocks.getQrCode.mockResolvedValue({ qr_id: 'id', code: 'code', url: 'https://qr' });
+    mocks.getQrCode.mockResolvedValue({
+      qr_id: 'id',
+      code: 'code',
+      url: 'xhsdiscover://login/qr?code=creator',
+    });
     mocks.checkLoginStatus.mockResolvedValue({ code_status: 0, login_info: null });
 
     const qrResponse = await getQrCode(request('/api/xhs/login/qr'));
     const statusResponse = await getLoginStatus(request('/api/xhs/login/status'));
 
     expect(qrResponse.status).toBe(200);
-    await expect(qrResponse.json()).resolves.toMatchObject({ url: 'https://qr' });
+    await expect(qrResponse.json()).resolves.toMatchObject({
+      url: 'xhsdiscover://login/qr?code=creator',
+    });
     expect(statusResponse.status).toBe(200);
     await expect(statusResponse.json()).resolves.toMatchObject({ code_status: 0 });
+  });
+
+  it('rejects merchant QR targets without returning the URL', async () => {
+    mocks.getQrCode.mockResolvedValue({
+      qr_id: 'id',
+      code: 'code',
+      url: encodeURIComponent('xhsdiscover://login/qr?redirect=xymerchant'),
+    });
+
+    const response = await getQrCode(request('/api/xhs/login/qr'));
+    const body = await response.json();
+
+    expect(response.status).toBe(502);
+    expect(body).toEqual({
+      detail:
+        'Merchant/Qianfan login is not supported for this Rednote creator account. ' +
+        'Use manual cookie login from https://creator.rednote.com/login.',
+    });
+    expect(JSON.stringify(body)).not.toContain('xymerchant');
+  });
+
+  it('does not expose unexpected QR failures', async () => {
+    mocks.getQrCode.mockRejectedValue(
+      new SyntaxError('Unexpected token in secret-token-response'),
+    );
+
+    const response = await getQrCode(request('/api/xhs/login/qr'));
+    const body = await response.json();
+
+    expect(response.status).toBe(502);
+    expect(body).toEqual({
+      detail: 'Unable to start normal-account Rednote QR login.',
+    });
+    expect(JSON.stringify(body)).not.toContain('secret-token');
   });
 
   it('executes the cookie handler without exposing the cookie to the browser response', async () => {
