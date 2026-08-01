@@ -59,24 +59,49 @@ describe('publishVideoUrl', () => {
   });
 
   it('extracts only sanitized JSON detail for browser-facing errors', async () => {
-    vi.stubEnv('XHS_MICROSERVICE_URL', 'https://microservice.example');
-    vi.stubEnv('XHS_API_KEY', 'server-secret');
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({
-        detail: 'Normal-account QR login is temporarily unavailable',
-        internal: 'do not expose',
-      }), { status: 503 }),
-    ));
-    const { getQRCode, XhsMicroserviceHttpError } =
-      await import('@/lib/xhs-microservice');
+    const { XhsMicroserviceHttpError } = await import('@/lib/xhs-microservice');
+    const error = new XhsMicroserviceHttpError(503, JSON.stringify({
+      detail: 'Normal-account QR login is temporarily unavailable',
+      internal: 'do not expose',
+    }));
 
-    try {
-      await getQRCode();
-      throw new Error('Expected getQRCode to fail');
-    } catch (error) {
-      expect(error).toBeInstanceOf(XhsMicroserviceHttpError);
-      expect((error as InstanceType<typeof XhsMicroserviceHttpError>).detail)
-        .toBe('Normal-account QR login is temporarily unavailable');
-    }
+    expect(error.detail)
+      .toBe('Normal-account QR login is temporarily unavailable');
+  });
+
+  it('allowlists the structured creator-session failure contract', async () => {
+    const { XhsMicroserviceHttpError } = await import('@/lib/xhs-microservice');
+    const error = new XhsMicroserviceHttpError(401, JSON.stringify({
+      valid: false,
+      session_type: 'rednote_creator',
+      validation: {
+        method: 'creator_profile',
+        host: 'creator.rednote.com',
+        path: '/api/galaxy/creator/home/personal_info',
+      },
+      relogin_required: true,
+      error: {
+        code: 'creator_session_invalid',
+        message: 'The creator session is invalid',
+      },
+      cookie: 'must-not-leak',
+      internal: 'must-not-leak',
+    }));
+
+    expect(error.safeBody).toEqual({
+      valid: false,
+      session_type: 'rednote_creator',
+      validation: {
+        method: 'creator_profile',
+        host: 'creator.rednote.com',
+        path: '/api/galaxy/creator/home/personal_info',
+      },
+      relogin_required: true,
+      error: {
+        code: 'creator_session_invalid',
+        message: 'The creator session is invalid',
+      },
+    });
+    expect(JSON.stringify(error.safeBody)).not.toContain('must-not-leak');
   });
 });

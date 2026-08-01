@@ -1,33 +1,92 @@
 const XHS_MICROSERVICE_URL = process.env.XHS_MICROSERVICE_URL;
 const XHS_API_KEY = process.env.XHS_API_KEY;
 
-function sanitizedMicroserviceDetail(responseBody: string) {
+export interface SafeXhsMicroserviceError {
+  valid?: boolean;
+  session_type?: string;
+  relogin_required?: boolean;
+  validation?: {
+    method?: string;
+    host?: string;
+    path?: string;
+  };
+  error?: {
+    code?: string;
+    message?: string;
+  };
+  detail?: string;
+}
+
+function nonEmptyString(value: unknown) {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function sanitizedMicroserviceError(responseBody: string): SafeXhsMicroserviceError {
   try {
     const body: unknown = JSON.parse(responseBody);
-    if (
-      body &&
-      typeof body === 'object' &&
-      'detail' in body &&
-      typeof body.detail === 'string' &&
-      body.detail.trim()
-    ) {
-      return body.detail.trim();
+    if (!body || typeof body !== 'object') {
+      return { detail: 'XHS microservice request failed' };
     }
+
+    const record = body as Record<string, unknown>;
+    const validation = record.validation && typeof record.validation === 'object'
+      ? record.validation as Record<string, unknown>
+      : undefined;
+    const error = record.error && typeof record.error === 'object'
+      ? record.error as Record<string, unknown>
+      : undefined;
+
+    return {
+      ...(typeof record.valid === 'boolean' ? { valid: record.valid } : {}),
+      ...(nonEmptyString(record.session_type)
+        ? { session_type: nonEmptyString(record.session_type) }
+        : {}),
+      ...(typeof record.relogin_required === 'boolean'
+        ? { relogin_required: record.relogin_required }
+        : {}),
+      ...(validation ? {
+        validation: {
+          ...(nonEmptyString(validation.method)
+            ? { method: nonEmptyString(validation.method) }
+            : {}),
+          ...(nonEmptyString(validation.host)
+            ? { host: nonEmptyString(validation.host) }
+            : {}),
+          ...(nonEmptyString(validation.path)
+            ? { path: nonEmptyString(validation.path) }
+            : {}),
+        },
+      } : {}),
+      ...(error ? {
+        error: {
+          ...(nonEmptyString(error.code) ? { code: nonEmptyString(error.code) } : {}),
+          ...(nonEmptyString(error.message)
+            ? { message: nonEmptyString(error.message) }
+            : {}),
+        },
+      } : {}),
+      ...(nonEmptyString(record.detail) ? { detail: nonEmptyString(record.detail) } : {}),
+    };
   } catch {
     // Non-JSON upstream bodies are not safe to expose to the browser.
   }
-  return 'XHS microservice request failed';
+  return { detail: 'XHS microservice request failed' };
 }
 
 export class XhsMicroserviceHttpError extends Error {
   readonly detail: string;
+  readonly safeBody: SafeXhsMicroserviceError;
 
   constructor(
     readonly status: number,
     readonly responseBody: string,
   ) {
     super(`Microservice error ${status}: ${responseBody}`);
-    this.detail = sanitizedMicroserviceDetail(responseBody);
+    this.safeBody = sanitizedMicroserviceError(responseBody);
+    this.detail =
+      this.safeBody.error?.message ||
+      this.safeBody.detail ||
+      'XHS microservice request failed';
   }
 }
 
@@ -68,12 +127,6 @@ export interface PublishVideoUrlResponse {
   share_url: string;
 }
 
-export interface QrCodeResponse {
-  qr_id: string;
-  code: string;
-  url: string;
-}
-
 export async function publishVideoUrl(
   options: PublishVideoUrlOptions,
 ): Promise<PublishVideoUrlResponse> {
@@ -85,14 +138,6 @@ export async function publishVideoUrl(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(options),
   }) as Promise<PublishVideoUrlResponse>;
-}
-
-export async function getQRCode(): Promise<QrCodeResponse> {
-  return microserviceRequest('/login/qr') as Promise<QrCodeResponse>;
-}
-
-export async function checkLoginStatus() {
-  return microserviceRequest('/login/status');
 }
 
 export async function getSessionStatus() {
