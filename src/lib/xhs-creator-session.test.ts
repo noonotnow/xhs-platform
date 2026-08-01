@@ -169,4 +169,84 @@ describe('creatorCookieFailureMessage', () => {
         'Creator session status could not be read safely.',
     });
   });
+
+  it.each([
+    ['redirect', 'creator validation redirected to sign-in'],
+    ['http_401', 'creator validation returned HTTP 401'],
+    ['http_403', 'creator validation returned HTTP 403'],
+    ['api_session_expired', 'Rednote reported the creator session expired'],
+  ] as const)('renders the allowlisted %s invalid-session reason', (reason, description) => {
+    const presentation = creatorSessionStatusPresentation({
+      valid: false,
+      relogin_required: true,
+      error: {
+        code: 'creator_session_invalid',
+        message: 'Creator session is not authenticated; re-login is required.',
+        reason,
+        upstream_status: reason === 'redirect' ? 302 : 200,
+        upstream_code: reason === 'api_session_expired' ? -100 : 0,
+      },
+    });
+
+    expect(presentation.message).toContain(`Diagnostic: ${reason} - ${description}`);
+    expect(presentation.message).toContain(
+      `upstream status ${reason === 'redirect' ? 302 : 200}`,
+    );
+    expect(presentation.message).toContain(
+      `upstream code ${reason === 'api_session_expired' ? -100 : 0}`,
+    );
+    expect(presentation.message).toContain(
+      'Sign in again at https://creator.rednote.com/login',
+    );
+  });
+
+  it('drops unknown reasons, non-numeric diagnostics, and arbitrary fields', () => {
+    const normalized = sanitizeCreatorSessionResponse({
+      valid: false,
+      relogin_required: true,
+      error: {
+        code: 'creator_session_invalid',
+        message: 'Creator session is invalid.',
+        reason: 'cookie_rejected_for_secret_reason',
+        upstream_status: '401',
+        upstream_code: { raw: -100 },
+        cookie: 'must-not-leak',
+        location: 'must-not-leak',
+        response_body: 'must-not-leak',
+      },
+      headers: { cookie: 'must-not-leak' },
+    });
+
+    expect(normalized).toEqual({
+      valid: false,
+      relogin_required: true,
+      error: {
+        code: 'creator_session_invalid',
+        message: 'Creator session is invalid.',
+      },
+    });
+    expect(JSON.stringify(normalized)).not.toContain('must-not-leak');
+  });
+
+  it('does not promote diagnostic-looking fields outside the error object', () => {
+    const normalized = sanitizeCreatorSessionResponse({
+      valid: false,
+      reason: 'redirect',
+      upstream_status: 302,
+      upstream_code: -100,
+      detail: {
+        reason: 'http_401',
+        upstream_status: 401,
+      },
+      error: {
+        code: 'creator_session_invalid',
+        message: 'Creator session is invalid.',
+      },
+    });
+
+    expect(normalized.error).toEqual({
+      code: 'creator_session_invalid',
+      message: 'Creator session is invalid.',
+    });
+  });
 });
