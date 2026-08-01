@@ -68,12 +68,6 @@ export interface PublishVideoUrlResponse {
   share_url: string;
 }
 
-export interface QrCodeResponse {
-  qr_id: string;
-  code: string;
-  url: string;
-}
-
 export async function publishVideoUrl(
   options: PublishVideoUrlOptions,
 ): Promise<PublishVideoUrlResponse> {
@@ -85,14 +79,6 @@ export async function publishVideoUrl(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(options),
   }) as Promise<PublishVideoUrlResponse>;
-}
-
-export async function getQRCode(): Promise<QrCodeResponse> {
-  return microserviceRequest('/login/qr') as Promise<QrCodeResponse>;
-}
-
-export async function checkLoginStatus() {
-  return microserviceRequest('/login/status');
 }
 
 export async function getSessionStatus() {

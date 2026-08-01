@@ -1,10 +1,9 @@
 'use client';
 
 import { useState, useRef, useCallback } from 'react';
-import { QRCodeSVG } from 'qrcode.react';
 import ReadyPostsPanel from './ReadyPostsPanel';
 import { responseJsonOrThrow } from '@/lib/response-json';
-import { canonicalCreatorQrUrl } from '@/lib/xhs-qr';
+import { CREATOR_QR_UNAVAILABLE_DETAIL } from '@/lib/xhs-creator-login';
 
 const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const VIDEO_TYPES = ['video/mp4', 'video/quicktime', 'video/webm'];
@@ -21,16 +20,6 @@ interface SessionResponse extends ApiError {
   valid?: boolean;
 }
 
-interface QrResponse extends ApiError {
-  url?: string;
-  qr_id?: string;
-  code?: string;
-}
-
-interface QrStatusResponse extends ApiError {
-  code_status?: number;
-}
-
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return bytes + ' B';
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
@@ -39,7 +28,6 @@ function formatFileSize(bytes: number): string {
 
 export default function AdminPage() {
   const [cookieStr, setCookieStr] = useState('');
-  const [qrData, setQrData] = useState<{ url?: string } | null>(null);
   const [sessionValid, setSessionValid] = useState<boolean | null>(null);
   const [publishForm, setPublishForm] = useState({
     title: '',
@@ -99,25 +87,6 @@ export default function AdminPage() {
     }
   }
 
-  async function startQRLogin() {
-    const path = '/admin/api/xhs/login/qr';
-    setQrData(null);
-    setStatus('Getting QR code...');
-    setStatusType('info');
-    try {
-      const res = await fetch(path, { headers });
-      const data = await responseJsonOrThrow<QrResponse>(res, `GET ${path}`);
-      const url = canonicalCreatorQrUrl(data.url);
-      setQrData({ url });
-      setStatus('Scan the QR code with your XHS app');
-      setStatusType('info');
-      pollLoginStatus();
-    } catch (e: unknown) {
-      setStatus(`Error: ${e instanceof Error ? e.message : 'Unknown error'}`);
-      setStatusType('error');
-    }
-  }
-
   async function loginWithCookie() {
     const cookie = cookieStr.trim();
     if (!cookie) return;
@@ -139,35 +108,6 @@ export default function AdminPage() {
       setStatus(`Error: ${e instanceof Error ? e.message : 'Unknown error'}`);
       setStatusType('error');
     }
-  }
-
-  function pollLoginStatus() {
-    const path = '/admin/api/xhs/login/status';
-    const interval = setInterval(async () => {
-      try {
-        const res = await fetch(path, { headers });
-        const data = await responseJsonOrThrow<QrStatusResponse>(res, `GET ${path}`);
-        if (typeof data.code_status !== 'number') {
-          throw new Error(`GET ${path} response did not include a numeric code_status field.`);
-        }
-        if (data.code_status === 2) {
-          setStatus('Login successful! ✅');
-          setStatusType('success');
-          setSessionValid(true);
-          setQrData(null);
-          clearInterval(interval);
-        } else if (data.code_status === 1) {
-          setStatus('QR scanned, confirming...');
-          setStatusType('info');
-        }
-      } catch (e: unknown) {
-        clearInterval(interval);
-        setStatus(`Polling failed: ${e instanceof Error ? e.message : 'Unknown error'}`);
-        setStatusType('error');
-      }
-    }, 2000);
-    // Stop after 2 minutes
-    setTimeout(() => clearInterval(interval), 120000);
   }
 
   const handleFileSelect = useCallback((newFiles: File[]) => {
@@ -488,24 +428,11 @@ export default function AdminPage() {
       </section>
 
       {/* QR Login */}
-      <section style={{ marginBottom: 24 }}>
-        <h2>3. XHS QR Login (alternative)</h2>
-        <button onClick={startQRLogin}>
-          Start QR Login
-        </button>
-        {qrData && qrData.url && (
-          <div style={{ marginTop: 12 }}>
-            <div style={{ background: '#fff', padding: 16, display: 'inline-block', borderRadius: 8, border: '1px solid #ddd' }}>
-              <QRCodeSVG value={qrData.url} size={256} level="M" />
-            </div>
-            <div style={{ marginTop: 12 }}>
-              <button onClick={startQRLogin} style={{ marginRight: 8 }}>
-                🔄 Refresh QR
-              </button>
-              <span style={{ fontSize: 12, color: '#666' }}>QR codes expire in ~60s</span>
-            </div>
-          </div>
-        )}
+      <section style={{ marginBottom: 24, padding: 16, background: '#fff8e6', border: '1px solid #e6c75c', borderRadius: 8 }}>
+        <h2 style={{ marginTop: 0 }}>3. QR login unavailable</h2>
+        <p style={{ marginBottom: 0, color: '#594800' }}>
+          {CREATOR_QR_UNAVAILABLE_DETAIL.message}
+        </p>
       </section>
 
       <ReadyPostsPanel sessionValid={sessionValid} />

@@ -61,6 +61,7 @@ import { GET as getSession } from '@/app/api/xhs/session/route';
 import { GET as getQrCode } from '@/app/api/xhs/login/qr/route';
 import { GET as getLoginStatus } from '@/app/api/xhs/login/status/route';
 import { POST as postCookie } from '@/app/api/xhs/login/cookie/route';
+import { CREATOR_QR_UNAVAILABLE_DETAIL } from '@/lib/xhs-creator-login';
 
 function request(path: string, init?: RequestInit) {
   return new NextRequest(`https://xhs.justlikekatie.com${path}`, init);
@@ -124,57 +125,22 @@ describe('protected XHS route handlers', () => {
     await expect(response.json()).resolves.toEqual({ valid: false });
   });
 
-  it('executes QR start and status handlers', async () => {
-    mocks.getQrCode.mockResolvedValue({
-      qr_id: 'id',
-      code: 'code',
-      url: 'xhsdiscover://login/qr?code=creator',
-    });
-    mocks.checkLoginStatus.mockResolvedValue({ code_status: 0, login_info: null });
-
+  it('fails QR start and status closed without requesting a QR URL', async () => {
     const qrResponse = await getQrCode(request('/api/xhs/login/qr'));
     const statusResponse = await getLoginStatus(request('/api/xhs/login/status'));
 
-    expect(qrResponse.status).toBe(200);
-    await expect(qrResponse.json()).resolves.toMatchObject({
-      url: 'xhsdiscover://login/qr?code=creator',
+    expect(qrResponse.status).toBe(503);
+    expect(qrResponse.headers.get('cache-control')).toContain('no-store');
+    await expect(qrResponse.json()).resolves.toEqual({
+      detail: CREATOR_QR_UNAVAILABLE_DETAIL,
     });
-    expect(statusResponse.status).toBe(200);
-    await expect(statusResponse.json()).resolves.toMatchObject({ code_status: 0 });
-  });
-
-  it('rejects merchant QR targets without returning the URL', async () => {
-    mocks.getQrCode.mockResolvedValue({
-      qr_id: 'id',
-      code: 'code',
-      url: encodeURIComponent('xhsdiscover://login/qr?redirect=xymerchant'),
+    expect(statusResponse.status).toBe(503);
+    expect(statusResponse.headers.get('cache-control')).toContain('no-store');
+    await expect(statusResponse.json()).resolves.toEqual({
+      detail: CREATOR_QR_UNAVAILABLE_DETAIL,
     });
-
-    const response = await getQrCode(request('/api/xhs/login/qr'));
-    const body = await response.json();
-
-    expect(response.status).toBe(502);
-    expect(body).toEqual({
-      detail:
-        'Merchant/Qianfan login is not supported for this Rednote creator account. ' +
-        'Use manual cookie login from https://creator.rednote.com/login.',
-    });
-    expect(JSON.stringify(body)).not.toContain('xymerchant');
-  });
-
-  it('does not expose unexpected QR failures', async () => {
-    mocks.getQrCode.mockRejectedValue(
-      new SyntaxError('Unexpected token in secret-token-response'),
-    );
-
-    const response = await getQrCode(request('/api/xhs/login/qr'));
-    const body = await response.json();
-
-    expect(response.status).toBe(502);
-    expect(body).toEqual({
-      detail: 'Unable to start normal-account Rednote QR login.',
-    });
-    expect(JSON.stringify(body)).not.toContain('secret-token');
+    expect(mocks.getQrCode).not.toHaveBeenCalled();
+    expect(mocks.checkLoginStatus).not.toHaveBeenCalled();
   });
 
   it('executes the cookie handler without exposing the cookie to the browser response', async () => {
