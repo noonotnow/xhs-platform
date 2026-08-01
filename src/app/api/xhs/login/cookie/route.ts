@@ -4,6 +4,7 @@ import {
   loginWithCookie,
   XhsMicroserviceHttpError,
 } from '@/lib/xhs-microservice';
+import { sanitizeCreatorSessionResponse } from '@/lib/xhs-creator-session';
 
 export async function POST(request: NextRequest) {
   const unauthorized = await requireXhsOperator(request);
@@ -17,7 +18,7 @@ export async function POST(request: NextRequest) {
       );
     }
     const result = await loginWithCookie(cookie);
-    return NextResponse.json(result);
+    return NextResponse.json(sanitizeCreatorSessionResponse(result));
   } catch (e: unknown) {
     if (e instanceof XhsMicroserviceHttpError) {
       return NextResponse.json(e.safeBody, { status: e.status });

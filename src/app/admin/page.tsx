@@ -2,10 +2,11 @@
 
 import { useState, useRef, useCallback } from 'react';
 import ReadyPostsPanel from './ReadyPostsPanel';
-import { responseJson, responseJsonOrThrow } from '@/lib/response-json';
+import { responseJson } from '@/lib/response-json';
 import { CREATOR_QR_UNAVAILABLE_DETAIL } from '@/lib/xhs-creator-login';
 import {
   creatorCookieFailureMessage,
+  creatorSessionStatusPresentation,
   type CreatorSessionResponse,
 } from '@/lib/xhs-creator-session';
 
@@ -14,15 +15,6 @@ const VIDEO_TYPES = ['video/mp4', 'video/quicktime', 'video/webm'];
 const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
 const MAX_VIDEO_SIZE = 100 * 1024 * 1024; // 100MB
 const MAX_IMAGES = 9;
-
-interface ApiError {
-  error?: string;
-  detail?: string;
-}
-
-interface SessionResponse extends ApiError {
-  valid?: boolean;
-}
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return bytes + ' B';
@@ -74,17 +66,14 @@ export default function AdminPage() {
     const path = '/admin/api/xhs/session';
     try {
       const res = await fetch(path, { headers });
-      const data = await responseJsonOrThrow<SessionResponse>(res, `GET ${path}`);
-      if (typeof data.valid !== 'boolean') {
+      const data = await responseJson<CreatorSessionResponse>(res, `GET ${path}`);
+      if (res.ok && typeof data.valid !== 'boolean') {
         throw new Error(`GET ${path} response did not include a boolean valid field.`);
       }
-      setSessionValid(data.valid);
-      setStatus(
-        data.valid
-          ? 'XHS session is valid.'
-          : `XHS session expired${data.error ? `: ${data.error}` : '.'}`,
-      );
-      setStatusType(data.valid ? 'success' : 'error');
+      const presentation = creatorSessionStatusPresentation(data);
+      setSessionValid(presentation.valid);
+      setStatus(presentation.message);
+      setStatusType(presentation.valid ? 'success' : 'error');
     } catch (e: unknown) {
       setStatus(`Error: ${e instanceof Error ? e.message : 'Unknown error'}`);
       setStatusType('error');

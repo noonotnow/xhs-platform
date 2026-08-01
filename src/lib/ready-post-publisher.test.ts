@@ -99,7 +99,7 @@ describe('ready post publishing', () => {
       readyPost().id,
       { confirmed: true, lastEditedTime: readyPost().lastEditedTime },
       deps,
-    )).rejects.toThrow('Microservice error 409: XHS session expired');
+    )).rejects.toThrow('XHS microservice request failed (409)');
     expect(deps.release).toHaveBeenCalledWith(readyPost().id);
     expect(deps.record).not.toHaveBeenCalled();
     expect(deps.backfill).not.toHaveBeenCalled();
