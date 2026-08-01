@@ -108,7 +108,7 @@ describe('local publish job input', () => {
     expect(snapshot).toMatchObject({
       mediaType: 'video',
       mediaUrl: movUrl,
-      compatibilityTrial: 'unverified_mov',
+      compatibilityTrial: 'trusted-unverified-mov',
     });
     expect(snapshot.thumbnailUrl).toBe(readyPost().thumbnailUrl);
   });

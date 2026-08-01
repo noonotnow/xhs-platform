@@ -97,7 +97,7 @@ describe('local publish job routes', () => {
     mocks.claim.mockResolvedValue({
       id: jobId,
       claimToken,
-      compatibilityTrial: 'unverified_mov',
+      compatibilityTrial: 'trusted-unverified-mov',
     });
     const claimResponse = await claimJob(request('/api/local-publish-jobs/next', {
       headers: { Authorization: `Bearer ${workerToken}` },
@@ -106,7 +106,7 @@ describe('local publish job routes', () => {
     await expect(claimResponse.json()).resolves.toMatchObject({
       id: jobId,
       claimToken,
-      compatibilityTrial: 'unverified_mov',
+      compatibilityTrial: 'trusted-unverified-mov',
     });
 
     const result = {

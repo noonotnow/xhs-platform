@@ -196,7 +196,9 @@ export function buildLocalPublishSnapshot(
     mediaType: input.media.type,
     mediaIndex: input.media.index,
     mediaUrl,
-    ...(compatibilityTrial ? { compatibilityTrial: 'unverified_mov' as const } : {}),
+    ...(compatibilityTrial
+      ? { compatibilityTrial: 'trusted-unverified-mov' as const }
+      : {}),
     ...(thumbnailUrl ? { thumbnailUrl } : {}),
     ...(post.scheduledDate ? { scheduledDate: post.scheduledDate } : {}),
     notionLastEditedTime: post.lastEditedTime,

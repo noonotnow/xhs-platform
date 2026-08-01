@@ -126,12 +126,12 @@ The local worker contract is:
    `Authorization: Bearer <LOCAL_PUBLISH_WORKER_TOKEN>`. HTTP 204 means the queue
    is empty. A claim returns the immutable publish fields plus `claimToken` and
    `claimExpiresAt`. An unverified MOV trial additionally returns
-   `"compatibilityTrial":"unverified_mov"`; normal jobs omit this field.
+   `"compatibilityTrial":"trusted-unverified-mov"`; normal jobs omit this field.
 2. Stage the asset and reviewed copy at `https://creator.rednote.com`, wait for
    explicit human approval, publish, confirm `/publish/success`, find the exact
    post in `/new/note-manager`, and verify
    `https://www.rednote.com/explore/{noteId}`.
-   For `unverified_mov`, a Creator staging rejection must be reported as failed
+   For `trusted-unverified-mov`, a Creator staging rejection must be reported as failed
    without clicking Publish. If staging succeeds, the worker must still wait for
    the existing exact `PUBLISH <jobId>` human approval before any Publish click;
    it must never auto-publish.
