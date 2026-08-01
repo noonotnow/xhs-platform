@@ -437,7 +437,7 @@ export default function AdminPage() {
         </p>
       </section>
 
-      <ReadyPostsPanel sessionValid={sessionValid} />
+      <ReadyPostsPanel />
 
       {/* Publish */}
       <section style={{ marginBottom: 24, padding: 20, background: '#fff', borderRadius: 12, border: '1px solid #e0e0e0' }}>

@@ -101,7 +101,7 @@ import { POST as postCookie } from '@/app/api/xhs/login/cookie/route';
 import { CREATOR_QR_UNAVAILABLE_DETAIL } from '@/lib/xhs-creator-login';
 import { NotionPostsError } from '@/lib/notion-posts';
 
-function request(path: string, init?: RequestInit) {
+function request(path: string, init?: ConstructorParameters<typeof NextRequest>[1]) {
   return new NextRequest(`https://xhs.justlikekatie.com${path}`, init);
 }
 

@@ -3,10 +3,12 @@ import { APIErrorCode, APIResponseError } from '@notionhq/client';
 import type { PageObjectResponse } from '@notionhq/client/build/src/api-endpoints';
 import {
   buildReadyPostsQueryFilter,
+  isCanonicalMediaMov,
   isCanonicalMediaVideo,
   buildPublishedProperties,
   mapReadyXhsPost,
   normalizeNotionPostsError,
+  publishedResultState,
   publishedNextAction,
   resolvePostsSchema,
 } from '@/lib/notion-posts';
@@ -131,6 +133,37 @@ function pageFixture(): PageObjectResponse {
 }
 
 describe('Notion Posts mapping', () => {
+  it('separates canonical MEDIA MOV registrations from certified MP4 videos', () => {
+    const fixture = pageFixture();
+    fixture.properties['Image URLs'] = {
+      id: 'media',
+      type: 'rich_text',
+      rich_text: richText(
+        'https://images.xhs.justlikekatie.com/videos/assets/6c/trial.mov',
+      ),
+    };
+    fixture.properties['Needs media'] = {
+      id: 'needs-media',
+      type: 'checkbox',
+      checkbox: true,
+    };
+    const { resolved, duplicateAliases } = resolvePostsSchema(
+      Object.fromEntries(
+        Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
+      ),
+    );
+    const post = mapReadyXhsPost(fixture, resolved, duplicateAliases);
+
+    expect(isCanonicalMediaMov(post.mediaUrls[0])).toBe(true);
+    expect(isCanonicalMediaVideo(post.mediaUrls[0])).toBe(false);
+    expect(post.videoUrls).toEqual([]);
+    expect(post.compatibilityTrialVideoUrls).toEqual([post.mediaUrls[0]]);
+    expect(post.publishBlockers).toEqual([
+      'Needs media is still checked',
+      'No canonical HTTPS Rednote media is attached',
+    ]);
+  });
+
   it('uses CREATE canonical aliases and exposes a publishable MEDIA video', () => {
     const fixture = pageFixture();
     const { resolved, duplicateAliases } = resolvePostsSchema(
@@ -200,6 +233,41 @@ describe('Notion Posts mapping', () => {
         },
         'Next action': { select: { name: 'Backfill URL/metrics' } },
       });
+  });
+
+  it('recognizes an identical published result without rewriting published metadata', () => {
+        const fixture = pageFixture();
+        fixture.properties.Status = {
+          id: 'status',
+          type: 'status',
+          status: { id: 'published', name: 'Published', color: 'green' },
+        };
+        fixture.properties['Rednote URL'] = {
+          id: 'share',
+          type: 'url',
+          url: 'https://www.rednote.com/explore/note-123',
+        };
+        fixture.properties['Rednote Note ID'] = {
+          id: 'note-id',
+          type: 'rich_text',
+          rich_text: richText('note-123'),
+        };
+        const { resolved, duplicateAliases } = resolvePostsSchema(
+          Object.fromEntries(
+            Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
+          ),
+        );
+
+        expect(publishedResultState(fixture, resolved, duplicateAliases, {
+          status: 'success',
+          noteId: 'note-123',
+          shareUrl: 'https://www.rednote.com/explore/note-123',
+        })).toBe('match');
+        expect(publishedResultState(fixture, resolved, duplicateAliases, {
+          status: 'success',
+          noteId: 'different-note',
+          shareUrl: 'https://www.rednote.com/explore/different-note',
+        })).toBe('conflict');
   });
 
   it('blocks the target when any production readiness invariant regresses', () => {
