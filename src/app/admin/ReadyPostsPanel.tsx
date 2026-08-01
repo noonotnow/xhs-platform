@@ -1,11 +1,9 @@
 'use client';
 
+import Image from 'next/image';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type {
-  PublishReadyPostResponse,
-  ReadyXhsPost,
-  ReadyXhsPostsResponse,
-} from '@/types/ready-post';
+import type { LocalPublishJobSummary, LocalPublishMediaType } from '@/types/local-publish-job';
+import type { ReadyXhsPost, ReadyXhsPostsResponse } from '@/types/ready-post';
 import styles from './ReadyPostsPanel.module.css';
 import { responseJson } from '@/lib/response-json';
 import {
@@ -22,7 +20,14 @@ import {
 interface ApiError {
   error?: string;
   code?: string;
-  published?: PublishReadyPostResponse;
+}
+
+interface LocalJobsResponse extends ApiError {
+  jobs: LocalPublishJobSummary[];
+}
+
+interface LocalJobResponse extends ApiError {
+  job: LocalPublishJobSummary;
 }
 
 type CopyStatus = {
@@ -30,35 +35,99 @@ type CopyStatus = {
   message: string;
 };
 
-export default function ReadyPostsPanel({
-  sessionValid,
-}: {
-  sessionValid: boolean | null;
-}) {
+type MediaChoice = {
+  type: LocalPublishMediaType;
+  index: number;
+  url: string;
+};
+
+function tagsFromInput(value: string) {
+  return value
+    .split(/[,\n]+/)
+    .map((tag) => tag.trim().replace(/^#+/, ''))
+    .filter(Boolean);
+}
+
+function jobStatusCopy(job: LocalPublishJobSummary | undefined) {
+  if (!job) return null;
+  if (job.status === 'queued') {
+    return {
+      tone: 'pending',
+      title: 'Queued for the Mac worker',
+      detail: 'Waiting for the local browser worker. This post is not published.',
+    };
+  }
+  if (job.status === 'claimed') {
+    return {
+      tone: 'pending',
+      title: 'Claimed by the Mac worker',
+      detail: 'Browser staging or human review is in progress. This post is not published yet.',
+    };
+  }
+  if (job.status === 'ambiguous') {
+    return {
+      tone: 'warning',
+      title: 'Published result needs reconciliation',
+      detail:
+        'RedNote success was verified, but Notion backfill is incomplete. Do not publish again; retry the same success report.',
+    };
+  }
+  if (job.status === 'failed') {
+    return {
+      tone: 'error',
+      title: `Local browser job failed${job.errorCode ? ` (${job.errorCode})` : ''}`,
+      detail: job.errorMessage || 'Review the packet and queue a new job when the issue is resolved.',
+    };
+  }
+  return {
+    tone: 'success',
+    title: 'Published and backfilled',
+    detail: 'The exact RedNote post was verified before Notion was marked Published.',
+  };
+}
+
+export default function ReadyPostsPanel() {
   const [posts, setPosts] = useState<ReadyXhsPost[]>([]);
+  const [jobs, setJobs] = useState<LocalPublishJobSummary[]>([]);
   const [selectedId, setSelectedId] = useState('');
   const [loading, setLoading] = useState(true);
-  const [publishing, setPublishing] = useState(false);
+  const [queueing, setQueueing] = useState(false);
   const [error, setError] = useState('');
-  const [success, setSuccess] = useState<PublishReadyPostResponse | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [copyStatus, setCopyStatus] = useState<CopyStatus | null>(null);
+  const [finalTitle, setFinalTitle] = useState('');
+  const [finalCaption, setFinalCaption] = useState('');
+  const [finalTags, setFinalTags] = useState('');
+  const [mediaKey, setMediaKey] = useState('');
   const copyRequestRef = useRef(0);
   const selectedPostIdRef = useRef<string>();
+  const idempotencyKeysRef = useRef<Record<string, string>>({});
 
   const selected = useMemo(
     () => posts.find((post) => post.id === selectedId) ?? posts[0],
     [posts, selectedId],
   );
-  const canonicalVideoUrl = selected
-    ? getCanonicalVideoUrl(selected.videoUrls)
+  const mediaChoices = useMemo<MediaChoice[]>(() => {
+    if (!selected) return [];
+    return [
+      ...selected.videoUrls.map((url, index) => ({ type: 'video' as const, index, url })),
+      ...selected.imageUrls.map((url, index) => ({ type: 'image' as const, index, url })),
+    ];
+  }, [selected]);
+  const selectedMedia = mediaChoices.find(
+    (choice) => `${choice.type}:${choice.index}` === mediaKey,
+  ) ?? mediaChoices[0];
+  const canonicalVideoUrl = selected ? getCanonicalVideoUrl(selected.videoUrls) : undefined;
+  const currentJob = selected
+    ? jobs.find((job) => job.notionPageId === selected.id)
     : undefined;
-  const missingTags = selected
-    ? getMissingTags(selected.tags, selected.caption)
-    : [];
-  const showTitleCopy = selected
-    ? shouldOfferTitleCopy(selected.headline, selected.caption)
-    : false;
+  const currentJobStatus = jobStatusCopy(currentJob);
+  const hasActiveJob = currentJob?.status === 'queued' ||
+    currentJob?.status === 'claimed' ||
+    currentJob?.status === 'ambiguous';
+  const reviewedTags = tagsFromInput(finalTags);
+  const missingTags = getMissingTags(reviewedTags, finalCaption);
+  const showTitleCopy = shouldOfferTitleCopy(finalTitle, finalCaption);
   selectedPostIdRef.current = selected?.id;
 
   const loadPosts = useCallback(async () => {
@@ -84,59 +153,94 @@ export default function ReadyPostsPanel({
     }
   }, []);
 
+  const loadJobs = useCallback(async (showError = false) => {
+    try {
+      const path = '/admin/api/local-publish-jobs';
+      const response = await fetch(path, { cache: 'no-store' });
+      const data = await responseJson<LocalJobsResponse>(response, `GET ${path}`);
+      if (!response.ok) throw new Error(data.error || 'Failed to load local publish jobs');
+      setJobs(data.jobs);
+    } catch (loadError) {
+      if (showError) {
+        setError(
+          loadError instanceof Error ? loadError.message : 'Failed to load local publish jobs',
+        );
+      }
+    }
+  }, []);
+
   useEffect(() => {
     void loadPosts();
-  }, [loadPosts]);
+    void loadJobs(true);
+  }, [loadJobs, loadPosts]);
 
-  async function publishSelected() {
-    if (!selected) return;
-    const videoUrl = getCanonicalVideoUrl(selected.videoUrls);
+  useEffect(() => {
+    const timer = window.setInterval(() => void loadJobs(), 10_000);
+    return () => window.clearInterval(timer);
+  }, [loadJobs]);
+
+  useEffect(() => {
+    setFinalTitle(selected?.headline ?? '');
+    setFinalCaption(selected?.caption ?? '');
+    setFinalTags(selected?.tags.join(', ') ?? '');
+    const firstChoice = selected?.videoUrls.length
+      ? 'video:0'
+      : selected?.imageUrls.length
+        ? 'image:0'
+        : '';
+    setMediaKey(firstChoice);
+    setCopyStatus(null);
+  }, [selected]);
+
+  async function queueSelected() {
+    if (!selected || !selectedMedia) return;
     const confirmed = window.confirm(
-      `Publish "${selected.headline}" to XHS now?\n\n` +
-      `Video: ${videoUrl || 'No canonical MEDIA MP4'}\n\n` +
-      'This is a real publish action and cannot be undone from this admin.',
+      `Queue "${finalTitle.trim()}" for the local RedNote browser?\n\n` +
+      'The Mac worker may stage this packet, but a human still reviews and approves the final publish in Creator. Queueing does not mark it Published.',
     );
     if (!confirmed) return;
 
-    setPublishing(true);
+    const idempotencyKey = idempotencyKeysRef.current[selected.id] ?? crypto.randomUUID();
+    idempotencyKeysRef.current[selected.id] = idempotencyKey;
+    setQueueing(true);
     setError('');
-    setSuccess(null);
     try {
-      const path = `/admin/api/ready-posts/${encodeURIComponent(selected.id)}/publish`;
-      const response = await fetch(
-        path,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            confirmed: true,
-            lastEditedTime: selected.lastEditedTime,
-          }),
+      const path = '/admin/api/local-publish-jobs';
+      const response = await fetch(path, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey,
         },
-      );
-      const data = await responseJson<PublishReadyPostResponse & ApiError>(
-        response,
-        `POST ${path}`,
-      );
-      if (!response.ok) {
-        if (data.published) setSuccess(data.published);
-        throw new Error(data.error || 'Publish failed');
-      }
-
-      setSuccess(data);
-      setPosts((current) => current.filter((post) => post.id !== selected.id));
-      setSelectedId('');
-    } catch (publishError) {
-      setError(publishError instanceof Error ? publishError.message : 'Publish failed');
+        body: JSON.stringify({
+          notionPageId: selected.id,
+          lastEditedTime: selected.lastEditedTime,
+          confirmed: true,
+          title: finalTitle,
+          caption: finalCaption,
+          tags: reviewedTags,
+          media: {
+            type: selectedMedia.type,
+            index: selectedMedia.index,
+          },
+        }),
+      });
+      const data = await responseJson<LocalJobResponse>(response, `POST ${path}`);
+      if (!response.ok) throw new Error(data.error || 'Failed to queue local publish job');
+      delete idempotencyKeysRef.current[selected.id];
+      setJobs((current) => [
+        data.job,
+        ...current.filter((job) => job.id !== data.job.id),
+      ]);
+    } catch (queueError) {
+      setError(queueError instanceof Error ? queueError.message : 'Failed to queue job');
+      void loadJobs();
     } finally {
-      setPublishing(false);
+      setQueueing(false);
     }
   }
 
-  async function copyField(
-    value: string,
-    label: string,
-  ) {
+  async function copyField(value: string, label: string) {
     const requestId = ++copyRequestRef.current;
     const postId = selected?.id;
     const result = await copyHandoffText(navigator.clipboard, value, label);
@@ -154,11 +258,14 @@ export default function ReadyPostsPanel({
         <div>
           <h2 className={styles.heading} id="ready-posts-heading">4. Ready from CREATE</h2>
           <p className={styles.intro}>
-            Review a publish-ready Rednote packet from the canonical Posts DB. Publishing always
-            requires a separate confirmation.
+            Review the final RedNote copy and queue a trusted packet for the Mac-local browser
+            worker. Only a verified RedNote post is backfilled as Published.
           </p>
         </div>
-        <button className={styles.refresh} type="button" onClick={loadPosts} disabled={loading}>
+        <button className={styles.refresh} type="button" onClick={() => {
+          void loadPosts();
+          void loadJobs(true);
+        }} disabled={loading}>
           {loading ? 'Refreshing…' : 'Refresh posts'}
         </button>
       </div>
@@ -170,31 +277,36 @@ export default function ReadyPostsPanel({
       {loading && posts.length === 0 ? (
         <p className={styles.empty}>Loading publish-ready posts…</p>
       ) : posts.length === 0 ? (
-        <p className={styles.empty}>No unpublished Rednote packets are marked ready.</p>
+        <p className={styles.empty}>
+          No unpublished RedNote packets are ready. Completed local jobs remain in the database
+          audit trail.
+        </p>
       ) : (
         <div className={styles.workspace}>
           <div className={styles.postList} aria-label="Publish-ready posts">
-            {posts.map((post) => (
-              <button
-                className={`${styles.postButton} ${
-                  selected?.id === post.id ? styles.postButtonSelected : ''
-                }`}
-                key={post.id}
-                type="button"
-                onClick={() => {
-                  setSelectedId(post.id);
-                  setError('');
-                  setSuccess(null);
-                  setCopyStatus(null);
-                }}
-              >
-                <span className={styles.postTitle}>{post.headline || 'Untitled post'}</span>
-                <span className={styles.postMeta}>
-                  {post.status || 'No status'} · {post.videoUrls.length} video
-                  {post.videoUrls.length === 1 ? '' : 's'}
-                </span>
-              </button>
-            ))}
+            {posts.map((post) => {
+              const job = jobs.find((candidate) => candidate.notionPageId === post.id);
+              return (
+                <button
+                  className={`${styles.postButton} ${
+                    selected?.id === post.id ? styles.postButtonSelected : ''
+                  }`}
+                  key={post.id}
+                  type="button"
+                  onClick={() => {
+                    setSelectedId(post.id);
+                    setError('');
+                  }}
+                >
+                  <span className={styles.postTitle}>{post.headline || 'Untitled post'}</span>
+                  <span className={styles.postMeta}>
+                    {job ? `Local job: ${job.status}` : post.status || 'No status'} ·{' '}
+                    {post.videoUrls.length + post.imageUrls.length} trusted asset
+                    {post.videoUrls.length + post.imageUrls.length === 1 ? '' : 's'}
+                  </span>
+                </button>
+              );
+            })}
           </div>
 
           {selected && (
@@ -207,16 +319,26 @@ export default function ReadyPostsPanel({
               </div>
               <p className={styles.muted}>Notion status: {selected.status || 'Not set'}</p>
 
-              {canonicalVideoUrl && (
+              {selectedMedia?.type === 'video' && (
                 <video
                   className={styles.video}
                   controls
                   poster={selected.thumbnailUrl || undefined}
                   preload="metadata"
-                  src={canonicalVideoUrl}
+                  src={selectedMedia.url}
                 >
                   Your browser cannot preview this video.
                 </video>
+              )}
+              {selectedMedia?.type === 'image' && (
+                <div className={styles.imagePreview}>
+                  <Image
+                    alt=""
+                    fill
+                    sizes="(max-width: 640px) 100vw, 520px"
+                    src={selectedMedia.url}
+                  />
+                </div>
               )}
 
               {selected.publishBlockers.length > 0 && (
@@ -225,31 +347,125 @@ export default function ReadyPostsPanel({
                 </ul>
               )}
 
-              <section className={styles.handoff} aria-labelledby="manual-handoff-heading">
-                <div className={styles.handoffHeading}>
+              <section className={styles.localQueue} aria-labelledby="local-queue-heading">
+                <div className={styles.queueHeading}>
                   <div>
-                    <h4 id="manual-handoff-heading">Publish manually in Rednote Creator</h4>
+                    <h4 id="local-queue-heading">Local RedNote browser queue</h4>
                     <p>
-                      Recommended fallback while API cookie publishing is under investigation.
-                      Nothing is sent to Rednote until you publish in the Creator tab.
+                      Finalize the copy here. Media is selected only from the canonical server
+                      packet and cannot be replaced by a client-provided URL.
                     </p>
                   </div>
-                  <span className={styles.recommended}>Recommended</span>
+                  <span className={styles.primaryPath}>Primary path</span>
                 </div>
+
+                {currentJobStatus && (
+                  <div
+                    className={`${styles.jobStatus} ${
+                      styles[`jobStatus${currentJobStatus.tone}`]
+                    }`}
+                    role="status"
+                  >
+                    <strong>{currentJobStatus.title}</strong>
+                    <p>{currentJobStatus.detail}</p>
+                    {currentJob?.status === 'succeeded' && currentJob.shareUrl && (
+                      <a href={currentJob.shareUrl} {...SAFE_EXTERNAL_LINK_PROPS}>
+                        Open verified RedNote post
+                      </a>
+                    )}
+                  </div>
+                )}
+
+                <div className={styles.reviewFields}>
+                  <label className={styles.reviewField}>
+                    <span>Final title</span>
+                    <input
+                      maxLength={100}
+                      value={finalTitle}
+                      onChange={(event) => setFinalTitle(event.target.value)}
+                      disabled={hasActiveJob}
+                    />
+                  </label>
+                  <label className={styles.reviewField}>
+                    <span>Final caption</span>
+                    <textarea
+                      maxLength={5000}
+                      rows={7}
+                      value={finalCaption}
+                      onChange={(event) => setFinalCaption(event.target.value)}
+                      disabled={hasActiveJob}
+                    />
+                  </label>
+                  <label className={styles.reviewField}>
+                    <span>Final tags</span>
+                    <input
+                      maxLength={2000}
+                      value={finalTags}
+                      onChange={(event) => setFinalTags(event.target.value)}
+                      placeholder="Comma-separated tags"
+                      disabled={hasActiveJob}
+                    />
+                    <small>Up to 20 tags. A leading # is removed before queueing.</small>
+                  </label>
+                  <label className={styles.reviewField}>
+                    <span>Trusted media</span>
+                    <select
+                      value={selectedMedia ? `${selectedMedia.type}:${selectedMedia.index}` : ''}
+                      onChange={(event) => setMediaKey(event.target.value)}
+                      disabled={hasActiveJob}
+                    >
+                      {mediaChoices.map((choice) => (
+                        <option
+                          key={`${choice.type}:${choice.index}`}
+                          value={`${choice.type}:${choice.index}`}
+                        >
+                          {choice.type === 'video' ? 'Video' : 'Image'} {choice.index + 1}
+                        </option>
+                      ))}
+                    </select>
+                    <small className={styles.assetUrl}>{selectedMedia?.url}</small>
+                  </label>
+                </div>
+
+                <button
+                  className={styles.queueButton}
+                  type="button"
+                  onClick={queueSelected}
+                  disabled={
+                    queueing ||
+                    hasActiveJob ||
+                    selected.publishBlockers.length > 0 ||
+                    !selectedMedia ||
+                    !finalTitle.trim() ||
+                    !finalCaption.trim()
+                  }
+                >
+                  {queueing ? 'Queueing…' : 'Queue for local RedNote browser'}
+                </button>
+                <p className={styles.queueNotice}>
+                  Queueing and browser staging are not publication. The worker must wait for
+                  explicit human approval, verify the exact live post, and report its note ID
+                  before this record can become Published.
+                </p>
+              </section>
+
+              <details className={styles.handoff}>
+                <summary>Manual handoff and download controls</summary>
+                <p>
+                  Use these controls if the local worker is unavailable. Nothing is sent to
+                  RedNote until you publish in the Creator tab.
+                </p>
 
                 <div className={styles.assetAction}>
                   <div>
-                    <strong>1. Prepare the canonical video</strong>
-                    <p>
-                      Download the MP4. If your browser opens it instead, use the video menu to
-                      download it, then select that file in Creator.
-                    </p>
+                    <strong>Prepare the canonical video</strong>
+                    <p>Download the MP4, then select that file in Creator.</p>
                   </div>
                   {canonicalVideoUrl ? (
                     <a
                       className={styles.secondaryButton}
                       href={canonicalVideoUrl}
-                      download={getVideoDownloadName(selected.headline, canonicalVideoUrl)}
+                      download={getVideoDownloadName(finalTitle, canonicalVideoUrl)}
                       {...SAFE_EXTERNAL_LINK_PROPS}
                     >
                       Download video
@@ -264,12 +480,12 @@ export default function ReadyPostsPanel({
                     <div className={styles.copyField}>
                       <div>
                         <span className={styles.fieldLabel}>Title</span>
-                        <p>{selected.headline}</p>
+                        <p>{finalTitle}</p>
                       </div>
                       <button
                         className={styles.copyButton}
                         type="button"
-                        onClick={() => copyField(selected.headline, 'Title')}
+                        onClick={() => copyField(finalTitle, 'Title')}
                       >
                         Copy title
                       </button>
@@ -279,13 +495,13 @@ export default function ReadyPostsPanel({
                     <div>
                       <span className={styles.fieldLabel}>Caption</span>
                       <p className={styles.caption}>
-                        {selected.caption || 'No Rednote caption provided.'}
+                        {finalCaption || 'No RedNote caption provided.'}
                       </p>
                     </div>
                     <button
                       className={styles.copyButton}
                       type="button"
-                      onClick={() => copyField(selected.caption, 'Caption')}
+                      onClick={() => copyField(finalCaption, 'Caption')}
                     >
                       Copy caption
                     </button>
@@ -317,21 +533,13 @@ export default function ReadyPostsPanel({
                   </p>
                 )}
 
-                <ol className={styles.checklist}>
-                  <li>Download the video and select it in Rednote Creator.</li>
-                  <li>Paste the caption, plus the separate title or tags shown above.</li>
-                  <li>Review the video, text, cover, and audience settings.</li>
-                  <li>Publish on Rednote.</li>
-                  <li>Return to Admin to reconcile the Notion record.</li>
-                </ol>
-
                 <div className={styles.handoffActions}>
                   <a
                     className={styles.creatorButton}
                     href={REDNOTE_CREATOR_PUBLISH_URL}
                     {...SAFE_EXTERNAL_LINK_PROPS}
                   >
-                    Open Rednote Creator
+                    Open RedNote Creator
                   </a>
                   <a
                     className={styles.linkButton}
@@ -342,33 +550,20 @@ export default function ReadyPostsPanel({
                   </a>
                 </div>
                 <p className={styles.backfillNotice}>
-                  Opening Creator does not mark this packet Published. Manual publishing is not
-                  backfilled automatically; leave the Notion mutation pending until the published
-                  Rednote URL can be safely reconciled.
+                  Manual publishing is not backfilled automatically. Leave Notion unchanged until
+                  the exact published RedNote URL and note ID are reconciled.
                 </p>
-              </section>
+              </details>
 
               <details className={styles.experimental}>
-                <summary>Experimental API publisher</summary>
+                <summary>Legacy cloud cookie publisher — retired</summary>
                 <p>
-                  Uses the current server-side XHS session. Keep this secondary while cookie
-                  publishing is being investigated.
+                  Cloud publishing is disabled. Use the local browser queue or the manual handoff
+                  controls above.
                 </p>
-                <button
-                  className={styles.publishButton}
-                  type="button"
-                  onClick={publishSelected}
-                  disabled={
-                    publishing ||
-                    sessionValid !== true ||
-                    selected.publishBlockers.length > 0
-                  }
-                >
-                  {publishing ? 'Publishing…' : 'Confirm API publish to XHS'}
+                <button className={styles.publishButton} type="button" disabled>
+                  Cloud API publishing disabled
                 </button>
-                {sessionValid !== true && (
-                  <p className={styles.muted}>Verify the XHS session above before API publishing.</p>
-                )}
               </details>
             </article>
           )}
@@ -376,12 +571,6 @@ export default function ReadyPostsPanel({
       )}
 
       {error && <p className={styles.error} role="alert">{error}</p>}
-      {success && (
-        <p className={styles.success} role="status">
-          XHS confirmed note {success.noteId}.{' '}
-          <a href={success.shareUrl} {...SAFE_EXTERNAL_LINK_PROPS}>Open published post</a>
-        </p>
-      )}
     </section>
   );
 }

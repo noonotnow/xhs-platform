@@ -13,6 +13,7 @@ export interface ReadyXhsPost {
   videoUrls: string[];
   thumbnailUrl: string;
   tags: string[];
+  scheduledDate?: string;
   lastEditedTime: string;
   publishBlockers: string[];
 }

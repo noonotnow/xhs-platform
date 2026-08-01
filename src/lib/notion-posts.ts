@@ -46,6 +46,7 @@ const PROPERTY_ALIASES = {
   ],
   publishedAt: ['Published at', 'Published At', 'XHS Published At', 'Rednote Published At'],
   nextAction: ['Next action', 'Next Action'],
+  scheduledDate: ['Scheduled date', 'Scheduled Date', 'Publish date', 'Publish Date'],
 } as const;
 
 type CanonicalProperty = keyof typeof PROPERTY_ALIASES;
@@ -160,6 +161,10 @@ function checkbox(value: PageProperty | undefined): boolean {
   return plainText(value).trim().toLowerCase() === 'true';
 }
 
+function date(value: PageProperty | undefined): string {
+  return value?.type === 'date' ? value.date?.start ?? '' : '';
+}
+
 function urls(value: PageProperty | undefined): string[] {
   if (!value) return [];
   if (value.type === 'files') {
@@ -187,9 +192,12 @@ export function isCanonicalMediaVideo(url: string) {
   }
 }
 
-function isImageUrl(url: string) {
+export function isCanonicalMediaImage(url: string) {
   try {
-    return /\.(?:jpe?g|png|webp)$/i.test(new URL(url).pathname);
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' &&
+      parsed.hostname === 'images.xhs.justlikekatie.com' &&
+      /\.(?:jpe?g|png|webp)$/i.test(parsed.pathname);
   } catch {
     return false;
   }
@@ -211,11 +219,11 @@ function mappedBlockers(
   }
   if (!plainText(property(page, schema, 'headline')).trim()) blockers.push('Headline is empty');
   if (!plainText(property(page, schema, 'caption')).trim()) blockers.push('Weibo text is empty');
-  if (!checkbox(property(page, schema, 'hasVideo'))) blockers.push('Has video is not checked');
   if (checkbox(property(page, schema, 'needsMedia'))) blockers.push('Needs media is still checked');
   if (checkbox(property(page, schema, 'needsCaption'))) blockers.push('Needs caption is still checked');
-  if (!urls(property(page, schema, 'mediaUrls')).some(isCanonicalMediaVideo)) {
-    blockers.push('No canonical MEDIA MP4 is attached');
+  if (!urls(property(page, schema, 'mediaUrls')).some((url) =>
+    isCanonicalMediaVideo(url) || isCanonicalMediaImage(url))) {
+    blockers.push('No canonical HTTPS Rednote media is attached');
   }
   return blockers;
 }
@@ -237,16 +245,11 @@ export function mapReadyXhsPost(
     needsMedia: checkbox(property(page, schema, 'needsMedia')),
     needsCaption: checkbox(property(page, schema, 'needsCaption')),
     mediaUrls,
-    imageUrls: mediaUrls.filter(isImageUrl),
-    videoUrls: mediaUrls.filter((url) => {
-      try {
-        return /\.(?:mp4|mov|webm)$/i.test(new URL(url).pathname);
-      } catch {
-        return false;
-      }
-    }),
+    imageUrls: mediaUrls.filter(isCanonicalMediaImage),
+    videoUrls: mediaUrls.filter(isCanonicalMediaVideo),
     thumbnailUrl: urls(property(page, schema, 'thumbnail'))[0] ?? '',
     tags: values(property(page, schema, 'tags')),
+    scheduledDate: date(property(page, schema, 'scheduledDate')) || undefined,
     lastEditedTime: page.last_edited_time,
     publishBlockers: mappedBlockers(page, schema, duplicates),
   };
@@ -493,6 +496,22 @@ export function buildPublishedProperties(
   return properties;
 }
 
+export function publishedResultState(
+  page: PageObjectResponse,
+  schema: ResolvedSchema,
+  duplicates: Partial<Record<CanonicalProperty, string[]>>,
+  result: PublishReadyPostResponse,
+) {
+  const status = normalized(plainText(property(page, schema, 'status')));
+  if (status !== 'published') return 'unpublished' as const;
+
+  const shareUrlMatches = plainText(property(page, schema, 'xhsShareUrl')) === result.shareUrl;
+  const noteIdName = duplicates.xhsNoteId ? null : schema.xhsNoteId;
+  const noteIdMatches = !noteIdName ||
+    plainText(page.properties[noteIdName]).trim() === result.noteId;
+  return shareUrlMatches && noteIdMatches ? 'match' as const : 'conflict' as const;
+}
+
 export async function markXhsPostPublished(
   pageId: string,
   result: PublishReadyPostResponse,
@@ -505,6 +524,21 @@ export async function markXhsPostPublished(
     throw new NotionPostsError('Notion returned a partial page', 'NOTION_PAGE_ERROR', 502);
   }
   assertPostsDatabaseParent(rawPage);
+
+  const currentResult = publishedResultState(
+    rawPage,
+    resolved,
+    duplicateAliases,
+    result,
+  );
+  if (currentResult === 'match') return;
+  if (currentResult === 'conflict') {
+    throw new NotionPostsError(
+      'The Notion post is already Published with different RedNote metadata',
+      'NOTION_PUBLISH_CONFLICT',
+      409,
+    );
+  }
 
   const properties = buildPublishedProperties(
     rawPage,

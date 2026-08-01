@@ -40,6 +40,7 @@
 .refresh,
 .postButton,
 .publishButton,
+.queueButton,
 .linkButton,
 .copyButton,
 .secondaryButton,
@@ -63,6 +64,7 @@
 .refresh:focus-visible,
 .postButton:focus-visible,
 .publishButton:focus-visible,
+.queueButton:focus-visible,
 .linkButton:focus-visible,
 .copyButton:focus-visible,
 .secondaryButton:focus-visible,
@@ -155,6 +157,20 @@
   border-radius: 8px;
 }
 
+.imagePreview {
+  position: relative;
+  width: 100%;
+  min-height: 320px;
+  margin: 0 0 10px;
+  overflow: hidden;
+  background: #f1f5f9;
+  border-radius: 8px;
+}
+
+.imagePreview img {
+  object-fit: contain;
+}
+
 .blockers {
   margin: 10px 0 14px;
   padding-left: 20px;
@@ -174,14 +190,187 @@
   font-weight: 650;
 }
 
+.queueButton {
+  width: 100%;
+  padding: 11px 16px;
+  color: #fff;
+  background: #6d28d9;
+  border: 1px solid #5b21b6;
+  font-weight: 700;
+}
+
+.queueButton:hover:not(:disabled) {
+  background: #5b21b6;
+}
+
 .publishButton:hover:not(:disabled) {
   background: #6d28d9;
 }
 
 .publishButton:disabled,
+.queueButton:disabled,
 .refresh:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+.localQueue {
+  margin-top: 18px;
+  padding: 18px;
+  background: #faf8ff;
+  border: 1px solid #c4b5fd;
+  border-radius: 10px;
+}
+
+.queueHeading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.queueHeading h4 {
+  margin: 0;
+  color: #3b0764;
+  font-size: 1.125rem;
+}
+
+.queueHeading p,
+.queueNotice {
+  margin: 5px 0 0;
+  color: #5b4b6b;
+  font-size: 0.8125rem;
+  line-height: 1.55;
+}
+
+.primaryPath {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  color: #fff;
+  background: #6d28d9;
+  border: 1px solid #5b21b6;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.jobStatus {
+  margin-top: 14px;
+  padding: 11px 12px;
+  border: 1px solid;
+  border-radius: 8px;
+}
+
+.jobStatus strong {
+  display: block;
+  font-size: 0.875rem;
+}
+
+.jobStatus p {
+  margin: 3px 0 0;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.jobStatus a {
+  display: inline-block;
+  margin-top: 6px;
+  color: inherit;
+  font-size: 0.8125rem;
+  font-weight: 700;
+}
+
+.jobStatuspending {
+  color: #1e3a8a;
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+
+.jobStatuswarning {
+  color: #713f12;
+  background: #fffbeb;
+  border-color: #fde68a;
+}
+
+.jobStatuserror {
+  color: #9f1239;
+  background: #fff1f2;
+  border-color: #fecdd3;
+}
+
+.jobStatussuccess {
+  color: #166534;
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+}
+
+.reviewFields {
+  display: grid;
+  gap: 12px;
+  margin: 14px 0;
+}
+
+.reviewField {
+  display: grid;
+  gap: 5px;
+}
+
+.reviewField > span {
+  color: #4c1d95;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.reviewField input,
+.reviewField textarea,
+.reviewField select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 9px 10px;
+  color: #172033;
+  background: #fff;
+  border: 1px solid #c4b5fd;
+  border-radius: 7px;
+  font: inherit;
+  font-size: 0.875rem;
+}
+
+.reviewField textarea {
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.reviewField input:focus,
+.reviewField textarea:focus,
+.reviewField select:focus {
+  outline: 3px solid rgba(124, 58, 237, 0.2);
+  outline-offset: 1px;
+  border-color: #7c3aed;
+}
+
+.reviewField input:disabled,
+.reviewField textarea:disabled,
+.reviewField select:disabled {
+  color: #64748b;
+  background: #f1f5f9;
+  cursor: not-allowed;
+}
+
+.reviewField small {
+  color: #64748b;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.assetUrl {
+  overflow-wrap: anywhere;
+}
+
+.queueNotice {
+  margin-top: 10px;
+  color: #713f12;
 }
 
 .linkButton {
@@ -193,9 +382,28 @@
 .handoff {
   margin-top: 18px;
   padding: 18px;
-  background: #faf8ff;
-  border: 1px solid #d8b4fe;
+  background: #fff;
+  border: 1px solid #dfe3ea;
   border-radius: 10px;
+}
+
+.handoff > summary {
+  cursor: pointer;
+  color: #334155;
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.handoff > summary:focus-visible {
+  outline: 3px solid rgba(124, 58, 237, 0.2);
+  outline-offset: 3px;
+}
+
+.handoff > p {
+  margin: 8px 0 0;
+  color: #64748b;
+  font-size: 0.8125rem;
+  line-height: 1.55;
 }
 
 .handoffHeading,
@@ -419,6 +627,7 @@
 @media (max-width: 640px) {
   .headingRow,
   .actionRow,
+  .queueHeading,
   .handoffHeading,
   .assetAction,
   .copyField {

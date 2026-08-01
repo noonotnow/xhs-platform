@@ -67,6 +67,8 @@ in Vercel:
 | `PLAN_SECRET` | At least 32 random characters shared with Vibe Atlas for integration media uploads |
 | `NOTION_API_KEY` | Server-only Notion integration token with read/write access to the canonical Posts DB |
 | `NOTION_POSTS_DB_ID` | Canonical Posts database ID shared with the production CREATE workflow |
+| `LOCAL_PUBLISH_WORKER_TOKEN` | At least 32 random characters shared only with the trusted Mac-local browser worker |
+| `LOCAL_PUBLISH_JOB_LEASE_SECONDS` | Optional worker claim lease; defaults to 7200 seconds and is clamped to 60–86400 |
 
 `XHS_API_KEY` remains server-only and is used for Vercel-to-microservice
 login, session, and publish requests. Browser uploads use
@@ -80,26 +82,57 @@ and Vercel variables, deploy this application, and finally route the production
 admin hostname through Access. This avoids switching the browser to upload
 grants before the microservice accepts them.
 
-### Publish-ready CREATE packets
+### Mac-local publishing for CREATE packets
 
-The protected admin loads unpublished Rednote records whose canonical
-`Publish packet ready` property is checked. The server reads `Headline`,
-`Weibo text`, `Image URLs`, `Thumbnail`, `Series`, and `Status` using the same
-field aliases as CREATE. Only durable HTTPS MP4 assets under
-`images.xhs.justlikekatie.com/videos/assets/` can be sent to the microservice.
+The protected admin loads unpublished RedNote records whose canonical
+`Publish packet ready` property is checked. The server re-reads the selected
+Notion page when an operator queues it, confirms that it is still RedNote-ready
+and not `Published`, and builds an immutable snapshot from canonical HTTPS media.
+Client-provided media URLs and Notion metadata are never accepted. The operator
+can edit only the final reviewed title, caption, tags, and trusted media choice.
 
-Publishing is always manual: the operator selects a packet, reviews the media,
-and confirms the irreversible action. The browser calls this application only;
-the Notion token and `XHS_API_KEY` remain server-side. After the microservice
-confirms `{ status: "success", note_id, share_url }`, the server changes the
-Notion status to `Published`, stores `Rednote URL`, and stores `Rednote Note ID`
-when that property exists. It advances `Next action` only when the schema
-already contains `Backfill URL/metrics` (preferred) or `No action`. Apply
-`migrations/002_xhs_publish_receipts.sql` before deployment; the durable receipt
-prevents concurrent or repeated publication of the same Notion page.
-A successful XHS publish followed by a failed
-Notion backfill is reported as a blocking partial failure with the confirmed
-share URL so the operator does not publish twice.
+Apply the queue migration before deploying the application:
+
+```bash
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/003_local_publish_jobs.sql
+```
+
+Set `LOCAL_PUBLISH_WORKER_TOKEN` to a new random server-only value of at least
+32 characters in Vercel and in the Mac worker. The optional
+`LOCAL_PUBLISH_JOB_LEASE_SECONDS` defaults to two hours. A stale claimed job can
+be recovered by a later worker, which rotates the claim token so the previous
+worker can no longer report a result.
+
+The local worker contract is:
+
+1. `GET /api/local-publish-jobs/next` with
+   `Authorization: Bearer <LOCAL_PUBLISH_WORKER_TOKEN>`. HTTP 204 means the queue
+   is empty. A claim returns the immutable publish fields plus `claimToken` and
+   `claimExpiresAt`.
+2. Stage the asset and reviewed copy at `https://creator.rednote.com`, wait for
+   explicit human approval, publish, confirm `/publish/success`, find the exact
+   post in `/new/note-manager`, and verify
+   `https://www.rednote.com/explore/{noteId}`.
+3. `POST /api/local-publish-jobs/{id}/result` with the bearer token and
+   `X-Local-Publish-Claim-Token: <claimToken>`. The only accepted bodies are
+   `{"status":"succeeded","noteId":"...","shareUrl":"https://www.rednote.com/explore/..."}`
+   and `{"status":"failed","code":"SAFE_CODE","message":"Safe operator message"}`.
+   Report a discarded staging session as a failure such as
+   `STAGING_DISCARDED`; never abandon a claim silently.
+
+The success URL must exactly match the same note ID and cannot include a query,
+fragment, alternate host, or trailing slash. A verified success first enters an
+`ambiguous` reconciliation state, then updates Notion through the existing
+aliases (`Status=Published`, `Rednote URL`, `Rednote Note ID`, and the established
+published `Next action`) before the job becomes `succeeded`. If Notion backfill
+fails, retry the identical success report with the same claim token; do not
+publish again. Queued, claimed, failed, expired, or malformed results never mark
+Notion as Published.
+
+The legacy cloud cookie publisher remains disabled in the Ready-from-CREATE
+panel. Manual download, copy, Creator, and Notion handoff controls remain
+available as a fallback. Keep `migrations/002_xhs_publish_receipts.sql` for
+historical cloud publish receipts.
 
 ## API Usage
 
