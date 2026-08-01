@@ -2,7 +2,11 @@
 
 import Image from 'next/image';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { LocalPublishJobSummary, LocalPublishMediaType } from '@/types/local-publish-job';
+import type {
+  ExternalReconciliationSummary,
+  LocalPublishJobSummary,
+  LocalPublishMediaType,
+} from '@/types/local-publish-job';
 import type { ReadyXhsPost, ReadyXhsPostsResponse } from '@/types/ready-post';
 import styles from './ReadyPostsPanel.module.css';
 import { responseJson } from '@/lib/response-json';
@@ -28,6 +32,10 @@ interface LocalJobsResponse extends ApiError {
 
 interface LocalJobResponse extends ApiError {
   job: LocalPublishJobSummary;
+}
+
+interface ExternalReconciliationsResponse extends ApiError {
+  reconciliations: ExternalReconciliationSummary[];
 }
 
 type CopyStatus = {
@@ -89,6 +97,7 @@ function jobStatusCopy(job: LocalPublishJobSummary | undefined) {
 export default function ReadyPostsPanel() {
   const [posts, setPosts] = useState<ReadyXhsPost[]>([]);
   const [jobs, setJobs] = useState<LocalPublishJobSummary[]>([]);
+  const [reconciliations, setReconciliations] = useState<ExternalReconciliationSummary[]>([]);
   const [selectedId, setSelectedId] = useState('');
   const [loading, setLoading] = useState(true);
   const [queueing, setQueueing] = useState(false);
@@ -169,15 +178,42 @@ export default function ReadyPostsPanel() {
     }
   }, []);
 
+  const loadReconciliations = useCallback(async (showError = false) => {
+    try {
+      const path = '/admin/api/external-post-reconciliations';
+      const response = await fetch(path, { cache: 'no-store' });
+      const data = await responseJson<ExternalReconciliationsResponse>(
+        response,
+        `GET ${path}`,
+      );
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to load external reconciliations');
+      }
+      setReconciliations(data.reconciliations);
+    } catch (loadError) {
+      if (showError) {
+        setError(
+          loadError instanceof Error
+            ? loadError.message
+            : 'Failed to load external reconciliations',
+        );
+      }
+    }
+  }, []);
+
   useEffect(() => {
     void loadPosts();
     void loadJobs(true);
-  }, [loadJobs, loadPosts]);
+    void loadReconciliations(true);
+  }, [loadJobs, loadPosts, loadReconciliations]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => void loadJobs(), 10_000);
+    const timer = window.setInterval(() => {
+      void loadJobs();
+      void loadReconciliations();
+    }, 10_000);
     return () => window.clearInterval(timer);
-  }, [loadJobs]);
+  }, [loadJobs, loadReconciliations]);
 
   useEffect(() => {
     setFinalTitle(selected?.headline ?? '');
@@ -265,6 +301,7 @@ export default function ReadyPostsPanel() {
         <button className={styles.refresh} type="button" onClick={() => {
           void loadPosts();
           void loadJobs(true);
+          void loadReconciliations(true);
         }} disabled={loading}>
           {loading ? 'Refreshing…' : 'Refresh posts'}
         </button>
@@ -569,6 +606,52 @@ export default function ReadyPostsPanel() {
           )}
         </div>
       )}
+
+      <section className={styles.reconciliationAudit} aria-labelledby="reconciliation-audit-heading">
+        <div className={styles.auditHeading}>
+          <div>
+            <h3 id="reconciliation-audit-heading">Externally published posts</h3>
+            <p>
+              Read-only receipts from the verified Mac worker. These records never add a
+              canonical MEDIA URL to Notion.
+            </p>
+          </div>
+          <span>{reconciliations.length} receipt{reconciliations.length === 1 ? '' : 's'}</span>
+        </div>
+        {reconciliations.length === 0 ? (
+          <p className={styles.auditEmpty}>No external RedNote posts have been reconciled.</p>
+        ) : (
+          <div className={styles.auditList}>
+            {reconciliations.map((record) => (
+              <article className={styles.auditRow} key={record.id}>
+                <div className={styles.auditIdentity}>
+                  <a href={record.shareUrl} {...SAFE_EXTERNAL_LINK_PROPS}>
+                    {record.title}
+                  </a>
+                  <span>
+                    {record.mediaType === 'video' ? 'Video' : 'Image'} · note {record.noteId}
+                  </span>
+                </div>
+                <div className={styles.auditResult}>
+                  <strong className={styles[`auditStatus${record.status}`]}>
+                    {record.status}
+                  </strong>
+                  <span>
+                    {record.status === 'succeeded'
+                      ? record.outcome?.replaceAll('_', ' ')
+                      : record.status === 'failed'
+                        ? `${record.errorCode || 'FAILED'} — retry the same verified snapshot`
+                        : 'Notion reconciliation in progress'}
+                  </span>
+                  <time dateTime={record.updatedAt}>
+                    {new Date(record.updatedAt).toLocaleString()}
+                  </time>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
 
       {error && <p className={styles.error} role="alert">{error}</p>}
     </section>

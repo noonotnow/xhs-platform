@@ -42,3 +42,33 @@ export interface ClaimedLocalPublishJob
   claimToken: string;
   claimExpiresAt: string;
 }
+
+export interface ExternalPostSnapshot {
+  noteId: string;
+  shareUrl: string;
+  title: string;
+  caption: string;
+  mediaType: LocalPublishMediaType;
+}
+
+export type ExternalReconciliationStatus = 'processing' | 'succeeded' | 'failed';
+export type ExternalReconciliationOutcome =
+  | 'matched_note_id'
+  | 'matched_url'
+  | 'created';
+
+export interface ExternalReconciliationSummary {
+  id: string;
+  noteId: string;
+  shareUrl: string;
+  title: string;
+  mediaType: LocalPublishMediaType;
+  status: ExternalReconciliationStatus;
+  outcome?: ExternalReconciliationOutcome;
+  notionPageId?: string;
+  errorCode?: string;
+  errorMessage?: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}

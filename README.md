@@ -95,6 +95,7 @@ Apply the queue migration before deploying the application:
 
 ```bash
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/003_local_publish_jobs.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/004_external_post_reconciliations.sql
 ```
 
 Set `LOCAL_PUBLISH_WORKER_TOKEN` to a new random server-only value of at least
@@ -128,6 +129,29 @@ published `Next action`) before the job becomes `succeeded`. If Notion backfill
 fails, retry the identical success report with the same claim token; do not
 publish again. Queued, claimed, failed, expired, or malformed results never mark
 Notion as Published.
+
+Posts created outside this queue can be reconciled by the same trusted worker:
+
+1. Verify the live post and send `POST /api/local-publish-jobs/reconcile-external`
+   with the bearer token, a UUID `Idempotency-Key`, and exactly
+   `{"noteId":"...","shareUrl":"https://www.rednote.com/explore/...","title":"...","caption":"...","mediaType":"image|video"}`.
+2. The share URL must be the exact HTTPS `www.rednote.com/explore/{noteId}` URL.
+   Unknown fields, including media URLs, are rejected.
+3. The server matches the canonical Posts database by exact `Rednote Note ID`
+   first, then exact `Rednote URL`. Conflicting or duplicate matches fail safely.
+   A match is updated; otherwise one row is created.
+4. Only a successful reconciliation writes `Status=Published`, the verified note
+   ID and URL, final title/caption, RedNote platform/video flags,
+   `Needs media=false`, `Needs caption=false`, and
+   `Next action=Backfill URL/metrics`. It appends an external-reconciliation note
+   but never invents or writes a canonical MEDIA URL.
+
+The receipt table makes retries idempotent by UUID, note ID, and share URL. A
+processing receipt can be reclaimed after five minutes if a request crashes;
+failed receipts can be retried with the identical verified snapshot. Operators
+can inspect the read-only receipt history in Ready from CREATE. The audit API at
+`GET /admin/api/external-post-reconciliations` remains behind the same
+Cloudflare Access protection as the rest of Admin.
 
 The legacy cloud cookie publisher remains disabled in the Ready-from-CREATE
 panel. Manual download, copy, Creator, and Notion handoff controls remain

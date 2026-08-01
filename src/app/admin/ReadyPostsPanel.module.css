@@ -624,13 +624,109 @@
   border-radius: 8px;
 }
 
+.reconciliationAudit {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid #dfe3ea;
+}
+
+.auditHeading,
+.auditRow {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.auditHeading h3 {
+  margin: 0;
+  font-size: 1.125rem;
+}
+
+.auditHeading p {
+  max-width: 68ch;
+  margin: 5px 0 0;
+  color: #4b5565;
+  font-size: 0.8125rem;
+  line-height: 1.55;
+}
+
+.auditHeading > span {
+  flex: 0 0 auto;
+  color: #64748b;
+  font-size: 0.75rem;
+  font-weight: 650;
+}
+
+.auditEmpty {
+  margin: 14px 0 0;
+  color: #64748b;
+  font-size: 0.875rem;
+}
+
+.auditList {
+  margin-top: 14px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.auditRow {
+  padding: 13px 0;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.auditIdentity {
+  min-width: 0;
+}
+
+.auditIdentity a {
+  display: block;
+  color: #4c1d95;
+  font-size: 0.875rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.auditIdentity span,
+.auditResult span,
+.auditResult time {
+  display: block;
+  margin-top: 3px;
+  color: #64748b;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.auditResult {
+  flex: 0 0 min(44%, 300px);
+  text-align: right;
+}
+
+.auditResult strong {
+  font-size: 0.75rem;
+  text-transform: capitalize;
+}
+
+.auditStatusprocessing {
+  color: #1e3a8a;
+}
+
+.auditStatussucceeded {
+  color: #166534;
+}
+
+.auditStatusfailed {
+  color: #9f1239;
+}
+
 @media (max-width: 640px) {
   .headingRow,
   .actionRow,
   .queueHeading,
   .handoffHeading,
   .assetAction,
-  .copyField {
+  .copyField,
+  .auditHeading,
+  .auditRow {
     align-items: stretch;
     flex-direction: column;
   }
@@ -658,5 +754,10 @@
 
   .handoffActions > * {
     width: 100%;
+  }
+
+  .auditResult {
+    flex-basis: auto;
+    text-align: left;
   }
 }
