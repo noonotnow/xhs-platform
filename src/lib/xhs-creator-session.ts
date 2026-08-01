@@ -10,13 +10,28 @@ export interface CreatorSessionResponse {
   error?: {
     code?: string;
     message?: string;
+    reason?: CreatorSessionInvalidReason;
+    upstream_status?: number;
+    upstream_code?: number;
   };
   detail?: string;
 }
 
+export type CreatorSessionInvalidReason =
+  | 'redirect'
+  | 'http_401'
+  | 'http_403'
+  | 'api_session_expired';
+
 const CREATOR_LOGIN_URL = 'https://creator.rednote.com/login';
 const MAX_ERROR_DEPTH = 5;
 const ERROR_ENVELOPE_KEYS = ['error', 'detail', 'message'] as const;
+const INVALID_REASONS = new Set<CreatorSessionInvalidReason>([
+  'redirect',
+  'http_401',
+  'http_403',
+  'api_session_expired',
+]);
 const UNKNOWN_ERROR = {
   code: 'creator_session_status_unknown',
   message: 'Creator session status could not be read safely.',
@@ -74,6 +89,46 @@ function findBoolean(value: unknown, key: string) {
   );
 }
 
+function safeInteger(value: unknown) {
+  return typeof value === 'number' && Number.isSafeInteger(value)
+    ? value
+    : undefined;
+}
+
+function findStructuredError(value: unknown, depth = 0): Record<string, unknown> | undefined {
+  if (depth > MAX_ERROR_DEPTH) return undefined;
+  const record = parsedObject(value);
+  if (!record) return undefined;
+
+  const error = parsedObject(record.error);
+  if (error) {
+    if (
+      'code' in error ||
+      'message' in error ||
+      'reason' in error ||
+      'upstream_status' in error ||
+      'upstream_code' in error
+    ) {
+      return error;
+    }
+    const nestedError = findStructuredError(error, depth + 1);
+    if (nestedError) return nestedError;
+  }
+
+  for (const key of ['detail', 'message'] as const) {
+    const nested = findStructuredError(record[key], depth + 1);
+    if (nested) return nested;
+  }
+  return undefined;
+}
+
+function allowedInvalidReason(value: unknown) {
+  const reason = nonEmptyString(value);
+  return reason && INVALID_REASONS.has(reason as CreatorSessionInvalidReason)
+    ? reason as CreatorSessionInvalidReason
+    : undefined;
+}
+
 function findEnvelopeMessage(value: unknown, depth = 0): string | undefined {
   if (depth > MAX_ERROR_DEPTH) return undefined;
   const record = parsedObject(value);
@@ -95,6 +150,10 @@ export function sanitizeCreatorSessionResponse(value: unknown): CreatorSessionRe
   const validation = findAllowed(value, (record) => parsedObject(record.validation));
   const code = findString(value, 'code');
   const message = findString(value, 'message') || findEnvelopeMessage(value);
+  const structuredError = findStructuredError(value);
+  const reason = allowedInvalidReason(structuredError?.reason);
+  const upstreamStatus = safeInteger(structuredError?.upstream_status);
+  const upstreamCode = safeInteger(structuredError?.upstream_code);
   const detail = findString(value, 'detail');
   const includeError = valid !== true;
 
@@ -113,10 +172,38 @@ export function sanitizeCreatorSessionResponse(value: unknown): CreatorSessionRe
       error: {
         code: code || UNKNOWN_ERROR.code,
         message: message || UNKNOWN_ERROR.message,
+        ...(reason ? { reason } : {}),
+        ...(upstreamStatus !== undefined ? { upstream_status: upstreamStatus } : {}),
+        ...(upstreamCode !== undefined ? { upstream_code: upstreamCode } : {}),
       },
     } : {}),
     ...(detail ? { detail } : {}),
   };
+}
+
+function creatorSessionDiagnostic(body: CreatorSessionResponse) {
+  const reason = body.error?.reason;
+  if (!reason) return '';
+
+  const reasonMessage: Record<CreatorSessionInvalidReason, string> = {
+    redirect: 'creator validation redirected to sign-in',
+    http_401: 'creator validation returned HTTP 401',
+    http_403: 'creator validation returned HTTP 403',
+    api_session_expired: 'Rednote reported the creator session expired',
+  };
+  const upstream = [
+    body.error?.upstream_status !== undefined
+      ? `upstream status ${body.error.upstream_status}`
+      : '',
+    body.error?.upstream_code !== undefined
+      ? `upstream code ${body.error.upstream_code}`
+      : '',
+  ].filter(Boolean);
+
+  return (
+    ` Diagnostic: ${reason} - ${reasonMessage[reason]}` +
+    `${upstream.length > 0 ? ` (${upstream.join(', ')})` : ''}.`
+  );
 }
 
 export function creatorCookieFailureMessage(value: unknown) {
@@ -127,10 +214,11 @@ export function creatorCookieFailureMessage(value: unknown) {
     body.detail?.trim() ||
     UNKNOWN_ERROR.message;
   const safeError = code ? `${code}: ${message}` : message;
+  const diagnostic = creatorSessionDiagnostic(body);
 
   if (body.relogin_required || code === 'creator_session_invalid') {
     return (
-      `${safeError} Sign in again at ${CREATOR_LOGIN_URL}, then copy only the ` +
+      `${safeError}${diagnostic} Sign in again at ${CREATOR_LOGIN_URL}, then copy only the ` +
       'Request Headers Cookie from a fresh authenticated creator/webapi request.'
     );
   }

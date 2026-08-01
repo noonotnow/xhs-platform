@@ -55,7 +55,26 @@ vi.mock('@/lib/xhs-microservice', () => ({
         ...(typeof body.relogin_required === 'boolean'
           ? { relogin_required: body.relogin_required }
           : {}),
-        ...(body.error ? { error: body.error } : {}),
+        ...(body.error ? {
+          error: {
+            ...(body.error.code ? { code: body.error.code } : {}),
+            ...(body.error.message ? { message: body.error.message } : {}),
+            ...([
+              'redirect',
+              'http_401',
+              'http_403',
+              'api_session_expired',
+            ].includes(body.error.reason)
+              ? { reason: body.error.reason }
+              : {}),
+            ...(Number.isSafeInteger(body.error.upstream_status)
+              ? { upstream_status: body.error.upstream_status }
+              : {}),
+            ...(Number.isSafeInteger(body.error.upstream_code)
+              ? { upstream_code: body.error.upstream_code }
+              : {}),
+          },
+        } : {}),
         ...(typeof body.detail === 'string' ? { detail: body.detail } : {}),
       };
     }
@@ -150,8 +169,12 @@ describe('protected XHS route handlers', () => {
       error: {
         code: 'creator_session_invalid',
         message: 'The creator session is invalid',
+        reason: 'http_403',
+        upstream_status: 403,
+        upstream_code: -100,
       },
       cookie: 'must-not-leak',
+      location: 'must-not-leak',
     });
 
     const response = await getSession(request('/api/xhs/session'));
@@ -164,6 +187,9 @@ describe('protected XHS route handlers', () => {
       error: {
         code: 'creator_session_invalid',
         message: 'The creator session is invalid',
+        reason: 'http_403',
+        upstream_status: 403,
+        upstream_code: -100,
       },
     });
   });
