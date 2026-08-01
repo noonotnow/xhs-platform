@@ -133,7 +133,13 @@ describe('protected XHS route handlers', () => {
     const response = await getSession(request('/api/xhs/session'));
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ valid: false });
+    await expect(response.json()).resolves.toEqual({
+      valid: false,
+      error: {
+        code: 'creator_session_status_unknown',
+        message: 'Creator session status could not be read safely.',
+      },
+    });
   });
 
   it('sanitizes object-shaped session errors returned with a successful response', async () => {
