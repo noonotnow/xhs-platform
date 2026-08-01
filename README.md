@@ -91,10 +91,17 @@ and not `Published`, and builds an immutable snapshot from canonical HTTPS media
 Client-provided media URLs and Notion metadata are never accepted. The operator
 can edit only the final reviewed title, caption, tags, and trusted media choice.
 
-Apply the queue migration before deploying the application:
+Apply the required queue migration before deploying the publishing pipeline:
 
 ```bash
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/003_local_publish_jobs.sql
+```
+
+External-post reconciliation is an isolated follow-up surface. Apply its migration
+before enabling that worker endpoint and audit; a reconciliation audit failure does
+not disable or change the local publishing queue:
+
+```bash
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/004_external_post_reconciliations.sql
 ```
 

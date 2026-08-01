@@ -98,6 +98,7 @@ export default function ReadyPostsPanel() {
   const [posts, setPosts] = useState<ReadyXhsPost[]>([]);
   const [jobs, setJobs] = useState<LocalPublishJobSummary[]>([]);
   const [reconciliations, setReconciliations] = useState<ExternalReconciliationSummary[]>([]);
+  const [reconciliationError, setReconciliationError] = useState('');
   const [selectedId, setSelectedId] = useState('');
   const [loading, setLoading] = useState(true);
   const [queueing, setQueueing] = useState(false);
@@ -178,7 +179,7 @@ export default function ReadyPostsPanel() {
     }
   }, []);
 
-  const loadReconciliations = useCallback(async (showError = false) => {
+  const loadReconciliations = useCallback(async () => {
     try {
       const path = '/admin/api/external-post-reconciliations';
       const response = await fetch(path, { cache: 'no-store' });
@@ -190,21 +191,20 @@ export default function ReadyPostsPanel() {
         throw new Error(data.error || 'Failed to load external reconciliations');
       }
       setReconciliations(data.reconciliations);
+      setReconciliationError('');
     } catch (loadError) {
-      if (showError) {
-        setError(
-          loadError instanceof Error
-            ? loadError.message
-            : 'Failed to load external reconciliations',
-        );
-      }
+      setReconciliationError(
+        loadError instanceof Error
+          ? loadError.message
+          : 'Failed to load external reconciliations',
+      );
     }
   }, []);
 
   useEffect(() => {
     void loadPosts();
     void loadJobs(true);
-    void loadReconciliations(true);
+    void loadReconciliations();
   }, [loadJobs, loadPosts, loadReconciliations]);
 
   useEffect(() => {
@@ -301,7 +301,7 @@ export default function ReadyPostsPanel() {
         <button className={styles.refresh} type="button" onClick={() => {
           void loadPosts();
           void loadJobs(true);
-          void loadReconciliations(true);
+          void loadReconciliations();
         }} disabled={loading}>
           {loading ? 'Refreshing…' : 'Refresh posts'}
         </button>
@@ -618,7 +618,12 @@ export default function ReadyPostsPanel() {
           </div>
           <span>{reconciliations.length} receipt{reconciliations.length === 1 ? '' : 's'}</span>
         </div>
-        {reconciliations.length === 0 ? (
+        {reconciliationError ? (
+          <p className={styles.auditWarning} role="status">
+            External reconciliation receipts are unavailable: {reconciliationError}. The local
+            publish queue remains available.
+          </p>
+        ) : reconciliations.length === 0 ? (
           <p className={styles.auditEmpty}>No external RedNote posts have been reconciled.</p>
         ) : (
           <div className={styles.auditList}>
