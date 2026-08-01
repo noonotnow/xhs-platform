@@ -12,6 +12,7 @@ import type {
   UpdatePageParameters,
 } from '@notionhq/client/build/src/api-endpoints';
 import type { PublishReadyPostResponse, ReadyXhsPost } from '@/types/ready-post';
+import { compareReadyPostsBySchedule } from '@/lib/editorial-schedule';
 
 type PropertyMap = Record<string, {
   type: string;
@@ -35,6 +36,7 @@ const PROPERTY_ALIASES = {
   needsMedia: ['Needs media', 'Needs Media'],
   needsCaption: ['Needs caption', 'Needs Caption'],
   tags: ['Tags', 'Topics', 'Hashtags'],
+  scheduledDate: ['ScheduledDate', 'Scheduled Date', 'Scheduled date'],
   xhsNoteId: ['XHS Note ID', 'XHS note ID', 'Rednote Note ID', 'Rednote note ID'],
   xhsShareUrl: [
     'XHS Share URL',
@@ -160,6 +162,15 @@ function checkbox(value: PageProperty | undefined): boolean {
   return plainText(value).trim().toLowerCase() === 'true';
 }
 
+function dateStart(value: PageProperty | undefined): string | null {
+  if (!value) return null;
+  if (value.type === 'date') return value.date?.start ?? null;
+  if (value.type === 'formula' && value.formula.type === 'date') {
+    return value.formula.date?.start ?? null;
+  }
+  return null;
+}
+
 function urls(value: PageProperty | undefined): string[] {
   if (!value) return [];
   if (value.type === 'files') {
@@ -247,6 +258,7 @@ export function mapReadyXhsPost(
     }),
     thumbnailUrl: urls(property(page, schema, 'thumbnail'))[0] ?? '',
     tags: values(property(page, schema, 'tags')),
+    scheduledDate: dateStart(property(page, schema, 'scheduledDate')),
     lastEditedTime: page.last_edited_time,
     publishBlockers: mappedBlockers(page, schema, duplicates),
   };
@@ -371,7 +383,8 @@ export async function listReadyXhsPosts(
     queryReadyCandidatePages(client, resolved, properties));
   const posts = pages
     .filter((page) => isReadyRednotePost(page, resolved))
-    .map((page) => mapReadyXhsPost(page, resolved, duplicateAliases));
+    .map((page) => mapReadyXhsPost(page, resolved, duplicateAliases))
+    .sort(compareReadyPostsBySchedule);
   return { posts, warnings };
 }
 

@@ -117,6 +117,15 @@ function pageFixture(): PageObjectResponse {
         type: 'multi_select',
         multi_select: [{ id: 'bts', name: 'BTS', color: 'purple' }],
       },
+      ScheduledDate: {
+        id: 'scheduled-date',
+        type: 'date',
+        date: {
+          start: '2026-08-01T15:30:00-04:00',
+          end: null,
+          time_zone: null,
+        },
+      },
       'Rednote URL': { id: 'share', type: 'url', url: null },
       'Rednote Note ID': { id: 'note-id', type: 'rich_text', rich_text: [] },
       'Next action': {
@@ -153,8 +162,25 @@ describe('Notion Posts mapping', () => {
         'https://images.xhs.justlikekatie.com/videos/assets/6c/6ca0927b-66ef-4a90-8c6d-39f9e6db903b.mp4',
       ],
       tags: [],
+      scheduledDate: '2026-08-01T15:30:00-04:00',
       publishBlockers: [],
     });
+  });
+
+  it('preserves a legacy date-only ScheduledDate without inventing a time', () => {
+    const fixture = pageFixture();
+    fixture.properties.ScheduledDate = {
+      id: 'scheduled-date',
+      type: 'date',
+      date: { start: '2026-08-02', end: null, time_zone: null },
+    };
+    const { resolved, duplicateAliases } = resolvePostsSchema(
+      Object.fromEntries(
+        Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
+      ),
+    );
+
+    expect(mapReadyXhsPost(fixture, resolved, duplicateAliases).scheduledDate).toBe('2026-08-02');
   });
 
   it('builds the exact confirmed-success backfill using existing property types', () => {

@@ -9,6 +9,10 @@ import type {
 import styles from './ReadyPostsPanel.module.css';
 import { responseJson } from '@/lib/response-json';
 import {
+  getEditorialScheduleDisplay,
+  type EditorialScheduleStatus,
+} from '@/lib/editorial-schedule';
+import {
   copyHandoffText,
   formatTags,
   getCanonicalVideoUrl,
@@ -29,6 +33,15 @@ type CopyStatus = {
   ok: boolean;
   message: string;
 };
+
+function scheduleStatusClass(status: EditorialScheduleStatus) {
+  return {
+    overdue: styles.scheduleOverdue,
+    due: styles.scheduleDue,
+    upcoming: styles.scheduleUpcoming,
+    unscheduled: styles.scheduleUnscheduled,
+  }[status];
+}
 
 export default function ReadyPostsPanel({
   sessionValid,
@@ -59,6 +72,9 @@ export default function ReadyPostsPanel({
   const showTitleCopy = selected
     ? shouldOfferTitleCopy(selected.headline, selected.caption)
     : false;
+  const selectedSchedule = selected
+    ? getEditorialScheduleDisplay(selected.scheduledDate)
+    : null;
   selectedPostIdRef.current = selected?.id;
 
   const loadPosts = useCallback(async () => {
@@ -93,6 +109,11 @@ export default function ReadyPostsPanel({
     const videoUrl = getCanonicalVideoUrl(selected.videoUrls);
     const confirmed = window.confirm(
       `Publish "${selected.headline}" to XHS now?\n\n` +
+      `Editorial schedule: ${
+        selectedSchedule?.china
+          ? `${selectedSchedule.et} / ${selectedSchedule.china}`
+          : selectedSchedule?.et
+      } (${selectedSchedule?.statusLabel})\n\n` +
       `Video: ${videoUrl || 'No canonical MEDIA MP4'}\n\n` +
       'This is a real publish action and cannot be undone from this admin.',
     );
@@ -174,27 +195,43 @@ export default function ReadyPostsPanel({
       ) : (
         <div className={styles.workspace}>
           <div className={styles.postList} aria-label="Publish-ready posts">
-            {posts.map((post) => (
-              <button
-                className={`${styles.postButton} ${
-                  selected?.id === post.id ? styles.postButtonSelected : ''
-                }`}
-                key={post.id}
-                type="button"
-                onClick={() => {
-                  setSelectedId(post.id);
-                  setError('');
-                  setSuccess(null);
-                  setCopyStatus(null);
-                }}
-              >
-                <span className={styles.postTitle}>{post.headline || 'Untitled post'}</span>
-                <span className={styles.postMeta}>
-                  {post.status || 'No status'} · {post.videoUrls.length} video
-                  {post.videoUrls.length === 1 ? '' : 's'}
-                </span>
-              </button>
-            ))}
+            {posts.map((post) => {
+              const postSchedule = getEditorialScheduleDisplay(post.scheduledDate);
+              return (
+                <button
+                  className={`${styles.postButton} ${
+                    selected?.id === post.id ? styles.postButtonSelected : ''
+                  }`}
+                  key={post.id}
+                  type="button"
+                  onClick={() => {
+                    setSelectedId(post.id);
+                    setError('');
+                    setSuccess(null);
+                    setCopyStatus(null);
+                  }}
+                >
+                  <span className={styles.postTitle}>{post.headline || 'Untitled post'}</span>
+                  <span className={styles.scheduleRow}>
+                    <span
+                      className={`${styles.scheduleBadge} ${
+                        scheduleStatusClass(postSchedule.status)
+                      }`}
+                    >
+                      {postSchedule.statusLabel}
+                    </span>
+                    <span className={styles.scheduleTimes}>
+                      <span>{postSchedule.et}</span>
+                      {postSchedule.china && <span>{postSchedule.china}</span>}
+                    </span>
+                  </span>
+                  <span className={styles.postMeta}>
+                    {post.status || 'No status'} · {post.videoUrls.length} video
+                    {post.videoUrls.length === 1 ? '' : 's'}
+                  </span>
+                </button>
+              );
+            })}
           </div>
 
           {selected && (
@@ -206,6 +243,27 @@ export default function ReadyPostsPanel({
                 </span>
               </div>
               <p className={styles.muted}>Notion status: {selected.status || 'Not set'}</p>
+              {selectedSchedule && (
+                <div className={styles.scheduleSummary}>
+                  <div className={styles.scheduleSummaryHeading}>
+                    <strong>Editorial schedule</strong>
+                    <span
+                      className={`${styles.scheduleBadge} ${
+                        scheduleStatusClass(selectedSchedule.status)
+                      }`}
+                    >
+                      {selectedSchedule.statusLabel}
+                    </span>
+                  </div>
+                  <p>
+                    {selectedSchedule.et}
+                    {selectedSchedule.china && ` · ${selectedSchedule.china}`}
+                  </p>
+                  <p className={styles.scheduleAdvisory}>
+                    Advisory only. You can stage or publish early for operator validation.
+                  </p>
+                </div>
+              )}
 
               {canonicalVideoUrl && (
                 <video
