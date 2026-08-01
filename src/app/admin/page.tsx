@@ -7,7 +7,7 @@ import { CREATOR_QR_UNAVAILABLE_DETAIL } from '@/lib/xhs-creator-login';
 import {
   creatorCookieFailureMessage,
   creatorSessionStatusPresentation,
-  type CreatorSessionResponse,
+  sanitizeCreatorSessionResponse,
 } from '@/lib/xhs-creator-session';
 
 const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
@@ -66,11 +66,12 @@ export default function AdminPage() {
     const path = '/admin/api/xhs/session';
     try {
       const res = await fetch(path, { headers });
-      const data = await responseJson<CreatorSessionResponse>(res, `GET ${path}`);
-      if (res.ok && typeof data.valid !== 'boolean') {
+      const data = await responseJson<Record<string, unknown>>(res, `GET ${path}`);
+      const normalized = sanitizeCreatorSessionResponse(data);
+      if (res.ok && typeof normalized.valid !== 'boolean') {
         throw new Error(`GET ${path} response did not include a boolean valid field.`);
       }
-      const presentation = creatorSessionStatusPresentation(data);
+      const presentation = creatorSessionStatusPresentation(normalized);
       setSessionValid(presentation.valid);
       setStatus(presentation.message);
       setStatusType(presentation.valid ? 'success' : 'error');
@@ -93,11 +94,12 @@ export default function AdminPage() {
         headers,
         body: JSON.stringify({ cookie }),
       });
-      const data = await responseJson<CreatorSessionResponse>(res, `POST ${path}`);
+      const data = await responseJson<Record<string, unknown>>(res, `POST ${path}`);
+      const normalized = sanitizeCreatorSessionResponse(data);
       if (!res.ok) {
-        throw new Error(creatorCookieFailureMessage(data));
+        throw new Error(creatorCookieFailureMessage(normalized));
       }
-      if (data.valid !== true) {
+      if (normalized.valid !== true) {
         throw new Error(`POST ${path} did not confirm a valid creator session.`);
       }
       setStatus('Creator session validated and saved. ✅');
