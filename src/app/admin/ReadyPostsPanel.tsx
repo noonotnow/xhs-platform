@@ -47,7 +47,7 @@ type MediaChoice = {
   type: LocalPublishMediaType;
   index: number;
   url: string;
-  compatibilityTrial?: 'trusted-unverified-mov';
+  compatibilityTrial?: 'unverified_mov';
 };
 
 function tagsFromInput(value: string) {
@@ -59,7 +59,7 @@ function tagsFromInput(value: string) {
 
 function jobStatusCopy(job: LocalPublishJobSummary | undefined) {
   if (!job) return null;
-  const movTrial = job.compatibilityTrial === 'trusted-unverified-mov';
+  const movTrial = job.compatibilityTrial === 'unverified_mov';
   if (job.status === 'queued') {
     return {
       tone: movTrial ? 'warning' : 'pending',
@@ -135,7 +135,7 @@ export default function ReadyPostsPanel() {
         type: 'video' as const,
         index,
         url,
-        compatibilityTrial: 'trusted-unverified-mov' as const,
+        compatibilityTrial: 'unverified_mov' as const,
       })),
       ...selected.imageUrls.map((url, index) => ({ type: 'image' as const, index, url })),
     ];
@@ -143,8 +143,7 @@ export default function ReadyPostsPanel() {
   const selectedMedia = mediaChoices.find(
     (choice) => `${choice.compatibilityTrial ?? choice.type}:${choice.index}` === mediaKey,
   ) ?? mediaChoices[0];
-  const isMovCompatibilityTrial =
-    selectedMedia?.compatibilityTrial === 'trusted-unverified-mov';
+  const isMovCompatibilityTrial = selectedMedia?.compatibilityTrial === 'unverified_mov';
   const movTrialHasUnrelatedBlockers = selected?.publishBlockers.some(
     (blocker) =>
       blocker !== 'Needs media is still checked' &&
@@ -245,7 +244,7 @@ export default function ReadyPostsPanel() {
     const firstChoice = selected?.videoUrls.length
       ? 'video:0'
       : selected?.compatibilityTrialVideoUrls?.length
-        ? 'trusted-unverified-mov:0'
+        ? 'unverified_mov:0'
         : selected?.imageUrls.length
           ? 'image:0'
           : '';

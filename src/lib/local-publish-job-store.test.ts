@@ -90,14 +90,19 @@ describe('local publish atomic claim storage', () => {
     mocks.sql.mockResolvedValue({
       rows: [{
         ...claimedRow(),
-        snapshot: { ...snapshot, compatibilityTrial: 'trusted-unverified-mov' },
+        snapshot: {
+          ...snapshot,
+          compatibilityTrial: 'unverified_mov',
+          thumbnailUrl: 'https://images.xhs.justlikekatie.com/uploads/thumb.jpg',
+        },
       }],
       rowCount: 1,
     });
 
     await expect(claimNextStoredLocalPublishJob(7_200)).resolves.toMatchObject({
-      compatibilityTrial: 'trusted-unverified-mov',
+      compatibilityTrial: 'unverified_mov',
       mediaUrl: snapshot.mediaUrl,
+      thumbnailUrl: 'https://images.xhs.justlikekatie.com/uploads/thumb.jpg',
     });
   });
 

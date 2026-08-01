@@ -161,7 +161,7 @@ export async function queueLocalPublishJob(
       existing.snapshot.mediaType === input.media.type &&
       existing.snapshot.mediaIndex === input.media.index &&
       existing.snapshot.compatibilityTrial === (
-        input.compatibilityTrialConfirmed ? 'trusted-unverified-mov' : undefined
+        input.compatibilityTrialConfirmed ? 'unverified_mov' : undefined
       );
     if (!matches) {
       throw new LocalPublishJobError(
