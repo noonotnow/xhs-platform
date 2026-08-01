@@ -3,8 +3,8 @@ export const CREATOR_QR_UNAVAILABLE_DETAIL = {
   message:
     'QR login is disabled because the available CAS flow targets ' +
     'merchant/Qianfan rather than a normal Rednote creator account. ' +
-    'Use manual cookie login with a fresh Cookie request-header value from ' +
-    'https://creator.rednote.com/login.',
+    'Use manual cookie login with a fresh Request Headers Cookie value from ' +
+    'an authenticated creator/webapi request at https://creator.rednote.com/login.',
 } as const;
 
 export const QR_NO_STORE_HEADERS = {

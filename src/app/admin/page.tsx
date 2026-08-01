@@ -410,8 +410,9 @@ export default function AdminPage() {
           <a href="https://creator.rednote.com/login" target="_blank" rel="noreferrer">
             creator.rednote.com/login
           </a>
-          . In DevTools Network, select a fresh authenticated request and copy only
-          {' '}Request Headers → Cookie in <code>name=value; name=value</code> format.
+          . In DevTools Network, select a fresh authenticated creator/webapi request
+          and copy only Request Headers → Cookie in{' '}
+          <code>name=value; name=value</code> format.
         </p>
         <textarea
           aria-label="Fresh authenticated Request Headers Cookie value"
