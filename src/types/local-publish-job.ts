@@ -3,8 +3,12 @@ export type LocalPublishCompatibilityTrial = 'unverified_mov';
 export type LocalPublishJobStatus =
   | 'queued'
   | 'claimed'
-  | 'ambiguous'
-  | 'succeeded'
+  | 'staged'
+  | 'submitted'
+  | 'scheduled'
+  | 'verification_pending'
+  | 'verified'
+  | 'reconciled'
   | 'failed';
 
 export interface LocalPublishSnapshot {
@@ -36,15 +40,37 @@ export interface LocalPublishJobSummary {
   updatedAt: string;
   claimedAt?: string;
   claimExpiresAt?: string;
+  verificationAttempts: number;
+  nextVerificationAt?: string;
+  stagedAt?: string;
+  dispatchedAt?: string;
+  verifiedAt?: string;
+  reconciledAt?: string;
   completedAt?: string;
 }
 
-export interface ClaimedLocalPublishJob
+interface ClaimedLocalPublishJobBase
   extends Omit<LocalPublishSnapshot, 'mediaIndex' | 'notionLastEditedTime'> {
   id: string;
   claimToken: string;
   claimExpiresAt: string;
 }
+
+export type ClaimedLocalPublishJob =
+  | (ClaimedLocalPublishJobBase & { status: 'claimed' | 'staged' })
+  | (ClaimedLocalPublishJobBase & {
+      status: 'submitted' | 'scheduled' | 'verification_pending';
+      noteId: string;
+      shareUrl: string;
+      verificationAttempts: number;
+      nextVerificationAt: string;
+    })
+  | (ClaimedLocalPublishJobBase & {
+      status: 'verified';
+      noteId: string;
+      shareUrl: string;
+      verificationAttempts: number;
+    });
 
 export interface ExternalPostSnapshot {
   noteId: string;

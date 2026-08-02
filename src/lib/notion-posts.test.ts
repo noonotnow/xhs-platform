@@ -232,6 +232,31 @@ describe('Notion Posts mapping', () => {
     });
   });
 
+  it('uses the legacy caption fallback when Final Tags is an empty multi-select', () => {
+    const fixture = pageFixture();
+    fixture.properties['Final Tags'] = {
+      id: 'final-tags',
+      type: 'multi_select',
+      multi_select: [],
+    };
+    fixture.properties['Weibo text'] = {
+      id: 'caption',
+      type: 'rich_text',
+      rich_text: richText('Legacy body\n\n#Legacy'),
+    };
+    const { resolved, duplicateAliases } = resolvePostsSchema(
+      Object.fromEntries(
+        Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
+      ),
+    );
+
+    expect(mapReadyXhsPost(fixture, resolved, duplicateAliases)).toMatchObject({
+      caption: 'Legacy body',
+      tags: ['Legacy'],
+      tagsSource: 'legacy-caption',
+    });
+  });
+
   it('does not strip trailing hashtags when Final Tags is populated', () => {
     const fixture = pageFixture();
     fixture.properties['Weibo text'] = {
@@ -249,6 +274,31 @@ describe('Notion Posts mapping', () => {
       caption: 'Canonical body #stays',
       tags: ['BTS', 'BehindTheScenes'],
       tagsSource: 'final-tags',
+    });
+  });
+
+  it('does not parse a rich-text Final Tags value as a tag list', () => {
+    const fixture = pageFixture();
+    fixture.properties['Final Tags'] = {
+      id: 'final-tags',
+      type: 'rich_text',
+      rich_text: richText('New Tag, Another Tag'),
+    };
+    fixture.properties['Weibo text'] = {
+      id: 'caption',
+      type: 'rich_text',
+      rich_text: richText('Legacy body\n\n#Legacy #Fallback'),
+    };
+    const { resolved, duplicateAliases } = resolvePostsSchema(
+      Object.fromEntries(
+        Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
+      ),
+    );
+
+    expect(mapReadyXhsPost(fixture, resolved, duplicateAliases)).toMatchObject({
+      caption: 'Legacy body',
+      tags: ['Legacy', 'Fallback'],
+      tagsSource: 'legacy-caption',
     });
   });
 

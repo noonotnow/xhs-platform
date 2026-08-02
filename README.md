@@ -74,6 +74,7 @@ in Vercel:
 | `NOTION_POSTS_DB_ID` | Canonical Posts database ID shared with the production CREATE workflow |
 | `LOCAL_PUBLISH_WORKER_TOKEN` | At least 32 random characters shared only with the trusted Mac-local browser worker |
 | `LOCAL_PUBLISH_JOB_LEASE_SECONDS` | Optional worker claim lease; defaults to 7200 seconds and is clamped to 60–86400 |
+| `LOCAL_PUBLISH_VERIFICATION_BACKOFF_SECONDS` | Optional four-value retry schedule; defaults to `900,3600,21600,86400` seconds (15m, 1h, 6h, 24h) |
 
 Database connections are selected in the order `XHS_DATABASE_URL`,
 `XHS_DATABASE_POSTGRES_URL`, `DATABASE_URL`, then `POSTGRES_URL`. The managed
@@ -102,11 +103,13 @@ Notion page before creating a queue job, confirms that it is still RedNote-ready
 and not `Published`, and builds an immutable snapshot from canonical HTTPS media.
 Client-provided media URLs and Notion metadata are never accepted. The operator
 can edit only the final reviewed title, caption, tags, and trusted media choice.
-`Weibo text` supplies the body-only caption, `Final Tags` supplies tags, and
+`Weibo text` supplies the body-only caption, native multi-select `Final Tags`
+supplies tag names directly as a string array, and
 `ScheduledDate` is the only scheduling property; generic Tags, Topics, Hashtags,
 Publish Date, and spaced Scheduled Date properties are not queue sources. When
-Final Tags is absent, legacy trailing hashtags may be split from Weibo text;
-hashtags elsewhere in the body are preserved.
+Final Tags is absent or empty, legacy trailing hashtags may be split from Weibo
+text; rich-text tag strings are never parsed, and hashtags elsewhere in the body
+are preserved.
 
 Trusted canonical MEDIA `.mov` registrations remain compatibility-unverified and
 are not added to the normal ready video set. Admin exposes a separate warning and
@@ -121,6 +124,7 @@ Apply the required queue migration before deploying the publishing pipeline:
 
 ```bash
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/003_local_publish_jobs.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/005_local_publish_job_lifecycle.sql
 ```
 
 External-post reconciliation is an isolated follow-up surface. Apply its migration
@@ -133,9 +137,11 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/004_external_post_reconcil
 
 Set `LOCAL_PUBLISH_WORKER_TOKEN` to a new random server-only value of at least
 32 characters in Vercel and in the Mac worker. The optional
-`LOCAL_PUBLISH_JOB_LEASE_SECONDS` defaults to two hours. A stale claimed job can
-be recovered by a later worker, which rotates the claim token so the previous
-worker can no longer report a result.
+`LOCAL_PUBLISH_JOB_LEASE_SECONDS` defaults to two hours. A stale claimed or staged
+job can be recovered by a later worker, which rotates the claim token so the
+previous worker can no longer report a result. Verification retries default to
+15 minutes, 1 hour, 6 hours, and 24 hours; set exactly four comma-separated
+values in `LOCAL_PUBLISH_VERIFICATION_BACKOFF_SECONDS` to override them.
 
 The local worker contract is:
 
@@ -143,43 +149,61 @@ The local worker contract is:
    `Authorization: Bearer <LOCAL_PUBLISH_WORKER_TOKEN>`. HTTP 204 means the queue
    is empty. A claim returns `id`, `notionPageId`, `headline`, `title`, `caption`,
    `tags`, `platform`, `mediaType`, `mediaUrl`, optional `thumbnailUrl`, optional
-   canonical UTC `publishAt`, `claimToken`, and `claimExpiresAt`. `publishAt` is
-   present exactly when Notion has `ScheduledDate`; its absence means immediate
-   mode after human approval. An unverified MOV trial additionally returns
-   `"compatibilityTrial":"unverified_mov"`; normal jobs omit this field.
-2. Stage the asset and reviewed copy at `https://creator.rednote.com`, wait for
-   explicit human approval, publish, confirm `/publish/success`, find the exact
-   post in `/new/note-manager`, and verify
-   `https://www.rednote.com/explore/{noteId}`.
+   canonical UTC `publishAt`, `claimToken`, `claimExpiresAt`, and `status`.
+   `publishAt` is present exactly when Notion has `ScheduledDate`; its absence
+   means immediate mode after human approval. An unverified MOV trial additionally
+   returns `"compatibilityTrial":"unverified_mov"`; normal jobs omit this field.
+2. A claim with `status` `claimed` or `staged` is dispatch work. Stage the asset
+   and reviewed copy at `https://creator.rednote.com`, report `staged`, wait for
+   explicit human approval, submit or schedule, and capture the exact stable note
+   ID and URL from authenticated Creator.
    For `unverified_mov`, a Creator staging rejection must be reported as failed
    without clicking Publish. If staging succeeds, the worker must still wait for
    the existing exact `PUBLISH <jobId>` human approval before any Publish click;
    it must never auto-publish.
-3. `POST /api/local-publish-jobs/{id}/result` with the bearer token and
-   `X-Local-Publish-Claim-Token: <claimToken>`. The only accepted bodies are
-   `{"status":"succeeded","noteId":"...","shareUrl":"https://www.rednote.com/explore/..."}`
-   and `{"status":"failed","code":"SAFE_CODE","message":"Safe operator message"}`.
-   Report a discarded staging session as a failure such as
-   `STAGING_DISCARDED`; never abandon a claim silently.
+3. A claim with `status` `submitted`, `scheduled`, or `verification_pending`
+   is verification-only work and includes durable `noteId`, `shareUrl`,
+   `verificationAttempts`, and `nextVerificationAt`. Never click Publish for
+   these states. Query-free public error `300031`, processing, indexing delay, or
+   any other post-dispatch uncertainty must be reported as
+   `verification_pending`, not failed. A scheduled job's first check is anchored
+   after its frozen `publishAt`; an immediate submission's first check starts
+   after the initial 15-minute delay.
+4. A claim with `status` `verified` is reconciliation-only work. It includes the
+   durable identifiers and must be re-reported as `verified` without dispatching
+   or creating another post. This makes a Notion outage recoverable even after
+   the original worker exits.
+5. `POST /api/local-publish-jobs/{id}/result` with the bearer token and
+   `X-Local-Publish-Claim-Token: <claimToken>`. Accepted bodies are:
+   - `{"status":"staged"}`
+   - `{"status":"submitted","noteId":"...","shareUrl":"https://www.rednote.com/explore/..."}`
+   - `{"status":"scheduled","noteId":"...","shareUrl":"https://www.rednote.com/explore/..."}`
+   - `{"status":"verification_pending","noteId":"...","shareUrl":"https://www.rednote.com/explore/...","code":"REDNOTE_300031","message":"Safe operator message"}`
+   - `{"status":"verified","noteId":"...","shareUrl":"https://www.rednote.com/explore/..."}`
+   - `{"status":"failed","code":"SAFE_CODE","message":"Safe operator message"}`,
+     only before dispatch while the durable state is `claimed` or `staged`.
 
-The success URL must exactly match the same note ID and cannot include a query,
-fragment, alternate host, or trailing slash. A verified success first enters an
-`ambiguous` reconciliation state, then updates Notion through the existing
-aliases (`Status=Published`, `Rednote URL`, `Rednote Note ID`, and the established
-published `Next action`) before the job becomes `succeeded`. If Notion backfill
-fails, retry the identical success report with the same claim token; do not
-publish again. Queued, claimed, failed, expired, or malformed results never mark
-Notion as Published.
+The lifecycle is `queued -> claimed -> staged -> submitted|scheduled ->
+verification_pending -> verified -> reconciled`; a verified result may skip
+intermediate reporting but is always persisted before reconciliation. The
+success URL must exactly match the same note ID and cannot include a query,
+fragment, alternate host, or trailing slash. Only `verified` updates Notion
+through the existing aliases (`Status=Published`, `Rednote URL`, `Rednote Note
+ID`, and the established published `Next action`), and only successful Notion
+backfill advances the job to `reconciled`. If backfill fails, the row remains
+`verified` and is reclaimable for idempotent reconciliation. The legacy worker
+body `status:"succeeded"` remains accepted as a `verified` alias during rollout.
+`metrics_available` is a later sync concern and is not a publication-verification
+state.
 
 The compatibility marker is stored inside the immutable JSONB job snapshot and
-shown in the operator audit. No additional database migration is required beyond
-`003_local_publish_jobs.sql`.
-
-Queue snapshots remain JSONB, so this contract requires no table migration. New
-rows store `publishAt` and never store `scheduledDate`. Existing rows remain
-readable: the server removes legacy `scheduledDate` from the worker response and
-normalizes it to canonical UTC `publishAt` in memory. The worker must consume
-`publishAt` as the intended publish instant and must not read Notion.
+shown in the operator audit. Queue snapshots remain JSONB: new rows store
+`publishAt` and never store `scheduledDate`, while existing snapshots normalize
+legacy `scheduledDate` to canonical UTC `publishAt` in memory. Migration `005`
+adds lifecycle timestamps and retry state without rewriting snapshots, maps
+legacy `ambiguous` rows to `verified`, and maps legacy `succeeded` rows to
+`reconciled`. The worker must consume the frozen snapshot and must never read
+Notion.
 
 Posts created outside this queue can be reconciled by the same trusted worker:
 

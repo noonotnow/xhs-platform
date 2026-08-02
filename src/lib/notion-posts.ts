@@ -159,6 +159,12 @@ function values(value: PageProperty | undefined): string[] {
   return text ? [text] : [];
 }
 
+function multiSelectNames(value: PageProperty | undefined): string[] {
+  return value?.type === 'multi_select'
+    ? value.multi_select.map((item) => item.name)
+    : [];
+}
+
 function checkbox(value: PageProperty | undefined): boolean {
   if (!value) return false;
   if (value.type === 'checkbox') return value.checkbox;
@@ -310,7 +316,7 @@ export function mapReadyXhsPost(
 ): ReadyXhsPost {
   const mediaUrls = urls(property(page, schema, 'mediaUrls'));
   const rawCaption = plainText(property(page, schema, 'caption'));
-  const finalTags = values(property(page, schema, 'tags'));
+  const finalTags = multiSelectNames(property(page, schema, 'tags'));
   const legacyCopy = finalTags.length === 0
     ? extractLegacyTrailingHashtags(rawCaption)
     : { caption: rawCaption.trim(), tags: [] };

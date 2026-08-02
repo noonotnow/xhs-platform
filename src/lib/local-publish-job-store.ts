@@ -13,12 +13,18 @@ interface LocalPublishJobRow extends QueryResultRow {
   id: string;
   notion_page_id: string;
   snapshot: LocalPublishSnapshot & { scheduledDate?: string };
-  status: LocalPublishJobStatus;
+  status: LocalPublishJobStatus | 'ambiguous' | 'succeeded';
   idempotency_key: string;
   claim_token: string | null;
   claim_attempts: number;
   claimed_at: Date | string | null;
   claim_expires_at: Date | string | null;
+  verification_attempts?: number;
+  next_verification_at?: Date | string | null;
+  staged_at?: Date | string | null;
+  dispatched_at?: Date | string | null;
+  verified_at?: Date | string | null;
+  reconciled_at?: Date | string | null;
   error_code: string | null;
   error_message: string | null;
   note_id: string | null;
@@ -42,6 +48,12 @@ export interface StoredLocalPublishJob {
   updatedAt: string;
   claimedAt?: string;
   claimExpiresAt?: string;
+  verificationAttempts: number;
+  nextVerificationAt?: string;
+  stagedAt?: string;
+  dispatchedAt?: string;
+  verifiedAt?: string;
+  reconciledAt?: string;
   completedAt?: string;
 }
 
@@ -51,6 +63,12 @@ function timestamp(value: Date | string) {
 
 function optionalTimestamp(value: Date | string | null) {
   return value ? timestamp(value) : undefined;
+}
+
+function canonicalStatus(status: LocalPublishJobRow['status']): LocalPublishJobStatus {
+  if (status === 'ambiguous') return 'verified';
+  if (status === 'succeeded') return 'reconciled';
+  return status;
 }
 
 export function normalizeStoredLocalPublishSnapshot(
@@ -74,7 +92,7 @@ function mapRow(row: LocalPublishJobRow): StoredLocalPublishJob {
     id: row.id,
     notionPageId: row.notion_page_id,
     snapshot: normalizeStoredLocalPublishSnapshot(row.snapshot),
-    status: row.status,
+    status: canonicalStatus(row.status),
     ...(row.claim_token ? { claimToken: row.claim_token } : {}),
     ...(row.error_code ? { errorCode: row.error_code } : {}),
     ...(row.error_message ? { errorMessage: row.error_message } : {}),
@@ -85,6 +103,22 @@ function mapRow(row: LocalPublishJobRow): StoredLocalPublishJob {
     ...(optionalTimestamp(row.claimed_at) ? { claimedAt: optionalTimestamp(row.claimed_at) } : {}),
     ...(optionalTimestamp(row.claim_expires_at)
       ? { claimExpiresAt: optionalTimestamp(row.claim_expires_at) }
+      : {}),
+    verificationAttempts: row.verification_attempts ?? 0,
+    ...(optionalTimestamp(row.next_verification_at ?? null)
+      ? { nextVerificationAt: optionalTimestamp(row.next_verification_at ?? null) }
+      : {}),
+    ...(optionalTimestamp(row.staged_at ?? null)
+      ? { stagedAt: optionalTimestamp(row.staged_at ?? null) }
+      : {}),
+    ...(optionalTimestamp(row.dispatched_at ?? null)
+      ? { dispatchedAt: optionalTimestamp(row.dispatched_at ?? null) }
+      : {}),
+    ...(optionalTimestamp(row.verified_at ?? null)
+      ? { verifiedAt: optionalTimestamp(row.verified_at ?? null) }
+      : {}),
+    ...(optionalTimestamp(row.reconciled_at ?? null)
+      ? { reconciledAt: optionalTimestamp(row.reconciled_at ?? null) }
       : {}),
     ...(optionalTimestamp(row.completed_at)
       ? { completedAt: optionalTimestamp(row.completed_at) }
@@ -108,6 +142,12 @@ export function jobSummary(job: StoredLocalPublishJob): LocalPublishJobSummary {
     updatedAt: job.updatedAt,
     ...(job.claimedAt ? { claimedAt: job.claimedAt } : {}),
     ...(job.claimExpiresAt ? { claimExpiresAt: job.claimExpiresAt } : {}),
+    verificationAttempts: job.verificationAttempts,
+    ...(job.nextVerificationAt ? { nextVerificationAt: job.nextVerificationAt } : {}),
+    ...(job.stagedAt ? { stagedAt: job.stagedAt } : {}),
+    ...(job.dispatchedAt ? { dispatchedAt: job.dispatchedAt } : {}),
+    ...(job.verifiedAt ? { verifiedAt: job.verifiedAt } : {}),
+    ...(job.reconciledAt ? { reconciledAt: job.reconciledAt } : {}),
     ...(job.completedAt ? { completedAt: job.completedAt } : {}),
   };
 }
@@ -160,7 +200,7 @@ export async function insertLocalPublishJob(
     SELECT *
     FROM local_publish_jobs
     WHERE notion_page_id = ${snapshot.notionPageId}
-      AND status IN ('queued', 'claimed', 'ambiguous')
+      AND status NOT IN ('reconciled', 'succeeded', 'failed')
     ORDER BY created_at DESC
     LIMIT 1
   `;
@@ -203,22 +243,47 @@ export async function claimNextStoredLocalPublishJob(
 ): Promise<ClaimedLocalPublishJob | null> {
   const result = await sql<LocalPublishJobRow>`
     WITH candidate AS (
-      SELECT id
+      SELECT id, status
       FROM local_publish_jobs
       WHERE status = 'queued'
         OR (status = 'claimed' AND claim_expires_at <= CURRENT_TIMESTAMP)
-      ORDER BY COALESCE(claim_expires_at, created_at), created_at
+        OR (status = 'staged' AND claim_expires_at <= CURRENT_TIMESTAMP)
+        OR (
+          status IN ('submitted', 'scheduled', 'verification_pending')
+          AND next_verification_at <= CURRENT_TIMESTAMP
+          AND (
+            claim_expires_at IS NULL
+            OR claim_expires_at <= CURRENT_TIMESTAMP
+          )
+        )
+        OR (
+          status = 'verified'
+          AND (
+            claim_expires_at IS NULL
+            OR claim_expires_at <= CURRENT_TIMESTAMP
+          )
+        )
+      ORDER BY COALESCE(next_verification_at, claim_expires_at, created_at), created_at
       FOR UPDATE SKIP LOCKED
       LIMIT 1
     )
     UPDATE local_publish_jobs AS job
-    SET status = 'claimed',
+    SET status = CASE
+          WHEN candidate.status IN ('queued', 'claimed') THEN 'claimed'
+          ELSE candidate.status
+        END,
         claim_token = gen_random_uuid(),
         claim_attempts = claim_attempts + 1,
         claimed_at = CURRENT_TIMESTAMP,
         claim_expires_at = CURRENT_TIMESTAMP + (${leaseSeconds} * INTERVAL '1 second'),
-        error_code = NULL,
-        error_message = NULL,
+        error_code = CASE
+          WHEN candidate.status IN ('queued', 'claimed', 'staged') THEN NULL
+          ELSE job.error_code
+        END,
+        error_message = CASE
+          WHEN candidate.status IN ('queued', 'claimed', 'staged') THEN NULL
+          ELSE job.error_message
+        END,
         updated_at = CURRENT_TIMESTAMP
     FROM candidate
     WHERE job.id = candidate.id
@@ -227,8 +292,9 @@ export async function claimNextStoredLocalPublishJob(
   const row = result.rows[0];
   if (!row?.claim_token || !row.claim_expires_at) return null;
   const job = mapRow(row);
-  return {
+  const base = {
     id: job.id,
+    status: job.status,
     notionPageId: job.snapshot.notionPageId,
     headline: job.snapshot.headline,
     title: job.snapshot.title,
@@ -245,6 +311,44 @@ export async function claimNextStoredLocalPublishJob(
     claimToken: row.claim_token,
     claimExpiresAt: timestamp(row.claim_expires_at),
   };
+  if (
+    job.status === 'submitted' ||
+    job.status === 'scheduled' ||
+    job.status === 'verification_pending'
+  ) {
+    if (!job.noteId || !job.shareUrl || !job.nextVerificationAt) {
+      throw new LocalPublishJobError(
+        'A verification job is missing durable publication identifiers',
+        'INVALID_VERIFICATION_JOB',
+        500,
+      );
+    }
+    return {
+      ...base,
+      status: job.status,
+      noteId: job.noteId,
+      shareUrl: job.shareUrl,
+      verificationAttempts: job.verificationAttempts,
+      nextVerificationAt: job.nextVerificationAt,
+    };
+  }
+  if (job.status === 'verified') {
+    if (!job.noteId || !job.shareUrl) {
+      throw new LocalPublishJobError(
+        'A reconciliation job is missing durable publication identifiers',
+        'INVALID_RECONCILIATION_JOB',
+        500,
+      );
+    }
+    return {
+      ...base,
+      status: job.status,
+      noteId: job.noteId,
+      shareUrl: job.shareUrl,
+      verificationAttempts: job.verificationAttempts,
+    };
+  }
+  return { ...base, status: job.status as 'claimed' | 'staged' };
 }
 
 async function loadResultJob(id: string) {
@@ -271,6 +375,145 @@ function assertMatchingClaim(job: StoredLocalPublishJob, claimToken: string) {
   }
 }
 
+export async function stageStoredLocalPublishJob(id: string, claimToken: string) {
+  const result = await sql<LocalPublishJobRow>`
+    UPDATE local_publish_jobs
+    SET status = 'staged',
+        staged_at = COALESCE(staged_at, CURRENT_TIMESTAMP),
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ${id}::uuid
+      AND status = 'claimed'
+      AND claim_token = ${claimToken}::uuid
+    RETURNING *
+  `;
+  if (result.rows[0]) return mapRow(result.rows[0]);
+
+  const job = await loadResultJob(id);
+  assertMatchingClaim(job, claimToken);
+  if (job.status === 'staged') return job;
+  throw new LocalPublishJobError(
+    'The job cannot transition to staged from its current state',
+    'INVALID_JOB_TRANSITION',
+    409,
+  );
+}
+
+export async function recordStoredLocalPublishDispatch(
+  id: string,
+  claimToken: string,
+  status: 'submitted' | 'scheduled',
+  noteId: string,
+  shareUrl: string,
+  initialVerificationDelaySeconds: number,
+) {
+  const result = await sql<LocalPublishJobRow>`
+    UPDATE local_publish_jobs
+    SET status = ${status},
+        note_id = ${noteId},
+        share_url = ${shareUrl},
+        dispatched_at = COALESCE(dispatched_at, CURRENT_TIMESTAMP),
+        verification_attempts = 0,
+        next_verification_at = GREATEST(
+          CURRENT_TIMESTAMP,
+          CASE
+            WHEN ${status} = 'scheduled'
+              AND COALESCE(
+                snapshot->>'publishAt',
+                snapshot->>'scheduledDate'
+              ) IS NOT NULL
+              THEN COALESCE(
+                snapshot->>'publishAt',
+                snapshot->>'scheduledDate'
+              )::timestamptz
+            ELSE CURRENT_TIMESTAMP
+          END
+        ) + (${initialVerificationDelaySeconds} * INTERVAL '1 second'),
+        claim_expires_at = CURRENT_TIMESTAMP,
+        error_code = NULL,
+        error_message = NULL,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ${id}::uuid
+      AND status IN ('claimed', 'staged')
+      AND claim_token = ${claimToken}::uuid
+    RETURNING *
+  `;
+  if (result.rows[0]) return mapRow(result.rows[0]);
+
+  const job = await loadResultJob(id);
+  assertMatchingClaim(job, claimToken);
+  if (
+    ['submitted', 'scheduled', 'verification_pending', 'verified', 'reconciled']
+      .includes(job.status) &&
+    job.noteId === noteId &&
+    job.shareUrl === shareUrl
+  ) {
+    return job;
+  }
+  throw new LocalPublishJobError(
+    'The job cannot record this dispatch from its current state',
+    'INVALID_JOB_TRANSITION',
+    409,
+  );
+}
+
+export async function deferStoredLocalPublishVerification(
+  id: string,
+  claimToken: string,
+  noteId: string,
+  shareUrl: string,
+  code: string,
+  message: string,
+  backoffSeconds: readonly [number, number, number, number],
+) {
+  const result = await sql<LocalPublishJobRow>`
+    UPDATE local_publish_jobs
+    SET status = 'verification_pending',
+        verification_attempts = verification_attempts + 1,
+        next_verification_at = CURRENT_TIMESTAMP + (
+          CASE LEAST(verification_attempts, 3)
+            WHEN 0 THEN ${backoffSeconds[0]}
+            WHEN 1 THEN ${backoffSeconds[1]}
+            WHEN 2 THEN ${backoffSeconds[2]}
+            ELSE ${backoffSeconds[3]}
+          END * INTERVAL '1 second'
+        ),
+        error_code = ${code},
+        error_message = ${message},
+        claim_expires_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ${id}::uuid
+      AND claim_token = ${claimToken}::uuid
+      AND note_id = ${noteId}
+      AND share_url = ${shareUrl}
+      AND (
+        status IN ('submitted', 'scheduled')
+        OR (
+          status = 'verification_pending'
+          AND next_verification_at <= claimed_at
+        )
+      )
+    RETURNING *
+  `;
+  if (result.rows[0]) return mapRow(result.rows[0]);
+
+  const job = await loadResultJob(id);
+  assertMatchingClaim(job, claimToken);
+  if (
+    job.status === 'verification_pending' &&
+    job.noteId === noteId &&
+    job.shareUrl === shareUrl &&
+    job.errorCode === code &&
+    job.errorMessage === message
+  ) {
+    return job;
+  }
+  throw new LocalPublishJobError(
+    'The job cannot defer verification from its current state',
+    'INVALID_JOB_TRANSITION',
+    409,
+  );
+}
+
 export async function failStoredLocalPublishJob(
   id: string,
   claimToken: string,
@@ -285,7 +528,7 @@ export async function failStoredLocalPublishJob(
         completed_at = CURRENT_TIMESTAMP,
         updated_at = CURRENT_TIMESTAMP
     WHERE id = ${id}::uuid
-      AND status = 'claimed'
+      AND status IN ('claimed', 'staged')
       AND claim_token = ${claimToken}::uuid
     RETURNING *
   `;
@@ -303,7 +546,7 @@ export async function failStoredLocalPublishJob(
   );
 }
 
-export async function prepareStoredLocalPublishSuccess(
+export async function prepareStoredLocalPublishVerification(
   id: string,
   claimToken: string,
   noteId: string,
@@ -311,13 +554,35 @@ export async function prepareStoredLocalPublishSuccess(
 ) {
   const result = await sql<LocalPublishJobRow>`
     UPDATE local_publish_jobs
-    SET status = 'ambiguous',
-        note_id = ${noteId},
-        share_url = ${shareUrl},
+    SET status = 'verified',
+        note_id = COALESCE(note_id, ${noteId}),
+        share_url = COALESCE(share_url, ${shareUrl}),
+        verified_at = COALESCE(verified_at, CURRENT_TIMESTAMP),
+        next_verification_at = NULL,
+        error_code = NULL,
+        error_message = NULL,
         updated_at = CURRENT_TIMESTAMP
     WHERE id = ${id}::uuid
-      AND status = 'claimed'
+      AND status IN (
+        'claimed',
+        'staged',
+        'submitted',
+        'scheduled',
+        'verification_pending'
+      )
       AND claim_token = ${claimToken}::uuid
+      AND (
+        (
+          status IN ('claimed', 'staged')
+          AND (note_id IS NULL OR note_id = ${noteId})
+          AND (share_url IS NULL OR share_url = ${shareUrl})
+        )
+        OR (
+          status IN ('submitted', 'scheduled', 'verification_pending')
+          AND note_id = ${noteId}
+          AND share_url = ${shareUrl}
+        )
+      )
     RETURNING *
   `;
   if (result.rows[0]) return mapRow(result.rows[0]);
@@ -325,7 +590,7 @@ export async function prepareStoredLocalPublishSuccess(
   const job = await loadResultJob(id);
   assertMatchingClaim(job, claimToken);
   if (
-    (job.status === 'ambiguous' || job.status === 'succeeded') &&
+    (job.status === 'verified' || job.status === 'reconciled') &&
     job.noteId === noteId &&
     job.shareUrl === shareUrl
   ) {
@@ -338,7 +603,7 @@ export async function prepareStoredLocalPublishSuccess(
   );
 }
 
-export async function completeStoredLocalPublishSuccess(
+export async function completeStoredLocalPublishReconciliation(
   id: string,
   claimToken: string,
   noteId: string,
@@ -346,11 +611,12 @@ export async function completeStoredLocalPublishSuccess(
 ) {
   const result = await sql<LocalPublishJobRow>`
     UPDATE local_publish_jobs
-    SET status = 'succeeded',
+    SET status = 'reconciled',
+        reconciled_at = COALESCE(reconciled_at, CURRENT_TIMESTAMP),
         completed_at = CURRENT_TIMESTAMP,
         updated_at = CURRENT_TIMESTAMP
     WHERE id = ${id}::uuid
-      AND status = 'ambiguous'
+      AND status = 'verified'
       AND claim_token = ${claimToken}::uuid
       AND note_id = ${noteId}
       AND share_url = ${shareUrl}
@@ -360,7 +626,7 @@ export async function completeStoredLocalPublishSuccess(
 
   const job = await loadResultJob(id);
   assertMatchingClaim(job, claimToken);
-  if (job.status === 'succeeded' && job.noteId === noteId && job.shareUrl === shareUrl) {
+  if (job.status === 'reconciled' && job.noteId === noteId && job.shareUrl === shareUrl) {
     return job;
   }
   throw new LocalPublishJobError(

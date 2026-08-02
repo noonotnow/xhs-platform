@@ -106,12 +106,47 @@ function jobStatusCopy(job: LocalPublishJobSummary | undefined) {
         : 'Browser staging or human review is in progress. This post is not published yet.',
     };
   }
-  if (job.status === 'ambiguous') {
+  if (job.status === 'staged') {
+    return {
+      tone: 'pending',
+      title: 'Staged in RedNote Creator',
+      detail: 'The packet is staged but has not been submitted. A definitive staging error may still fail safely.',
+    };
+  }
+  if (job.status === 'submitted' || job.status === 'scheduled') {
+    return {
+      tone: 'pending',
+      title: job.status === 'scheduled'
+        ? 'Scheduled in RedNote Creator'
+        : 'Submitted to RedNote',
+      detail: job.nextVerificationAt
+        ? `Stable identifiers are saved. Public verification is due ${new Intl.DateTimeFormat(
+            undefined,
+            { dateStyle: 'medium', timeStyle: 'short' },
+          ).format(new Date(job.nextVerificationAt))}. Do not publish again.`
+        : 'Stable identifiers are saved. Public verification is pending; do not publish again.',
+    };
+  }
+  if (job.status === 'verification_pending') {
     return {
       tone: 'warning',
-      title: 'Published result needs reconciliation',
+      title: `Public verification pending${job.errorCode ? ` (${job.errorCode})` : ''}`,
+      detail: job.nextVerificationAt
+        ? `${job.errorMessage || 'RedNote is still processing or indexing the post.'} Retry is due ${
+            new Intl.DateTimeFormat(undefined, {
+              dateStyle: 'medium',
+              timeStyle: 'short',
+            }).format(new Date(job.nextVerificationAt))
+          }. Do not publish again.`
+        : `${job.errorMessage || 'RedNote is still processing or indexing the post.'} Do not publish again.`,
+    };
+  }
+  if (job.status === 'verified') {
+    return {
+      tone: 'warning',
+      title: 'Public post verified; Notion reconciliation pending',
       detail:
-        'RedNote success was verified, but Notion backfill is incomplete. Do not publish again; retry the same success report.',
+        'The query-free public post is visible. Do not publish again; retry the same verified report to finish Notion backfill.',
     };
   }
   if (job.status === 'failed') {
@@ -123,8 +158,8 @@ function jobStatusCopy(job: LocalPublishJobSummary | undefined) {
   }
   return {
     tone: 'success',
-    title: 'Published and backfilled',
-    detail: 'The exact RedNote post was verified before Notion was marked Published.',
+    title: 'Verified and reconciled',
+    detail: 'The exact public RedNote post was verified before Notion was marked Published.',
   };
 }
 
@@ -178,9 +213,11 @@ export default function ReadyPostsPanel() {
     ? jobs.find((job) => job.notionPageId === selected.id)
     : undefined;
   const currentJobStatus = jobStatusCopy(currentJob);
-  const hasActiveJob = currentJob?.status === 'queued' ||
-    currentJob?.status === 'claimed' ||
-    currentJob?.status === 'ambiguous';
+  const hasActiveJob = Boolean(
+    currentJob &&
+    currentJob.status !== 'failed' &&
+    currentJob.status !== 'reconciled',
+  );
   const reviewedTags = tagsFromInput(finalTags);
   const missingTags = getMissingTags(reviewedTags, finalCaption);
   const showTitleCopy = shouldOfferTitleCopy(finalTitle, finalCaption);
@@ -474,7 +511,9 @@ export default function ReadyPostsPanel() {
                   >
                     <strong>{currentJobStatus.title}</strong>
                     <p>{currentJobStatus.detail}</p>
-                    {currentJob?.status === 'succeeded' && currentJob.shareUrl && (
+                    {(currentJob?.status === 'verified' ||
+                      currentJob?.status === 'reconciled') &&
+                      currentJob.shareUrl && (
                       <a href={currentJob.shareUrl} {...SAFE_EXTERNAL_LINK_PROPS}>
                         Open verified RedNote post
                       </a>
