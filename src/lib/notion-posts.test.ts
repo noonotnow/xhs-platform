@@ -98,6 +98,23 @@ function pageFixture(): PageObjectResponse {
         type: 'rich_text',
         rich_text: richText('Hot take: the BTS is often the best part of the drama.'),
       },
+      'Final Tags': {
+        id: 'final-tags',
+        type: 'multi_select',
+        multi_select: [
+          { id: 'bts', name: 'BTS', color: 'purple' },
+          { id: 'behind-the-scenes', name: 'BehindTheScenes', color: 'blue' },
+        ],
+      },
+      ScheduledDate: {
+        id: 'scheduled-date',
+        type: 'date',
+        date: {
+          start: '2026-08-04T09:30:00-04:00',
+          end: null,
+          time_zone: null,
+        },
+      },
       'Publish packet ready': { id: 'packet', type: 'checkbox', checkbox: true },
       'Has video': { id: 'has-video', type: 'checkbox', checkbox: true },
       'Needs media': { id: 'needs-media', type: 'checkbox', checkbox: false },
@@ -174,6 +191,8 @@ describe('Notion Posts mapping', () => {
 
     expect(resolved.xhsShareUrl).toBe('Rednote URL');
     expect(resolved.xhsNoteId).toBe('Rednote Note ID');
+    expect(resolved.tags).toBe('Final Tags');
+    expect(resolved.scheduledDate).toBe('ScheduledDate');
     expect(mapReadyXhsPost(fixture, resolved, duplicateAliases)).toMatchObject({
       headline: 'Hot take: BTS is often the best part of the drama',
       caption: 'Hot take: the BTS is often the best part of the drama.',
@@ -185,9 +204,157 @@ describe('Notion Posts mapping', () => {
       videoUrls: [
         'https://images.xhs.justlikekatie.com/videos/assets/6c/6ca0927b-66ef-4a90-8c6d-39f9e6db903b.mp4',
       ],
-      tags: [],
+      tags: ['BTS', 'BehindTheScenes'],
+      tagsSource: 'final-tags',
+      publishAt: '2026-08-04T13:30:00.000Z',
       publishBlockers: [],
     });
+  });
+
+  it('uses only trailing Weibo hashtags as an explicit legacy tags fallback', () => {
+    const fixture = pageFixture();
+    delete fixture.properties['Final Tags'];
+    fixture.properties['Weibo text'] = {
+      id: 'caption',
+      type: 'rich_text',
+      rich_text: richText('Keep #inline in the body.\n\n#Legacy #旧标签'),
+    };
+    const { resolved, duplicateAliases } = resolvePostsSchema(
+      Object.fromEntries(
+        Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
+      ),
+    );
+
+    expect(mapReadyXhsPost(fixture, resolved, duplicateAliases)).toMatchObject({
+      caption: 'Keep #inline in the body.',
+      tags: ['Legacy', '旧标签'],
+      tagsSource: 'legacy-caption',
+    });
+  });
+
+  it('uses the legacy caption fallback when Final Tags is an empty multi-select', () => {
+    const fixture = pageFixture();
+    fixture.properties['Final Tags'] = {
+      id: 'final-tags',
+      type: 'multi_select',
+      multi_select: [],
+    };
+    fixture.properties['Weibo text'] = {
+      id: 'caption',
+      type: 'rich_text',
+      rich_text: richText('Legacy body\n\n#Legacy'),
+    };
+    const { resolved, duplicateAliases } = resolvePostsSchema(
+      Object.fromEntries(
+        Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
+      ),
+    );
+
+    expect(mapReadyXhsPost(fixture, resolved, duplicateAliases)).toMatchObject({
+      caption: 'Legacy body',
+      tags: ['Legacy'],
+      tagsSource: 'legacy-caption',
+    });
+  });
+
+  it('does not strip trailing hashtags when Final Tags is populated', () => {
+    const fixture = pageFixture();
+    fixture.properties['Weibo text'] = {
+      id: 'caption',
+      type: 'rich_text',
+      rich_text: richText('Canonical body #stays'),
+    };
+    const { resolved, duplicateAliases } = resolvePostsSchema(
+      Object.fromEntries(
+        Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
+      ),
+    );
+
+    expect(mapReadyXhsPost(fixture, resolved, duplicateAliases)).toMatchObject({
+      caption: 'Canonical body #stays',
+      tags: ['BTS', 'BehindTheScenes'],
+      tagsSource: 'final-tags',
+    });
+  });
+
+  it('does not parse a rich-text Final Tags value as a tag list', () => {
+    const fixture = pageFixture();
+    fixture.properties['Final Tags'] = {
+      id: 'final-tags',
+      type: 'rich_text',
+      rich_text: richText('New Tag, Another Tag'),
+    };
+    fixture.properties['Weibo text'] = {
+      id: 'caption',
+      type: 'rich_text',
+      rich_text: richText('Legacy body\n\n#Legacy #Fallback'),
+    };
+    const { resolved, duplicateAliases } = resolvePostsSchema(
+      Object.fromEntries(
+        Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
+      ),
+    );
+
+    expect(mapReadyXhsPost(fixture, resolved, duplicateAliases)).toMatchObject({
+      caption: 'Legacy body',
+      tags: ['Legacy', 'Fallback'],
+      tagsSource: 'legacy-caption',
+    });
+  });
+
+  it('fails closed when ScheduledDate lacks a publish time and timezone', () => {
+    const fixture = pageFixture();
+    fixture.properties.ScheduledDate = {
+      id: 'scheduled-date',
+      type: 'date',
+      date: { start: '2026-08-04', end: null, time_zone: null },
+    };
+    const { resolved, duplicateAliases } = resolvePostsSchema(
+      Object.fromEntries(
+        Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
+      ),
+    );
+    const post = mapReadyXhsPost(fixture, resolved, duplicateAliases);
+
+    expect(post.publishAt).toBeUndefined();
+    expect(post.publishBlockers).toContain(
+      'ScheduledDate must include a valid publish time and timezone',
+    );
+  });
+
+  it('rejects calendar and time rollover instead of changing the intended instant', () => {
+    const invalidValues = [
+      '2026-02-30T09:30:00-04:00',
+      '2026-08-04T24:00:00-04:00',
+      '2026-08-04T09:60:00-04:00',
+      '2026-08-04T09:30:00+14:30',
+    ];
+    for (const start of invalidValues) {
+      const fixture = pageFixture();
+      fixture.properties.ScheduledDate = {
+        id: 'scheduled-date',
+        type: 'date',
+        date: { start, end: null, time_zone: null },
+      };
+      const { resolved, duplicateAliases } = resolvePostsSchema(
+        Object.fromEntries(
+          Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
+        ),
+      );
+      expect(mapReadyXhsPost(fixture, resolved, duplicateAliases).publishBlockers)
+        .toContain('ScheduledDate must include a valid publish time and timezone');
+    }
+  });
+
+  it('does not use legacy tag or scheduling properties as canonical sources', () => {
+    const { resolved } = resolvePostsSchema({
+      Tags: { type: 'multi_select' },
+      Topics: { type: 'multi_select' },
+      'Publish Date': { type: 'date' },
+      'Scheduled Date': { type: 'date' },
+    });
+    expect(resolved.tags).toBeNull();
+    expect(resolved.scheduledDate).toBeNull();
   });
 
   it('builds the exact confirmed-success backfill using existing property types', () => {

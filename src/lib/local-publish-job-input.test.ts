@@ -21,7 +21,7 @@ function readyPost(overrides: Partial<ReadyXhsPost> = {}): ReadyXhsPost {
     videoUrls: ['https://images.xhs.justlikekatie.com/videos/assets/post.mp4'],
     thumbnailUrl: 'https://images.xhs.justlikekatie.com/uploads/thumb.jpg',
     tags: ['Notion'],
-    scheduledDate: '2026-08-04',
+    publishAt: '2026-08-04T13:30:00.000Z',
     lastEditedTime: '2026-08-01T12:00:00.000Z',
     publishBlockers: [],
     ...overrides,
@@ -61,10 +61,35 @@ describe('local publish job input', () => {
       mediaIndex: 0,
       mediaUrl: 'https://images.xhs.justlikekatie.com/videos/assets/post.mp4',
       thumbnailUrl: 'https://images.xhs.justlikekatie.com/uploads/thumb.jpg',
-      scheduledDate: '2026-08-04',
+      publishAt: '2026-08-04T13:30:00.000Z',
       notionLastEditedTime: readyPost().lastEditedTime,
     });
     expect(snapshot.mediaUrl).not.toContain('attacker.example');
+  });
+
+  it('keeps legacy fallback hashtags out of the frozen body caption', () => {
+    const parsed = parseQueueLocalPublishInput(input({
+      caption: 'Body copy\n\n#Legacy #旧标签',
+      tags: [],
+    }));
+    const snapshot = buildLocalPublishSnapshot(readyPost({
+      caption: 'Body copy',
+      tags: ['Legacy', '旧标签'],
+      tagsSource: 'legacy-caption',
+    }), parsed);
+
+    expect(snapshot.caption).toBe('Body copy');
+    expect(snapshot.tags).toEqual(['Legacy', '旧标签']);
+  });
+
+  it('omits publishAt only when ScheduledDate is absent', () => {
+    const parsed = parseQueueLocalPublishInput(input());
+    expect(buildLocalPublishSnapshot(
+      readyPost({ publishAt: undefined }),
+      parsed,
+    )).not.toHaveProperty('publishAt');
+    expect(buildLocalPublishSnapshot(readyPost(), parsed).publishAt)
+      .toBe('2026-08-04T13:30:00.000Z');
   });
 
   it('revalidates the reviewed Notion version and readiness blockers', () => {

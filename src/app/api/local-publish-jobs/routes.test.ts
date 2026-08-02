@@ -98,6 +98,7 @@ describe('local publish job routes', () => {
       id: jobId,
       claimToken,
       compatibilityTrial: 'unverified_mov',
+      publishAt: '2026-08-04T13:30:00.000Z',
     });
     const claimResponse = await claimJob(request('/api/local-publish-jobs/next', {
       headers: { Authorization: `Bearer ${workerToken}` },
@@ -107,6 +108,7 @@ describe('local publish job routes', () => {
       id: jobId,
       claimToken,
       compatibilityTrial: 'unverified_mov',
+      publishAt: '2026-08-04T13:30:00.000Z',
     });
 
     const result = {

@@ -4,17 +4,21 @@ import {
   buildLocalPublishSnapshot,
   LocalPublishJobError,
   parseQueueLocalPublishInput,
+  queueCopy,
   type QueueLocalPublishInput,
 } from '@/lib/local-publish-job-input';
 import {
   claimNextStoredLocalPublishJob,
-  completeStoredLocalPublishSuccess,
+  completeStoredLocalPublishReconciliation,
+  deferStoredLocalPublishVerification,
   failStoredLocalPublishJob,
   findLocalPublishJobByIdempotencyKey,
   insertLocalPublishJob,
   jobSummary,
   listLocalPublishJobs,
-  prepareStoredLocalPublishSuccess,
+  prepareStoredLocalPublishVerification,
+  recordStoredLocalPublishDispatch,
+  stageStoredLocalPublishJob,
   type StoredLocalPublishJob,
 } from '@/lib/local-publish-job-store';
 import type { PublishReadyPostResponse, ReadyXhsPost } from '@/types/ready-post';
@@ -22,6 +26,7 @@ import type { PublishReadyPostResponse, ReadyXhsPost } from '@/types/ready-post'
 const DEFAULT_LEASE_SECONDS = 2 * 60 * 60;
 const MIN_LEASE_SECONDS = 60;
 const MAX_LEASE_SECONDS = 24 * 60 * 60;
+const DEFAULT_VERIFICATION_BACKOFF_SECONDS = [15 * 60, 60 * 60, 6 * 60 * 60, 24 * 60 * 60] as const;
 const CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 
 interface QueueDependencies {
@@ -31,9 +36,12 @@ interface QueueDependencies {
 }
 
 interface ResultDependencies {
+  stage: typeof stageStoredLocalPublishJob;
+  recordDispatch: typeof recordStoredLocalPublishDispatch;
+  deferVerification: typeof deferStoredLocalPublishVerification;
   fail: typeof failStoredLocalPublishJob;
-  prepareSuccess: typeof prepareStoredLocalPublishSuccess;
-  completeSuccess: typeof completeStoredLocalPublishSuccess;
+  prepareVerification: typeof prepareStoredLocalPublishVerification;
+  completeReconciliation: typeof completeStoredLocalPublishReconciliation;
   backfill: (pageId: string, result: PublishReadyPostResponse) => Promise<void>;
 }
 
@@ -44,9 +52,12 @@ const queueDependencies: QueueDependencies = {
 };
 
 const resultDependencies: ResultDependencies = {
+  stage: stageStoredLocalPublishJob,
+  recordDispatch: recordStoredLocalPublishDispatch,
+  deferVerification: deferStoredLocalPublishVerification,
   fail: failStoredLocalPublishJob,
-  prepareSuccess: prepareStoredLocalPublishSuccess,
-  completeSuccess: completeStoredLocalPublishSuccess,
+  prepareVerification: prepareStoredLocalPublishVerification,
+  completeReconciliation: completeStoredLocalPublishReconciliation,
   backfill: markXhsPostPublished,
 };
 
@@ -93,53 +104,87 @@ function assertExactKeys(value: Record<string, unknown>, expected: string[]) {
 }
 
 export type LocalPublishWorkerResult =
-  | { status: 'succeeded'; noteId: string; shareUrl: string }
+  | { status: 'staged' }
+  | { status: 'submitted' | 'scheduled'; noteId: string; shareUrl: string }
+  | {
+      status: 'verification_pending';
+      noteId: string;
+      shareUrl: string;
+      code: string;
+      message: string;
+    }
+  | { status: 'verified'; noteId: string; shareUrl: string }
   | { status: 'failed'; code: string; message: string };
+
+function cleanCode(value: unknown) {
+  const code = cleanResultText(value, 'code', 80);
+  if (!/^[A-Z0-9_][A-Z0-9_.-]*$/.test(code)) {
+    throw new LocalPublishJobError(
+      'Result code must be an uppercase safe identifier',
+      'VALIDATION_ERROR',
+      400,
+    );
+  }
+  return code;
+}
+
+function publicationIdentifiers(body: Record<string, unknown>) {
+  const noteId = cleanResultText(body.noteId, 'noteId', 128);
+  if (!/^[A-Za-z0-9_-]+$/.test(noteId)) {
+    throw new LocalPublishJobError(
+      'noteId contains unsupported characters',
+      'INVALID_SUCCESS_RESULT',
+      400,
+    );
+  }
+  const shareUrl = cleanResultText(body.shareUrl, 'shareUrl', 500);
+  const expectedUrl = `https://www.rednote.com/explore/${noteId}`;
+  if (shareUrl !== expectedUrl) {
+    throw new LocalPublishJobError(
+      'shareUrl must exactly match the query-free RedNote explore URL for noteId',
+      'INVALID_SUCCESS_RESULT',
+      400,
+    );
+  }
+  return { noteId, shareUrl };
+}
 
 export function parseLocalPublishWorkerResult(value: unknown): LocalPublishWorkerResult {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new LocalPublishJobError('Result body must be a JSON object', 'VALIDATION_ERROR', 400);
   }
   const body = value as Record<string, unknown>;
-  if (body.status === 'succeeded') {
+  if (body.status === 'staged') {
+    assertExactKeys(body, ['status']);
+    return { status: 'staged' };
+  }
+  if (body.status === 'submitted' || body.status === 'scheduled') {
     assertExactKeys(body, ['noteId', 'shareUrl', 'status']);
-    const noteId = cleanResultText(body.noteId, 'noteId', 128);
-    if (!/^[A-Za-z0-9_-]+$/.test(noteId)) {
-      throw new LocalPublishJobError(
-        'noteId contains unsupported characters',
-        'INVALID_SUCCESS_RESULT',
-        400,
-      );
-    }
-    const shareUrl = cleanResultText(body.shareUrl, 'shareUrl', 500);
-    const expectedUrl = `https://www.rednote.com/explore/${noteId}`;
-    if (shareUrl !== expectedUrl) {
-      throw new LocalPublishJobError(
-        'shareUrl must exactly match the verified RedNote explore URL for noteId',
-        'INVALID_SUCCESS_RESULT',
-        400,
-      );
-    }
-    return { status: 'succeeded', noteId, shareUrl };
+    return { status: body.status, ...publicationIdentifiers(body) };
+  }
+  if (body.status === 'verification_pending') {
+    assertExactKeys(body, ['code', 'message', 'noteId', 'shareUrl', 'status']);
+    return {
+      status: 'verification_pending',
+      ...publicationIdentifiers(body),
+      code: cleanCode(body.code),
+      message: cleanFailureMessage(body.message),
+    };
+  }
+  if (body.status === 'verified' || body.status === 'succeeded') {
+    assertExactKeys(body, ['noteId', 'shareUrl', 'status']);
+    return { status: 'verified', ...publicationIdentifiers(body) };
   }
   if (body.status === 'failed') {
     assertExactKeys(body, ['code', 'message', 'status']);
-    const code = cleanResultText(body.code, 'code', 80);
-    if (!/^[A-Z0-9_][A-Z0-9_.-]*$/.test(code)) {
-      throw new LocalPublishJobError(
-        'Failure code must be an uppercase safe identifier',
-        'VALIDATION_ERROR',
-        400,
-      );
-    }
     return {
       status: 'failed',
-      code,
+      code: cleanCode(body.code),
       message: cleanFailureMessage(body.message),
     };
   }
   throw new LocalPublishJobError(
-    'status must be succeeded or failed',
+    'status must be staged, submitted, scheduled, verification_pending, verified, or failed',
     'VALIDATION_ERROR',
     400,
   );
@@ -153,11 +198,19 @@ export async function queueLocalPublishJob(
   const input: QueueLocalPublishInput = parseQueueLocalPublishInput(rawInput);
   const existing = await dependencies.findByIdempotencyKey(idempotencyKey);
   if (existing) {
+    const rawCopy = queueCopy(input, false);
+    const legacyCopy = queueCopy(input, true);
+    const copyMatches = (
+      existing.snapshot.caption === rawCopy.caption &&
+      isDeepStrictEqual(existing.snapshot.tags, rawCopy.tags)
+    ) || (
+      existing.snapshot.caption === legacyCopy.caption &&
+      isDeepStrictEqual(existing.snapshot.tags, legacyCopy.tags)
+    );
     const matches = existing.snapshot.notionPageId === input.notionPageId &&
       existing.snapshot.notionLastEditedTime === input.lastEditedTime &&
       existing.snapshot.title === input.title &&
-      existing.snapshot.caption === input.caption &&
-      isDeepStrictEqual(existing.snapshot.tags, input.tags) &&
+      copyMatches &&
       existing.snapshot.mediaType === input.media.type &&
       existing.snapshot.mediaIndex === input.media.index &&
       existing.snapshot.compatibilityTrial === (
@@ -184,6 +237,19 @@ function leaseSeconds() {
   return Math.min(MAX_LEASE_SECONDS, Math.max(MIN_LEASE_SECONDS, configured));
 }
 
+export function verificationBackoffSeconds() {
+  const configured = process.env.LOCAL_PUBLISH_VERIFICATION_BACKOFF_SECONDS
+    ?.split(',')
+    .map((value) => Number(value.trim()));
+  if (
+    configured?.length === 4 &&
+    configured.every((value) => Number.isSafeInteger(value) && value >= 60 && value <= 604_800)
+  ) {
+    return configured as [number, number, number, number];
+  }
+  return [...DEFAULT_VERIFICATION_BACKOFF_SECONDS] as [number, number, number, number];
+}
+
 export async function claimNextLocalPublishJob() {
   return claimNextStoredLocalPublishJob(leaseSeconds());
 }
@@ -199,6 +265,30 @@ export async function submitLocalPublishJobResult(
   dependencies: ResultDependencies = resultDependencies,
 ) {
   const result = parseLocalPublishWorkerResult(rawResult);
+  if (result.status === 'staged') {
+    return jobSummary(await dependencies.stage(id, claimToken));
+  }
+  if (result.status === 'submitted' || result.status === 'scheduled') {
+    return jobSummary(await dependencies.recordDispatch(
+      id,
+      claimToken,
+      result.status,
+      result.noteId,
+      result.shareUrl,
+      verificationBackoffSeconds()[0],
+    ));
+  }
+  if (result.status === 'verification_pending') {
+    return jobSummary(await dependencies.deferVerification(
+      id,
+      claimToken,
+      result.noteId,
+      result.shareUrl,
+      result.code,
+      result.message,
+      verificationBackoffSeconds(),
+    ));
+  }
   if (result.status === 'failed') {
     return jobSummary(await dependencies.fail(
       id,
@@ -208,13 +298,13 @@ export async function submitLocalPublishJobResult(
     ));
   }
 
-  const prepared = await dependencies.prepareSuccess(
+  const prepared = await dependencies.prepareVerification(
     id,
     claimToken,
     result.noteId,
     result.shareUrl,
   );
-  if (prepared.status === 'succeeded') return jobSummary(prepared);
+  if (prepared.status === 'reconciled') return jobSummary(prepared);
 
   try {
     await dependencies.backfill(prepared.notionPageId, {
@@ -234,7 +324,7 @@ export async function submitLocalPublishJobResult(
     );
   }
 
-  return jobSummary(await dependencies.completeSuccess(
+  return jobSummary(await dependencies.completeReconciliation(
     id,
     claimToken,
     result.noteId,
