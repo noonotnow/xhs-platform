@@ -4,6 +4,7 @@ import {
   buildExternalPostQueryFilter,
   buildExternalPublishedProperties,
   chooseExternalReconciliationTarget,
+  resolvePostsSchema,
   type PropertyMap,
   type ResolvedSchema,
 } from '@/lib/notion-posts';
@@ -138,6 +139,52 @@ describe('external post Notion reconciliation', () => {
     expect(properties.Platform).toEqual({
       multi_select: [{ name: 'Weibo' }, { name: 'RedNote' }],
     });
+  });
+
+  it('uses established Platform precedence when Platform and Platforms coexist', () => {
+    const aliasedSchema = {
+      ...schemaProperties,
+      Platforms: { type: 'multi_select' },
+    };
+    const {
+      resolved: aliasedResolved,
+      duplicateAliases,
+    } = resolvePostsSchema(aliasedSchema);
+
+    expect(aliasedResolved.platform).toBe('Platform');
+    expect(duplicateAliases.platform).toEqual(['Platform', 'Platforms']);
+
+    const properties = buildExternalPublishedProperties(
+      aliasedResolved,
+      duplicateAliases,
+      aliasedSchema,
+      snapshot,
+      '2026-08-04T12:00:00.000Z',
+    );
+
+    expect(properties.Platform).toEqual({
+      multi_select: [{ name: 'RedNote' }],
+    });
+    expect(properties).not.toHaveProperty('Platforms');
+  });
+
+  it('keeps non-platform duplicate aliases strictly ambiguous', () => {
+    const aliasedSchema = {
+      ...schemaProperties,
+      'XHS Note ID': { type: 'rich_text' },
+    };
+    const {
+      resolved: aliasedResolved,
+      duplicateAliases,
+    } = resolvePostsSchema(aliasedSchema);
+
+    expect(() => buildExternalPublishedProperties(
+      aliasedResolved,
+      duplicateAliases,
+      aliasedSchema,
+      snapshot,
+      '2026-08-04T12:00:00.000Z',
+    )).toThrow('Cannot backfill xhsNoteId: multiple aliases are present');
   });
 
   it('requires the exact Backfill URL/metrics option', () => {
