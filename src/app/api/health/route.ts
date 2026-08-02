@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
 
 const DB_ENV_VARS = [
+  'XHS_DATABASE_URL',
   'DATABASE_URL',
   'POSTGRES_URL',
   'POSTGRES_PRISMA_URL',
