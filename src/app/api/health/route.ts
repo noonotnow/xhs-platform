@@ -3,6 +3,7 @@ import { sql } from '@/lib/db';
 
 const DB_ENV_VARS = [
   'XHS_DATABASE_URL',
+  'XHS_DATABASE_POSTGRES_URL',
   'DATABASE_URL',
   'POSTGRES_URL',
   'POSTGRES_PRISMA_URL',

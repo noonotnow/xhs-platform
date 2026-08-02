@@ -10,10 +10,15 @@ vi.mock('pg', () => ({ Pool: mocks.Pool }));
 
 async function createPoolWith(env: {
   XHS_DATABASE_URL?: string;
+  XHS_DATABASE_POSTGRES_URL?: string;
   DATABASE_URL?: string;
   POSTGRES_URL?: string;
 }) {
   vi.stubEnv('XHS_DATABASE_URL', env.XHS_DATABASE_URL ?? '');
+  vi.stubEnv(
+    'XHS_DATABASE_POSTGRES_URL',
+    env.XHS_DATABASE_POSTGRES_URL ?? '',
+  );
   vi.stubEnv('DATABASE_URL', env.DATABASE_URL ?? '');
   vi.stubEnv('POSTGRES_URL', env.POSTGRES_URL ?? '');
 
@@ -30,14 +35,27 @@ describe('database connection selection', () => {
     vi.resetModules();
   });
 
-  it('prefers XHS_DATABASE_URL', async () => {
+  it('prefers XHS_DATABASE_URL over managed Neon', async () => {
     const options = await createPoolWith({
       XHS_DATABASE_URL: 'postgresql://xhs',
+      XHS_DATABASE_POSTGRES_URL: 'postgresql://managed-neon',
       DATABASE_URL: 'postgresql://managed',
       POSTGRES_URL: 'postgresql://legacy',
     });
 
     expect(options).toMatchObject({ connectionString: 'postgresql://xhs' });
+  });
+
+  it('prefers managed Neon over legacy fallbacks', async () => {
+    const options = await createPoolWith({
+      XHS_DATABASE_POSTGRES_URL: 'postgresql://managed-neon',
+      DATABASE_URL: 'postgresql://managed',
+      POSTGRES_URL: 'postgresql://legacy',
+    });
+
+    expect(options).toMatchObject({
+      connectionString: 'postgresql://managed-neon',
+    });
   });
 
   it('falls back to DATABASE_URL', async () => {
