@@ -203,6 +203,11 @@ A successful upload returns HTTP 201 with the durable CDN URL:
 { "url": "https://images.xhs.justlikekatie.com/uploads/..." }
 ```
 
+The endpoint verifies that the storage helper returned a URL under the configured
+`R2_PUBLIC_URL`, then returns the same object path on the canonical
+`images.xhs.justlikekatie.com` media domain. `R2_PUBLIC_URL` may therefore be
+either that custom domain or the bucket's raw `*.r2.dev` public origin.
+
 The deployment requires `PLAN_SECRET` plus the existing `R2_ACCOUNT_ID`,
 `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, and
 `R2_PUBLIC_URL` values.

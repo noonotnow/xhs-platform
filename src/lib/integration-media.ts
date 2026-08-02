@@ -4,6 +4,7 @@ import sharp from 'sharp';
 import { uploadToR2 } from '@/lib/r2';
 
 const ALLOWED_ORIGIN = 'https://fandom.justlikekatie.com';
+const CANONICAL_MEDIA_ORIGIN = 'https://images.xhs.justlikekatie.com';
 const ALLOWED_TYPES = {
   'image/jpeg': { extension: 'jpg', format: 'jpeg' },
   'image/png': { extension: 'png', format: 'png' },
@@ -138,19 +139,27 @@ async function validateImage(buffer: Buffer, contentType: AllowedContentType) {
   await image.clone().raw().toBuffer();
 }
 
-function isPublicR2Url(url: string, publicBase: string): boolean {
+function canonicalizePublicR2Url(
+  url: string,
+  publicBase: string
+): string | null {
   try {
     const uploadedUrl = new URL(url);
     const publicUrl = new URL(publicBase);
     const publicPath = publicUrl.pathname.replace(/\/$/, '');
 
-    return (
+    const isConfiguredPublicUrl =
       uploadedUrl.protocol === 'https:' &&
       uploadedUrl.origin === publicUrl.origin &&
-      uploadedUrl.pathname.startsWith(`${publicPath}/`)
-    );
+      uploadedUrl.pathname.startsWith(`${publicPath}/`);
+    if (!isConfiguredPublicUrl) return null;
+
+    return new URL(
+      `${uploadedUrl.pathname}${uploadedUrl.search}${uploadedUrl.hash}`,
+      CANONICAL_MEDIA_ORIGIN
+    ).toString();
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -304,7 +313,8 @@ export async function handleMediaUpload(
       contentType,
       ALLOWED_TYPES[contentType].extension
     );
-    if (!isPublicR2Url(url, publicBase)) {
+    const canonicalUrl = canonicalizePublicR2Url(url, publicBase);
+    if (!canonicalUrl) {
       console.error('[integration media] R2 returned a URL outside R2_PUBLIC_URL', {
         url,
       });
@@ -316,7 +326,7 @@ export async function handleMediaUpload(
     }
 
     return NextResponse.json(
-      { url },
+      { url: canonicalUrl },
       {
         status: 201,
         headers: corsHeaders(origin),
