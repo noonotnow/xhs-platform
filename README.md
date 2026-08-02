@@ -61,8 +61,10 @@ in Vercel:
 | Variable | Description |
 | --- | --- |
 | `XHS_DATABASE_URL` | Preferred server-only PostgreSQL connection string for XHS; overrides managed integration variables |
-| `DATABASE_URL` | Backward-compatible PostgreSQL connection fallback when `XHS_DATABASE_URL` is unset |
-| `POSTGRES_URL` | Legacy PostgreSQL connection fallback when both variables above are unset |
+| `XHS_DATABASE_POSTGRES_URL` | Pooled PostgreSQL connection string exported by the managed XHS Neon integration |
+| `XHS_DATABASE_POSTGRES_URL_NON_POOLING` | Unpooled managed Neon connection string for migrations and other direct database operations; not used by the application pool |
+| `DATABASE_URL` | Backward-compatible PostgreSQL connection fallback when XHS-specific variables are unset |
+| `POSTGRES_URL` | Legacy PostgreSQL connection fallback when all variables above are unset |
 | `CLOUDFLARE_ACCESS_TEAM_DOMAIN` | Access team domain, such as `team.cloudflareaccess.com`; the verified JWT issuer is `https://<team-domain>` |
 | `CLOUDFLARE_ACCESS_AUDIENCE` | Access application audience (`aud`) for the XHS admin application |
 | `CLOUDFLARE_ACCESS_OPERATOR_EMAILS` | Comma-separated operator email allowlist |
@@ -74,10 +76,11 @@ in Vercel:
 | `LOCAL_PUBLISH_JOB_LEASE_SECONDS` | Optional worker claim lease; defaults to 7200 seconds and is clamped to 60–86400 |
 
 Database connections are selected in the order `XHS_DATABASE_URL`,
-`DATABASE_URL`, then `POSTGRES_URL`. Set `XHS_DATABASE_URL` when a managed
-Vercel integration owns `DATABASE_URL` but XHS must use a different database.
-All three variables are server-only and health reporting exposes only whether
-each variable is configured, never its value.
+`XHS_DATABASE_POSTGRES_URL`, `DATABASE_URL`, then `POSTGRES_URL`. The managed
+XHS Neon integration supplies `XHS_DATABASE_POSTGRES_URL`; set
+`XHS_DATABASE_URL` only when an explicit manual override is needed. These
+variables are server-only and health reporting exposes only whether each
+variable is configured, never its value.
 
 `XHS_API_KEY` remains server-only and is used for Vercel-to-microservice
 login, session, and publish requests. Browser uploads use
