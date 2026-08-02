@@ -8,6 +8,8 @@ import {
 const ALLOWED_ORIGIN = 'https://fandom.justlikekatie.com';
 const PLAN_SECRET = 'a-secure-plan-integration-secret-123';
 const PUBLIC_URL = 'https://images.xhs.justlikekatie.com';
+const RAW_R2_PUBLIC_URL =
+  'https://pub-33313e22c1be49a8b4bf97c791caf646.r2.dev';
 
 function validImage(format: 'jpeg' | 'png' | 'webp') {
   return sharp({
@@ -201,7 +203,26 @@ describe('/api/integrations/media', () => {
     expect(upload).not.toHaveBeenCalled();
   });
 
-  it('uploads a valid PNG through the R2 dependency and returns its CDN URL', async () => {
+  it('rewrites a configured raw R2 upload URL to the canonical CDN host', async () => {
+    const bytes = await validImage('png');
+    const rawUrl = `${RAW_R2_PUBLIC_URL}/uploads/share-card.png`;
+    const canonicalUrl = `${PUBLIC_URL}/uploads/share-card.png`;
+    vi.stubEnv('R2_PUBLIC_URL', RAW_R2_PUBLIC_URL);
+    const upload = vi.fn().mockResolvedValue(rawUrl);
+    const response = await handleMediaUpload(imageRequest(bytes), upload);
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toEqual({ url: canonicalUrl });
+    expect(response.headers.get('access-control-allow-origin')).toBe(ALLOWED_ORIGIN);
+    expect(upload).toHaveBeenCalledOnce();
+    expect(upload).toHaveBeenCalledWith(
+      bytes,
+      'image/png',
+      'png'
+    );
+  });
+
+  it('keeps a canonical R2 upload URL canonical', async () => {
     const bytes = await validImage('png');
     const url = `${PUBLIC_URL}/uploads/share-card.png`;
     const upload = vi.fn().mockResolvedValue(url);
@@ -209,12 +230,23 @@ describe('/api/integrations/media', () => {
 
     expect(response.status).toBe(201);
     await expect(response.json()).resolves.toEqual({ url });
-    expect(response.headers.get('access-control-allow-origin')).toBe(ALLOWED_ORIGIN);
-    expect(upload).toHaveBeenCalledOnce();
-    expect(upload).toHaveBeenCalledWith(
-      bytes,
-      'image/png',
-      'png'
+  });
+
+  it('rejects an upload URL from outside the configured R2 public origin', async () => {
+    const bytes = await validImage('png');
+    vi.stubEnv('R2_PUBLIC_URL', RAW_R2_PUBLIC_URL);
+    const upload = vi
+      .fn()
+      .mockResolvedValue('https://example.com/uploads/share-card.png');
+    const response = await handleMediaUpload(imageRequest(bytes), upload);
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toEqual({
+      error: 'Media storage returned an invalid public URL.',
+    });
+    expect(console.error).toHaveBeenCalledWith(
+      '[integration media] R2 returned a URL outside R2_PUBLIC_URL',
+      { url: 'https://example.com/uploads/share-card.png' }
     );
   });
 
