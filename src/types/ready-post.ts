@@ -14,7 +14,8 @@ export interface ReadyXhsPost {
   compatibilityTrialVideoUrls?: string[];
   thumbnailUrl: string;
   tags: string[];
-  scheduledDate?: string;
+  tagsSource?: 'final-tags' | 'legacy-caption' | 'none';
+  publishAt?: string;
   lastEditedTime: string;
   publishBlockers: string[];
 }

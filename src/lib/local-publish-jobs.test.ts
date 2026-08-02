@@ -103,6 +103,67 @@ describe('local publish job orchestration', () => {
     expect(insert).not.toHaveBeenCalled();
   });
 
+  it('keeps an identical retry idempotent without replacing its frozen snapshot', async () => {
+    const getPost = vi.fn().mockResolvedValue({
+      ...readyPost(),
+      lastEditedTime: '2026-08-01T13:00:00.000Z',
+    });
+    const findByIdempotencyKey = vi.fn().mockResolvedValue(stored('queued'));
+    const insert = vi.fn();
+
+    await expect(queueLocalPublishJob(
+      queueBody,
+      '44444444-4444-4444-8444-444444444444',
+      { getPost, findByIdempotencyKey, insert },
+    )).resolves.toMatchObject({ created: false });
+    expect(getPost).not.toHaveBeenCalled();
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it('keeps an identical legacy hashtag fallback retry idempotent', async () => {
+    const legacySnapshot = {
+      ...snapshot,
+      caption: 'Body copy',
+      tags: ['Legacy'],
+    };
+    const getPost = vi.fn();
+    const findByIdempotencyKey = vi.fn().mockResolvedValue({
+      ...stored('queued'),
+      snapshot: legacySnapshot,
+    });
+    const insert = vi.fn();
+    const body = {
+      ...queueBody,
+      caption: 'Body copy\n\n#Legacy',
+      tags: [],
+    };
+
+    await expect(queueLocalPublishJob(
+      body,
+      '44444444-4444-4444-8444-444444444444',
+      { getPost, findByIdempotencyKey, insert },
+    )).resolves.toMatchObject({ created: false });
+    expect(getPost).not.toHaveBeenCalled();
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it('re-fetches Notion and rejects drift before creating a new job', async () => {
+    const getPost = vi.fn().mockResolvedValue({
+      ...readyPost(),
+      lastEditedTime: '2026-08-01T13:00:00.000Z',
+    });
+    const findByIdempotencyKey = vi.fn().mockResolvedValue(null);
+    const insert = vi.fn();
+
+    await expect(queueLocalPublishJob(
+      queueBody,
+      '55555555-5555-4555-8555-555555555555',
+      { getPost, findByIdempotencyKey, insert },
+    )).rejects.toMatchObject({ code: 'EDIT_CONFLICT' });
+    expect(getPost).toHaveBeenCalledWith(snapshot.notionPageId);
+    expect(insert).not.toHaveBeenCalled();
+  });
+
   it('accepts only the exact RedNote explore URL for the same note ID', () => {
     expect(parseLocalPublishWorkerResult({
       status: 'succeeded',

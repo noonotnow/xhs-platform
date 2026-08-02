@@ -41,7 +41,7 @@ const PROPERTY_ALIASES = {
   hasVideo: ['Has video', 'Has Video'],
   needsMedia: ['Needs media', 'Needs Media'],
   needsCaption: ['Needs caption', 'Needs Caption'],
-  tags: ['Tags', 'Topics', 'Hashtags'],
+  tags: ['Final Tags', 'Final tags'],
   xhsNoteId: ['XHS Note ID', 'XHS note ID', 'Rednote Note ID', 'Rednote note ID'],
   xhsShareUrl: [
     'XHS Share URL',
@@ -53,7 +53,7 @@ const PROPERTY_ALIASES = {
   ],
   publishedAt: ['Published at', 'Published At', 'XHS Published At', 'Rednote Published At'],
   nextAction: ['Next action', 'Next Action'],
-  scheduledDate: ['Scheduled date', 'Scheduled Date', 'Publish date', 'Publish Date'],
+  scheduledDate: ['ScheduledDate'],
 } as const;
 
 export type CanonicalProperty = keyof typeof PROPERTY_ALIASES;
@@ -172,6 +172,57 @@ function date(value: PageProperty | undefined): string {
   return value?.type === 'date' ? value.date?.start ?? '' : '';
 }
 
+const ISO_DATETIME_WITH_TIMEZONE =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|([+-])(\d{2}):(\d{2}))$/;
+
+export function canonicalPublishAt(value: string) {
+  const candidate = value.trim();
+  const parts = candidate.match(ISO_DATETIME_WITH_TIMEZONE);
+  if (!parts) return undefined;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, , offsetHourText, offsetMinuteText] =
+    parts;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText ?? '0');
+  const offsetHour = Number(offsetHourText ?? '0');
+  const offsetMinute = Number(offsetMinuteText ?? '0');
+  const daysInMonth = month >= 1 && month <= 12
+    ? new Date(Date.UTC(year, month, 0)).getUTCDate()
+    : 0;
+  if (
+    year < 1 ||
+    day < 1 ||
+    day > daysInMonth ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 59 ||
+    offsetHour > 14 ||
+    offsetMinute > 59 ||
+    (offsetHour === 14 && offsetMinute !== 0)
+  ) {
+    return undefined;
+  }
+  const timestamp = new Date(candidate);
+  return Number.isNaN(timestamp.getTime()) ? undefined : timestamp.toISOString();
+}
+
+export function extractLegacyTrailingHashtags(caption: string) {
+  const match = caption.match(/(?:^|\s)((?:#[^\s#]+(?:\s+|$))+)\s*$/);
+  if (!match || match.index === undefined) {
+    return { caption: caption.trim(), tags: [] as string[] };
+  }
+  const tags = Array.from(new Set(
+    Array.from(match[1].matchAll(/#([^\s#]+)/g), (item) => item[1]),
+  ));
+  return {
+    caption: caption.slice(0, match.index).trimEnd(),
+    tags,
+  };
+}
+
 function urls(value: PageProperty | undefined): string[] {
   if (!value) return [];
   if (value.type === 'files') {
@@ -230,6 +281,8 @@ function mappedBlockers(
   page: PageObjectResponse,
   schema: ResolvedSchema,
   duplicates: Partial<Record<CanonicalProperty, string[]>>,
+  caption: string,
+  hasInvalidScheduledDate: boolean,
 ) {
   const blockers: string[] = [];
   for (const key of ['status', 'xhsShareUrl'] as const) {
@@ -237,7 +290,10 @@ function mappedBlockers(
     if (duplicates[key]) blockers.push(`${key} has multiple aliases in the Posts DB`);
   }
   if (!plainText(property(page, schema, 'headline')).trim()) blockers.push('Headline is empty');
-  if (!plainText(property(page, schema, 'caption')).trim()) blockers.push('Weibo text is empty');
+  if (!caption) blockers.push('Weibo text is empty');
+  if (hasInvalidScheduledDate) {
+    blockers.push('ScheduledDate must include a valid publish time and timezone');
+  }
   if (checkbox(property(page, schema, 'needsMedia'))) blockers.push('Needs media is still checked');
   if (checkbox(property(page, schema, 'needsCaption'))) blockers.push('Needs caption is still checked');
   if (!urls(property(page, schema, 'mediaUrls')).some((url) =>
@@ -253,11 +309,22 @@ export function mapReadyXhsPost(
   duplicates: Partial<Record<CanonicalProperty, string[]>> = {},
 ): ReadyXhsPost {
   const mediaUrls = urls(property(page, schema, 'mediaUrls'));
+  const rawCaption = plainText(property(page, schema, 'caption'));
+  const finalTags = values(property(page, schema, 'tags'));
+  const legacyCopy = finalTags.length === 0
+    ? extractLegacyTrailingHashtags(rawCaption)
+    : { caption: rawCaption.trim(), tags: [] };
+  const scheduledDate = date(property(page, schema, 'scheduledDate'));
+  const publishAt = canonicalPublishAt(scheduledDate);
+  const tags = finalTags.length > 0 ? finalTags : legacyCopy.tags;
+  const tagsSource = finalTags.length > 0
+    ? 'final-tags' as const
+    : 'legacy-caption' as const;
   return {
     id: page.id,
     pageUrl: page.url,
     headline: plainText(property(page, schema, 'headline')),
-    caption: plainText(property(page, schema, 'caption')),
+    caption: legacyCopy.caption,
     status: plainText(property(page, schema, 'status')),
     publishPacketReady: checkbox(property(page, schema, 'publishPacketReady')),
     hasVideo: checkbox(property(page, schema, 'hasVideo')),
@@ -268,10 +335,17 @@ export function mapReadyXhsPost(
     videoUrls: mediaUrls.filter(isCanonicalMediaVideo),
     compatibilityTrialVideoUrls: mediaUrls.filter(isCanonicalMediaMov),
     thumbnailUrl: urls(property(page, schema, 'thumbnail'))[0] ?? '',
-    tags: values(property(page, schema, 'tags')),
-    scheduledDate: date(property(page, schema, 'scheduledDate')) || undefined,
+    tags,
+    tagsSource,
+    ...(publishAt ? { publishAt } : {}),
     lastEditedTime: page.last_edited_time,
-    publishBlockers: mappedBlockers(page, schema, duplicates),
+    publishBlockers: mappedBlockers(
+      page,
+      schema,
+      duplicates,
+      legacyCopy.caption,
+      Boolean(scheduledDate) && !publishAt,
+    ),
   };
 }
 

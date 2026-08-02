@@ -1,4 +1,5 @@
 import {
+  extractLegacyTrailingHashtags,
   isCanonicalMediaImage,
   isCanonicalMediaMov,
   isCanonicalMediaVideo,
@@ -100,6 +101,18 @@ export interface QueueLocalPublishInput {
   };
 }
 
+export function queueCopy(
+  input: Pick<QueueLocalPublishInput, 'caption' | 'tags'>,
+  useLegacyFallback: boolean,
+) {
+  if (!useLegacyFallback) return { caption: input.caption, tags: input.tags };
+  const legacyCopy = extractLegacyTrailingHashtags(input.caption);
+  return {
+    caption: legacyCopy.caption,
+    tags: input.tags.length > 0 ? input.tags : legacyCopy.tags,
+  };
+}
+
 export function parseQueueLocalPublishInput(value: unknown): QueueLocalPublishInput {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new LocalPublishJobError('Request body must be a JSON object', 'VALIDATION_ERROR', 400);
@@ -186,19 +199,20 @@ export function buildLocalPublishSnapshot(
   const thumbnailUrl = isCanonicalMediaImage(post.thumbnailUrl)
     ? post.thumbnailUrl
     : undefined;
+  const reviewedCopy = queueCopy(input, post.tagsSource === 'legacy-caption');
   return {
     notionPageId: post.id,
     headline: post.headline.trim(),
     title: input.title,
-    caption: input.caption,
-    tags: input.tags,
+    caption: reviewedCopy.caption,
+    tags: reviewedCopy.tags,
     platform: 'RedNote',
     mediaType: input.media.type,
     mediaIndex: input.media.index,
     mediaUrl,
     ...(compatibilityTrial ? { compatibilityTrial: 'unverified_mov' as const } : {}),
     ...(thumbnailUrl ? { thumbnailUrl } : {}),
-    ...(post.scheduledDate ? { scheduledDate: post.scheduledDate } : {}),
+    ...(post.publishAt ? { publishAt: post.publishAt } : {}),
     notionLastEditedTime: post.lastEditedTime,
   };
 }

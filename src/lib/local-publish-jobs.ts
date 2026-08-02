@@ -4,6 +4,7 @@ import {
   buildLocalPublishSnapshot,
   LocalPublishJobError,
   parseQueueLocalPublishInput,
+  queueCopy,
   type QueueLocalPublishInput,
 } from '@/lib/local-publish-job-input';
 import {
@@ -153,11 +154,19 @@ export async function queueLocalPublishJob(
   const input: QueueLocalPublishInput = parseQueueLocalPublishInput(rawInput);
   const existing = await dependencies.findByIdempotencyKey(idempotencyKey);
   if (existing) {
+    const rawCopy = queueCopy(input, false);
+    const legacyCopy = queueCopy(input, true);
+    const copyMatches = (
+      existing.snapshot.caption === rawCopy.caption &&
+      isDeepStrictEqual(existing.snapshot.tags, rawCopy.tags)
+    ) || (
+      existing.snapshot.caption === legacyCopy.caption &&
+      isDeepStrictEqual(existing.snapshot.tags, legacyCopy.tags)
+    );
     const matches = existing.snapshot.notionPageId === input.notionPageId &&
       existing.snapshot.notionLastEditedTime === input.lastEditedTime &&
       existing.snapshot.title === input.title &&
-      existing.snapshot.caption === input.caption &&
-      isDeepStrictEqual(existing.snapshot.tags, input.tags) &&
+      copyMatches &&
       existing.snapshot.mediaType === input.media.type &&
       existing.snapshot.mediaIndex === input.media.index &&
       existing.snapshot.compatibilityTrial === (

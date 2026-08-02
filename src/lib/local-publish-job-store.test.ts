@@ -9,6 +9,7 @@ vi.mock('@/lib/db', () => ({ sql: mocks.sql }));
 import {
   claimNextStoredLocalPublishJob,
   insertLocalPublishJob,
+  normalizeStoredLocalPublishSnapshot,
 } from '@/lib/local-publish-job-store';
 import type { LocalPublishSnapshot } from '@/types/local-publish-job';
 
@@ -104,6 +105,25 @@ describe('local publish atomic claim storage', () => {
       mediaUrl: snapshot.mediaUrl,
       thumbnailUrl: 'https://images.xhs.justlikekatie.com/uploads/thumb.jpg',
     });
+  });
+
+  it('normalizes legacy scheduledDate snapshots to the publishAt worker contract', async () => {
+    const legacySnapshot = {
+      ...snapshot,
+      scheduledDate: '2026-08-04T09:30:00-04:00',
+    };
+    expect(normalizeStoredLocalPublishSnapshot(legacySnapshot)).toEqual({
+      ...snapshot,
+      publishAt: '2026-08-04T13:30:00.000Z',
+    });
+    mocks.sql.mockResolvedValue({
+      rows: [{ ...claimedRow(), snapshot: legacySnapshot }],
+      rowCount: 1,
+    });
+
+    const claimed = await claimNextStoredLocalPublishJob(7_200);
+    expect(claimed).toMatchObject({ publishAt: '2026-08-04T13:30:00.000Z' });
+    expect(claimed).not.toHaveProperty('scheduledDate');
   });
 
   it('returns the original job for an identical idempotency key', async () => {

@@ -19,7 +19,7 @@ export interface LocalPublishSnapshot {
   mediaUrl: string;
   compatibilityTrial?: LocalPublishCompatibilityTrial;
   thumbnailUrl?: string;
-  scheduledDate?: string;
+  publishAt?: string;
   notionLastEditedTime: string;
 }
 

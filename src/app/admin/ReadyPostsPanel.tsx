@@ -57,6 +57,30 @@ function tagsFromInput(value: string) {
     .filter(Boolean);
 }
 
+function publishTiming(post: ReadyXhsPost) {
+  if (post.publishBlockers.includes(
+    'ScheduledDate must include a valid publish time and timezone',
+  )) {
+    return {
+      label: 'Invalid ScheduledDate',
+      detail: 'Set an exact publish time with timezone in Notion before queueing.',
+    };
+  }
+  if (!post.publishAt) {
+    return {
+      label: 'Immediate after approval',
+      detail: 'ScheduledDate is absent in Notion.',
+    };
+  }
+  return {
+    label: new Intl.DateTimeFormat(undefined, {
+      dateStyle: 'medium',
+      timeStyle: 'long',
+    }).format(new Date(post.publishAt)),
+    detail: post.publishAt,
+  };
+}
+
 function jobStatusCopy(job: LocalPublishJobSummary | undefined) {
   if (!job) return null;
   const movTrial = job.compatibilityTrial === 'unverified_mov';
@@ -160,6 +184,7 @@ export default function ReadyPostsPanel() {
   const reviewedTags = tagsFromInput(finalTags);
   const missingTags = getMissingTags(reviewedTags, finalCaption);
   const showTitleCopy = shouldOfferTitleCopy(finalTitle, finalCaption);
+  const timing = selected ? publishTiming(selected) : null;
   selectedPostIdRef.current = selected?.id;
 
   const loadPosts = useCallback(async () => {
@@ -476,6 +501,10 @@ export default function ReadyPostsPanel() {
                       onChange={(event) => setFinalCaption(event.target.value)}
                       disabled={hasActiveJob}
                     />
+                    <small>
+                      Prefilled from Weibo text. Legacy trailing hashtags are removed only when
+                      Final Tags is absent.
+                    </small>
                   </label>
                   <label className={styles.reviewField}>
                     <span>Final tags</span>
@@ -486,8 +515,20 @@ export default function ReadyPostsPanel() {
                       placeholder="Comma-separated tags"
                       disabled={hasActiveJob}
                     />
-                    <small>Up to 20 tags. A leading # is removed before queueing.</small>
+                    <small>
+                      {selected.tagsSource === 'legacy-caption'
+                        ? 'Legacy fallback from trailing Weibo text hashtags. '
+                        : 'Prefilled from Final Tags. '}
+                      Up to 20 tags; a leading # is removed before queueing.
+                    </small>
                   </label>
+                  {timing && (
+                    <div className={styles.publishTiming} role="note">
+                      <span>Publish timing</span>
+                      <strong>{timing.label}</strong>
+                      <small>{timing.detail}</small>
+                    </div>
+                  )}
                   <label className={styles.reviewField}>
                     <span>Trusted media</span>
                     <select

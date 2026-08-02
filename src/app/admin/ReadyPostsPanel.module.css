@@ -397,6 +397,34 @@
   line-height: 1.4;
 }
 
+.publishTiming {
+  display: grid;
+  gap: 4px;
+  padding: 11px 12px;
+  color: #3b0764;
+  background: #fff;
+  border: 1px solid #ddd6fe;
+  border-radius: 7px;
+  overflow-wrap: anywhere;
+}
+
+.publishTiming > span {
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.publishTiming strong {
+  font-size: 0.875rem;
+}
+
+.publishTiming small {
+  color: #64748b;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
 .assetUrl {
   overflow-wrap: anywhere;
 }

@@ -98,10 +98,15 @@ grants before the microservice accepts them.
 
 The protected admin loads unpublished RedNote records whose canonical
 `Publish packet ready` property is checked. The server re-reads the selected
-Notion page when an operator queues it, confirms that it is still RedNote-ready
+Notion page before creating a queue job, confirms that it is still RedNote-ready
 and not `Published`, and builds an immutable snapshot from canonical HTTPS media.
 Client-provided media URLs and Notion metadata are never accepted. The operator
 can edit only the final reviewed title, caption, tags, and trusted media choice.
+`Weibo text` supplies the body-only caption, `Final Tags` supplies tags, and
+`ScheduledDate` is the only scheduling property; generic Tags, Topics, Hashtags,
+Publish Date, and spaced Scheduled Date properties are not queue sources. When
+Final Tags is absent, legacy trailing hashtags may be split from Weibo text;
+hashtags elsewhere in the body are preserved.
 
 Trusted canonical MEDIA `.mov` registrations remain compatibility-unverified and
 are not added to the normal ready video set. Admin exposes a separate warning and
@@ -136,8 +141,11 @@ The local worker contract is:
 
 1. `GET /api/local-publish-jobs/next` with
    `Authorization: Bearer <LOCAL_PUBLISH_WORKER_TOKEN>`. HTTP 204 means the queue
-   is empty. A claim returns the immutable publish fields plus `claimToken` and
-   `claimExpiresAt`. An unverified MOV trial additionally returns
+   is empty. A claim returns `id`, `notionPageId`, `headline`, `title`, `caption`,
+   `tags`, `platform`, `mediaType`, `mediaUrl`, optional `thumbnailUrl`, optional
+   canonical UTC `publishAt`, `claimToken`, and `claimExpiresAt`. `publishAt` is
+   present exactly when Notion has `ScheduledDate`; its absence means immediate
+   mode after human approval. An unverified MOV trial additionally returns
    `"compatibilityTrial":"unverified_mov"`; normal jobs omit this field.
 2. Stage the asset and reviewed copy at `https://creator.rednote.com`, wait for
    explicit human approval, publish, confirm `/publish/success`, find the exact
@@ -166,6 +174,12 @@ Notion as Published.
 The compatibility marker is stored inside the immutable JSONB job snapshot and
 shown in the operator audit. No additional database migration is required beyond
 `003_local_publish_jobs.sql`.
+
+Queue snapshots remain JSONB, so this contract requires no table migration. New
+rows store `publishAt` and never store `scheduledDate`. Existing rows remain
+readable: the server removes legacy `scheduledDate` from the worker response and
+normalizes it to canonical UTC `publishAt` in memory. The worker must consume
+`publishAt` as the intended publish instant and must not read Notion.
 
 Posts created outside this queue can be reconciled by the same trusted worker:
 

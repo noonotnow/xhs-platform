@@ -12,7 +12,7 @@ import type {
 interface LocalPublishJobRow extends QueryResultRow {
   id: string;
   notion_page_id: string;
-  snapshot: LocalPublishSnapshot;
+  snapshot: LocalPublishSnapshot & { scheduledDate?: string };
   status: LocalPublishJobStatus;
   idempotency_key: string;
   claim_token: string | null;
@@ -53,11 +53,27 @@ function optionalTimestamp(value: Date | string | null) {
   return value ? timestamp(value) : undefined;
 }
 
+export function normalizeStoredLocalPublishSnapshot(
+  snapshot: LocalPublishSnapshot & { scheduledDate?: string },
+): LocalPublishSnapshot {
+  const { scheduledDate, ...current } = snapshot;
+  if (current.publishAt || !scheduledDate) return current;
+  const legacyPublishAt = new Date(scheduledDate);
+  if (Number.isNaN(legacyPublishAt.getTime())) {
+    throw new LocalPublishJobError(
+      'A stored local publish job has an invalid legacy schedule',
+      'INVALID_LEGACY_PUBLISH_SCHEDULE',
+      500,
+    );
+  }
+  return { ...current, publishAt: legacyPublishAt.toISOString() };
+}
+
 function mapRow(row: LocalPublishJobRow): StoredLocalPublishJob {
   return {
     id: row.id,
     notionPageId: row.notion_page_id,
-    snapshot: row.snapshot,
+    snapshot: normalizeStoredLocalPublishSnapshot(row.snapshot),
     status: row.status,
     ...(row.claim_token ? { claimToken: row.claim_token } : {}),
     ...(row.error_code ? { errorCode: row.error_code } : {}),
@@ -225,7 +241,7 @@ export async function claimNextStoredLocalPublishJob(
       ? { compatibilityTrial: job.snapshot.compatibilityTrial }
       : {}),
     ...(job.snapshot.thumbnailUrl ? { thumbnailUrl: job.snapshot.thumbnailUrl } : {}),
-    ...(job.snapshot.scheduledDate ? { scheduledDate: job.snapshot.scheduledDate } : {}),
+    ...(job.snapshot.publishAt ? { publishAt: job.snapshot.publishAt } : {}),
     claimToken: row.claim_token,
     claimExpiresAt: timestamp(row.claim_expires_at),
   };
