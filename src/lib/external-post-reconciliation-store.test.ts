@@ -69,6 +69,18 @@ describe('external reconciliation persistence', () => {
     expect(update).toContain("updated_at <= CURRENT_TIMESTAMP - INTERVAL '5 minutes'");
   });
 
+  it('reclaims a failed receipt for an identical retry', async () => {
+    const failed = row('failed', '2026-08-04T10:00:00.000Z');
+    const reclaimed = row('processing', new Date().toISOString());
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [failed] })
+      .mockResolvedValueOnce({ rows: [reclaimed] });
+
+    await expect(beginExternalReconciliation(snapshot, idempotencyKey))
+      .resolves.toMatchObject({ acquired: true, record: { status: 'processing' } });
+  });
+
   it('rejects conflicting natural keys instead of creating duplicate Notion rows', async () => {
     mocks.sql
       .mockResolvedValueOnce({ rows: [] })

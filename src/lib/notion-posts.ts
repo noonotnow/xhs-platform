@@ -442,18 +442,21 @@ function assertWritable(
   duplicates: Partial<Record<CanonicalProperty, string[]>>,
   key: CanonicalProperty,
   required: true,
+  useResolvedAliasPrecedence?: boolean,
 ): string;
 function assertWritable(
   schema: ResolvedSchema,
   duplicates: Partial<Record<CanonicalProperty, string[]>>,
   key: CanonicalProperty,
   required: false,
+  useResolvedAliasPrecedence?: boolean,
 ): string | null;
 function assertWritable(
   schema: ResolvedSchema,
   duplicates: Partial<Record<CanonicalProperty, string[]>>,
   key: CanonicalProperty,
   required: boolean,
+  useResolvedAliasPrecedence = false,
 ) {
   const name = schema[key];
   if (!name) {
@@ -465,7 +468,7 @@ function assertWritable(
     );
   }
 
-  if (duplicates[key]) {
+  if (duplicates[key] && !useResolvedAliasPrecedence) {
     throw new NotionPostsError(
       `Cannot backfill ${key}: multiple aliases are present (${duplicates[key]?.join(', ')})`,
       'NOTION_SCHEMA_AMBIGUOUS',
@@ -677,7 +680,13 @@ export function buildExternalPublishedProperties(
   ] as const;
   const names = Object.fromEntries(requiredKeys.map((key) => [
     key,
-    assertWritable(schema, duplicates, key, true),
+    assertWritable(
+      schema,
+      duplicates,
+      key,
+      true,
+      key === 'platform',
+    ),
   ])) as Record<(typeof requiredKeys)[number], string>;
 
   const nextActionOptions = schemaProperties[names.nextAction]?.select?.options ?? [];
