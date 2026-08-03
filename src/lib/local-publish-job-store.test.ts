@@ -290,6 +290,8 @@ describe('local publish atomic claim storage', () => {
     expect(query).toContain('GREATEST');
     expect(query).toContain("snapshot->>'publishAt'");
     expect(query).toContain("snapshot->>'scheduledDate'");
+    expect(query).toContain("? = 'scheduled'");
+    expect(query).toContain("? = 'submitted'");
     expect(query).toContain('claim_expires_at = CURRENT_TIMESTAMP');
   });
 

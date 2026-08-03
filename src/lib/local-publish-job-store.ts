@@ -470,6 +470,16 @@ export async function recordStoredLocalPublishDispatch(
     WHERE id = ${id}::uuid
       AND status IN ('claimed', 'staged')
       AND claim_token = ${claimToken}::uuid
+      AND (
+        (
+          ${status} = 'scheduled'
+          AND COALESCE(snapshot->>'publishAt', snapshot->>'scheduledDate') IS NOT NULL
+        )
+        OR (
+          ${status} = 'submitted'
+          AND COALESCE(snapshot->>'publishAt', snapshot->>'scheduledDate') IS NULL
+        )
+      )
     RETURNING *
   `;
   if (result.rows[0]) return mapRow(result.rows[0]);

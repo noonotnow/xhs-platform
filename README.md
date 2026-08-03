@@ -172,8 +172,8 @@ The local worker contract is:
    without clicking Publish. If staging succeeds, the worker must still wait for
    the existing exact `PUBLISH <jobId>` human approval before any Publish click;
    it must never auto-publish.
-3. A claim with `status` `submitted`, `scheduled`, or `verification_pending`
-   is verification-only work and includes durable `noteId`, `shareUrl`,
+3. A claim with `status` `scheduled` or `verification_pending` is
+   verification-only work and includes durable `noteId`, `shareUrl`,
    `verificationAttempts`, and `nextVerificationAt`. Never click Publish for
    these states. Query-free public error `300031`, processing, indexing delay, or
    any other post-dispatch uncertainty must be reported as
@@ -195,17 +195,25 @@ The local worker contract is:
      only before dispatch while the durable state is `claimed` or `staged`.
 
 The lifecycle is `queued -> claimed -> staged -> submitted|scheduled ->
-verification_pending -> verified -> reconciled`; a verified result may skip
-intermediate reporting but is always persisted before reconciliation. The
-success URL must exactly match the same note ID and cannot include a query,
-fragment, alternate host, or trailing slash. Only `verified` updates Notion
-through the existing aliases (`Status=Published`, `Rednote URL`, `Rednote Note
-ID`, and the established published `Next action`), and only successful Notion
-backfill advances the job to `reconciled`. If backfill fails, the row remains
-`verified` and is reclaimable for idempotent reconciliation. The legacy worker
-body `status:"succeeded"` remains accepted as a `verified` alias during rollout.
+verification_pending -> verified -> reconciled`; an immediate `submitted`
+receipt advances through `verified` and reconciliation in the same request,
+while `scheduled` cannot do so until a later `verified` receipt. A verified
+result may skip intermediate reporting but is always persisted before
+reconciliation. Matching query parameters, fragments, a trailing slash, and the official
+`www.xiaohongshu.com` host are normalized to the canonical query-free
+`www.rednote.com` URL; unsupported hosts remain invalid.
+Reconciliation updates only the frozen job's `notionPageId`, setting the
+published identity, readiness flags, `Published At` when mapped, and the
+established published `Next action`, without changing `ScheduledDate`. Only a
+successful Notion backfill advances the job to `reconciled`. If backfill fails,
+the row remains `verified` and is reclaimable for idempotent reconciliation.
+Legacy worker bodies `status:"published"` and `status:"succeeded"` remain
+accepted aliases during rollout. An ambiguous Creator acceptance is not a live
+receipt: scheduled work must report `scheduled` and cannot reconcile until a
+later explicit live result.
 `metrics_available` is a later sync concern and is not a publication-verification
-state.
+state. An immediate `submitted` receipt is durable publication evidence and
+enters reconciliation immediately; it is never returned as dispatch work.
 
 ### Already-published manual reconciliation
 

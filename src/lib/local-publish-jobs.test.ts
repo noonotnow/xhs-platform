@@ -170,22 +170,31 @@ describe('local publish job orchestration', () => {
     expect(insert).not.toHaveBeenCalled();
   });
 
-  it('accepts only the exact RedNote explore URL for the same note ID', () => {
+  it('normalizes a matching RedNote explore URL to its query-free canonical form', () => {
     expect(parseLocalPublishWorkerResult({
       status: 'succeeded',
       noteId: 'note_123',
+      shareUrl: 'https://www.rednote.com/explore/note_123/?source=worker#receipt',
+    })).toEqual({
+      status: 'verified',
+      noteId: 'note_123',
       shareUrl: 'https://www.rednote.com/explore/note_123',
-    })).toMatchObject({ status: 'verified', noteId: 'note_123' });
+    });
     expect(() => parseLocalPublishWorkerResult({
       status: 'succeeded',
       noteId: 'note_123',
       shareUrl: 'https://www.rednote.com/explore/other',
-    })).toThrow('exactly match');
+    })).toThrow('must match');
     expect(() => parseLocalPublishWorkerResult({
       status: 'succeeded',
       noteId: 'note_123',
-      shareUrl: 'https://www.rednote.com/explore/note_123?source=worker',
-    })).toThrow('exactly match');
+      shareUrl: 'https://rednote.com/explore/note_123',
+    })).toThrow('must match');
+    expect(parseLocalPublishWorkerResult({
+      status: 'published',
+      noteId: 'note_123',
+      shareUrl: 'https://www.rednote.com/explore/note_123',
+    })).toMatchObject({ status: 'verified' });
   });
 
   it('rejects credential-like failure details before persistence', () => {
@@ -201,15 +210,22 @@ describe('local publish job orchestration', () => {
     })).toThrow('credential-like data');
   });
 
-  it('records dispatch and verification delay without backfilling Notion', async () => {
+  it('reconciles an immediate submitted receipt against the frozen notionPageId', async () => {
+    const prepared = {
+      ...stored('verified'),
+      dispatchedAt: '2026-08-01T12:15:00.000Z',
+    };
     const dependencies = {
       stage: vi.fn(),
-      recordDispatch: vi.fn().mockResolvedValue(stored('submitted')),
+      recordDispatch: vi.fn().mockResolvedValue({
+        ...stored('submitted'),
+        dispatchedAt: prepared.dispatchedAt,
+      }),
       deferVerification: vi.fn().mockResolvedValue(stored('verification_pending')),
       fail: vi.fn(),
-      prepareVerification: vi.fn(),
-      completeReconciliation: vi.fn(),
-      backfill: vi.fn(),
+      prepareVerification: vi.fn().mockResolvedValue(prepared),
+      completeReconciliation: vi.fn().mockResolvedValue(stored('reconciled')),
+      backfill: vi.fn().mockResolvedValue(undefined),
     };
 
     await expect(submitLocalPublishJobResult(
@@ -221,7 +237,7 @@ describe('local publish job orchestration', () => {
         shareUrl: 'https://www.rednote.com/explore/note_123',
       },
       dependencies,
-    )).resolves.toMatchObject({ status: 'submitted' });
+    )).resolves.toMatchObject({ status: 'reconciled' });
     expect(dependencies.recordDispatch).toHaveBeenCalledWith(
       stored('claimed').id,
       stored('claimed').claimToken,
@@ -230,8 +246,71 @@ describe('local publish job orchestration', () => {
       'https://www.rednote.com/explore/note_123',
       900,
     );
+    expect(dependencies.backfill).toHaveBeenCalledWith(snapshot.notionPageId, {
+      status: 'success',
+      noteId: 'note_123',
+      shareUrl: 'https://www.rednote.com/explore/note_123',
+    }, prepared.dispatchedAt);
+  });
+
+  it('keeps scheduled acceptance pending until publication is verified', async () => {
+    const scheduled = {
+      ...stored('scheduled'),
+      snapshot: {
+        ...snapshot,
+        publishAt: '2026-08-04T13:30:00.000Z',
+      },
+    };
+    const dependencies = {
+      stage: vi.fn(),
+      recordDispatch: vi.fn().mockResolvedValue(scheduled),
+      deferVerification: vi.fn(),
+      fail: vi.fn(),
+      prepareVerification: vi.fn(),
+      completeReconciliation: vi.fn(),
+      backfill: vi.fn(),
+    };
+    await expect(submitLocalPublishJobResult(
+      stored('claimed').id,
+      stored('claimed').claimToken!,
+      {
+        status: 'scheduled',
+        noteId: 'note_123',
+        shareUrl: 'https://www.rednote.com/explore/note_123',
+      },
+      dependencies,
+    )).resolves.toMatchObject({ status: 'scheduled' });
+    expect(dependencies.prepareVerification).not.toHaveBeenCalled();
     expect(dependencies.backfill).not.toHaveBeenCalled();
 
+    dependencies.recordDispatch.mockResolvedValueOnce({
+      ...scheduled,
+      status: 'verification_pending',
+    });
+    await expect(submitLocalPublishJobResult(
+      scheduled.id,
+      scheduled.claimToken!,
+      {
+        status: 'submitted',
+        noteId: 'note_123',
+        shareUrl: 'https://www.rednote.com/explore/note_123',
+      },
+      dependencies,
+    )).resolves.toMatchObject({ status: 'verification_pending' });
+    expect(dependencies.prepareVerification).not.toHaveBeenCalled();
+    expect(dependencies.backfill).not.toHaveBeenCalled();
+  });
+
+  it('defers uncertain post-dispatch verification without another Notion effect', async () => {
+    const dependencies = {
+      stage: vi.fn(),
+      recordDispatch: vi.fn(),
+      deferVerification: vi.fn().mockResolvedValue(stored('verification_pending')),
+      fail: vi.fn(),
+      prepareVerification: vi.fn(),
+      completeReconciliation: vi.fn(),
+      backfill: vi.fn(),
+    };
     await expect(submitLocalPublishJobResult(
       stored('submitted').id,
       stored('submitted').claimToken!,
@@ -257,7 +336,11 @@ describe('local publish job orchestration', () => {
   });
 
   it('backfills Notion only after preparing a verified transition', async () => {
-    const prepared = stored('verified');
+    const prepared = {
+      ...stored('verified'),
+      dispatchedAt: '2026-08-01T12:15:00.000Z',
+      verifiedAt: '2026-08-01T12:30:00.000Z',
+    };
     const completed = stored('reconciled');
     const dependencies = {
       stage: vi.fn(),
@@ -286,7 +369,7 @@ describe('local publish job orchestration', () => {
       status: 'success',
       noteId: 'note_123',
       shareUrl: result.shareUrl,
-    });
+    }, prepared.verifiedAt);
     expect(dependencies.completeReconciliation.mock.invocationCallOrder[0])
       .toBeGreaterThan(dependencies.backfill.mock.invocationCallOrder[0]);
   });
@@ -311,7 +394,7 @@ describe('local publish job orchestration', () => {
 
     const successDependencies = {
       stage: vi.fn(),
-      recordDispatch: vi.fn(),
+      recordDispatch: vi.fn().mockResolvedValue(stored('submitted')),
       deferVerification: vi.fn(),
       fail: vi.fn(),
       prepareVerification: vi.fn().mockResolvedValue(stored('verified')),
@@ -322,7 +405,7 @@ describe('local publish job orchestration', () => {
       stored('claimed').id,
       stored('claimed').claimToken!,
       {
-        status: 'succeeded',
+        status: 'submitted',
         noteId: 'note_123',
         shareUrl: 'https://www.rednote.com/explore/note_123',
       },
@@ -351,6 +434,31 @@ describe('local publish job orchestration', () => {
       },
       dependencies,
     )).resolves.toMatchObject({ status: 'reconciled' });
+    expect(dependencies.backfill).not.toHaveBeenCalled();
+    expect(dependencies.completeReconciliation).not.toHaveBeenCalled();
+  });
+
+  it('treats an identical reconciled submitted retry as idempotent', async () => {
+    const dependencies = {
+      stage: vi.fn(),
+      recordDispatch: vi.fn().mockResolvedValue(stored('reconciled')),
+      deferVerification: vi.fn(),
+      fail: vi.fn(),
+      prepareVerification: vi.fn(),
+      completeReconciliation: vi.fn(),
+      backfill: vi.fn(),
+    };
+    await expect(submitLocalPublishJobResult(
+      stored('reconciled').id,
+      stored('reconciled').claimToken!,
+      {
+        status: 'submitted',
+        noteId: 'note_123',
+        shareUrl: 'https://www.rednote.com/explore/note_123',
+      },
+      dependencies,
+    )).resolves.toMatchObject({ status: 'reconciled' });
+    expect(dependencies.prepareVerification).not.toHaveBeenCalled();
     expect(dependencies.backfill).not.toHaveBeenCalled();
     expect(dependencies.completeReconciliation).not.toHaveBeenCalled();
   });
