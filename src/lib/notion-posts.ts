@@ -1003,14 +1003,14 @@ export async function reconcileExternalXhsPost(
         outcome: 'targeted_page' as const,
       };
     }
-    if (!isReadyRednotePost(rawTarget, resolved)) {
+    const current = toReadyPostCandidate(rawTarget, resolved, duplicateAliases);
+    if (!current || current.candidateKind !== 'packet_ready') {
       throw new NotionPostsError(
         'The canonical post changed and is no longer eligible for manual reconciliation',
         'NOTION_RECONCILIATION_TARGET_CHANGED',
         409,
       );
     }
-    const current = mapReadyXhsPost(rawTarget, resolved, duplicateAliases);
     const currentMediaType = current.hasVideo ? 'video' : 'image';
     if (
       current.headline.trim() !== snapshot.title ||
