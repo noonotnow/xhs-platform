@@ -85,7 +85,8 @@ export type ExternalReconciliationStatus = 'processing' | 'succeeded' | 'failed'
 export type ExternalReconciliationOutcome =
   | 'matched_note_id'
   | 'matched_url'
-  | 'created';
+  | 'created'
+  | 'targeted_page';
 
 export interface ExternalReconciliationSummary {
   id: string;
@@ -101,4 +102,44 @@ export interface ExternalReconciliationSummary {
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
+}
+
+export type ManualReconciliationStatus =
+  | 'queued'
+  | 'verifying'
+  | 'reconciled'
+  | 'failed';
+
+export interface ManualReconciliationExpectedSnapshot {
+  title: string;
+  caption: string;
+  mediaType: LocalPublishMediaType;
+}
+
+export interface ManualReconciliationSummary {
+  id: string;
+  notionPageId: string;
+  sourceLocalJobId?: string;
+  noteId: string;
+  shareUrl: string;
+  status: ManualReconciliationStatus;
+  verificationAttempts: number;
+  nextAttemptAt?: string;
+  externalReconciliationId?: string;
+  errorCode?: string;
+  errorMessage?: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}
+
+export interface ClaimedManualReconciliation {
+  id: string;
+  notionPageId: string;
+  noteId: string;
+  shareUrl: string;
+  expected: ManualReconciliationExpectedSnapshot;
+  verificationAttempts: number;
+  claimToken: string;
+  claimExpiresAt: string;
 }

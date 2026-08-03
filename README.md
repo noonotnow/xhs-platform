@@ -75,6 +75,8 @@ in Vercel:
 | `LOCAL_PUBLISH_WORKER_TOKEN` | At least 32 random characters shared only with the trusted Mac-local browser worker |
 | `LOCAL_PUBLISH_JOB_LEASE_SECONDS` | Optional worker claim lease; defaults to 7200 seconds and is clamped to 60–86400 |
 | `LOCAL_PUBLISH_VERIFICATION_BACKOFF_SECONDS` | Optional four-value retry schedule; defaults to `900,3600,21600,86400` seconds (15m, 1h, 6h, 24h) |
+| `MANUAL_RECONCILIATION_LEASE_SECONDS` | Optional existing-post verification lease; defaults to 1800 seconds and is clamped to 60–7200 |
+| `MANUAL_RECONCILIATION_BACKOFF_SECONDS` | Optional four-value existing-post retry schedule; defaults to `900,3600,21600,86400` |
 
 Database connections are selected in the order `XHS_DATABASE_URL`,
 `XHS_DATABASE_POSTGRES_URL`, `DATABASE_URL`, then `POSTGRES_URL`. The managed
@@ -141,6 +143,7 @@ not disable or change the local publishing queue:
 
 ```bash
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/004_external_post_reconciliations.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/007_manual_reconciliation_requests.sql
 ```
 
 Set `LOCAL_PUBLISH_WORKER_TOKEN` to a new random server-only value of at least
@@ -203,6 +206,84 @@ backfill advances the job to `reconciled`. If backfill fails, the row remains
 body `status:"succeeded"` remains accepted as a `verified` alias during rollout.
 `metrics_available` is a later sync concern and is not a publication-verification
 state.
+
+### Already-published manual reconciliation
+
+XHS Admin owns reconciliation for a post that an operator published manually.
+On an unpublished canonical row with no active local publish job, choose
+**Already published? Reconcile**, enter the exact public RedNote URL or bare note
+ID, confirm that the post is already public, and queue verification. A terminal
+failed local publish job is eligible and remains unchanged as audit history.
+Queued or verifying manual reconciliation blocks another local publish job for
+the same canonical row.
+
+The server accepts only a bare ID containing letters, numbers, `_`, or `-`, or
+the exact query-free URL
+`https://www.rednote.com/explore/<noteId>`. It re-reads the canonical Notion
+record and freezes title, caption, and media type; the browser cannot submit
+those claims. Published rows, active local jobs, alternate hosts, query strings,
+fragments, trailing slashes, and conflicting identities fail closed.
+
+The Mac worker uses a separate lane:
+
+1. `GET /api/manual-reconciliations/due?limit=10` with the worker bearer token.
+   The default is 10 and maximum is 20. It always returns HTTP 200:
+
+   ```json
+   {
+     "items": [{
+       "id": "request-uuid",
+       "notionPageId": "canonical-page-id",
+       "noteId": "note_123",
+       "shareUrl": "https://www.rednote.com/explore/note_123",
+       "expected": {
+         "title": "Canonical title",
+         "caption": "Canonical caption",
+         "mediaType": "video"
+       },
+       "verificationAttempts": 0,
+       "claimToken": "claim-uuid",
+       "claimExpiresAt": "2026-08-03T13:00:00.000Z"
+     }]
+   }
+   ```
+
+   Every item has an independent rotating lease. The worker must open
+   Creator/Notes Manager, locate the exact note ID, verify the exact canonical
+   URL, title, caption, and media type, and **never click Publish**.
+2. Submit one result to `POST /api/manual-reconciliations/{id}/result` with
+   `X-Manual-Reconciliation-Claim-Token: <claimToken>`:
+
+   ```json
+   {
+     "status": "verified",
+     "snapshot": {
+       "noteId": "note_123",
+       "shareUrl": "https://www.rednote.com/explore/note_123",
+       "title": "Canonical title",
+       "caption": "Canonical caption",
+       "mediaType": "video"
+     }
+   }
+   ```
+
+   Retryable uncertainty uses
+   `{"status":"verification_pending","code":"SAFE_CODE","message":"Safe operator guidance"}`.
+   A definitive mismatch uses
+   `{"status":"failed","code":"SAFE_CODE","message":"Safe operator guidance"}`.
+   Messages containing URLs or credential-like data are rejected.
+3. A verified snapshot must exactly equal the durable request. XHS then reuses
+   the external reconciliation receipt, checks that the RedNote identity does
+   not belong to another canonical row, updates only the request's
+   `notionPageId`, and writes the established Published fields. A Notion outage
+   requeues the same request and receipt idempotently; it never creates a second
+   canonical row or audit receipt.
+
+Admin displays `queued`, `verifying`, `reconciled`, or `failed`. Failed requests
+are retried in place after eligibility is rechecked. Manual reconciliation is
+publication verification, not metrics scraping: it does not use
+`/api/rednote-metrics/*`, the local dispatch lane, or the local verification
+lane.
 
 ### Quiet worker lanes and metrics
 

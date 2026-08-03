@@ -162,15 +162,24 @@ export async function insertLocalPublishJob(
   idempotencyKey: string,
 ) {
   const inserted = await sql<LocalPublishJobRow>`
+    WITH page_lock AS (
+      SELECT pg_advisory_xact_lock(hashtextextended(${snapshot.notionPageId}, 0))
+    )
     INSERT INTO local_publish_jobs (
       notion_page_id,
       snapshot,
       idempotency_key
     )
-    VALUES (
+    SELECT
       ${snapshot.notionPageId},
       ${JSON.stringify(snapshot)}::jsonb,
       ${idempotencyKey}::uuid
+    FROM page_lock
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM manual_reconciliation_requests
+      WHERE notion_page_id = ${snapshot.notionPageId}
+        AND status IN ('queued', 'verifying')
     )
     ON CONFLICT DO NOTHING
     RETURNING *
@@ -209,6 +218,20 @@ export async function insertLocalPublishJob(
     throw new LocalPublishJobError(
       'This Notion post already has an active local publish job',
       'ACTIVE_JOB_EXISTS',
+      409,
+    );
+  }
+  const activeReconciliation = await sql`
+    SELECT id
+    FROM manual_reconciliation_requests
+    WHERE notion_page_id = ${snapshot.notionPageId}
+      AND status IN ('queued', 'verifying')
+    LIMIT 1
+  `;
+  if (activeReconciliation.rows[0]) {
+    throw new LocalPublishJobError(
+      'This Notion post already has an active manual reconciliation',
+      'ACTIVE_RECONCILIATION_EXISTS',
       409,
     );
   }

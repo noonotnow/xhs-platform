@@ -76,6 +76,29 @@ describe('external reconciliation orchestration', () => {
     expect(mocks.reconcileNotion).not.toHaveBeenCalled();
   });
 
+  it('passes an explicit canonical target for manual reconciliation', async () => {
+    mocks.begin.mockResolvedValue({ record: processing, acquired: true });
+    mocks.reconcileNotion.mockResolvedValue({
+      notionPageId: 'target-page',
+      outcome: 'targeted_page',
+    });
+    mocks.complete.mockResolvedValue({
+      ...succeeded,
+      notionPageId: 'target-page',
+      outcome: 'targeted_page',
+    });
+    await reconcileVerifiedExternalPost({
+      snapshot,
+      idempotencyKey,
+      targetNotionPageId: 'target-page',
+    });
+    expect(mocks.reconcileNotion).toHaveBeenCalledWith(
+      snapshot,
+      processing.createdAt,
+      'target-page',
+    );
+  });
+
   it('records safe Notion failures and never returns a success-shaped fallback', async () => {
     mocks.begin.mockResolvedValue({ record: processing, acquired: true });
     mocks.reconcileNotion.mockRejectedValue(
