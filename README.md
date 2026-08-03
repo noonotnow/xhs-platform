@@ -113,13 +113,25 @@ Notion page before creating a queue job, confirms that it is still RedNote-ready
 and not `Published`, and builds an immutable snapshot from canonical HTTPS media.
 Client-provided media URLs and Notion metadata are never accepted. The operator
 can edit only the final reviewed title, caption, tags, and trusted media choice.
-`Weibo text` supplies the body-only caption, native multi-select `Final Tags`
-supplies tag names directly as a string array, and
-`ScheduledDate` is the only scheduling property; generic Tags, Topics, Hashtags,
-Publish Date, and spaced Scheduled Date properties are not queue sources. When
-Final Tags is absent or empty, legacy trailing hashtags may be split from Weibo
-text; rich-text tag strings are never parsed, and hashtags elsewhere in the body
-are preserved.
+`Caption` is the canonical platform-neutral and language-neutral post body. It
+may contain draft or final copy, but publishing uses it only after the existing
+status and readiness gates pass. Migrate with a direct Notion property rename
+from `Weibo text` to `Caption`; the rename preserves existing values, so do not
+create or backfill a parallel Caption property. Before the live rename, deploy
+Caption-compatible schema lookup to PLAN's writer. XHS current main already
+accepts Caption as a fallback, and this version prefers it. The temporary
+`Caption text`, `Weibo text`, `Weibo Text`, and `Weibo` aliases remain
+read-compatible only for rollback and older schemas. If a transition leaves
+both canonical and legacy properties present, an explicitly empty Caption
+blocks publishing instead of borrowing potentially stale legacy copy. Treat
+that state as duplicate-schema quarantine, not as the normal migration path.
+Native multi-select `Final Tags` supplies tag names directly as a string array,
+and `ScheduledDate` is the only scheduling property; generic Tags, Topics,
+Hashtags, Publish Date, and spaced Scheduled Date properties are not queue
+sources. When Final Tags is absent or empty, trailing hashtags may be split from
+Caption as a legacy fallback; rich-text tag strings are never parsed, and
+hashtags elsewhere in the body are preserved. Do not add separate Chinese Draft
+or Final Caption properties.
 
 Trusted canonical MEDIA `.mov` registrations remain compatibility-unverified and
 are not added to the normal ready video set. Admin exposes a separate warning and
