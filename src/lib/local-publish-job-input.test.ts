@@ -141,6 +141,31 @@ describe('local publish job input', () => {
     expect(snapshot.thumbnailUrl).toBe(readyPost().thumbnailUrl);
   });
 
+  it('queues an eligible MOV trial even when a distinct canonical JPG cover is attached', () => {
+    const movUrl = 'https://images.xhs.justlikekatie.com/videos/assets/post.mov';
+    const coverUrl = 'https://images.xhs.justlikekatie.com/uploads/post-cover.jpg';
+    const parsed = parseQueueLocalPublishInput(input({
+      compatibilityTrialConfirmed: true,
+    }));
+
+    expect(buildLocalPublishSnapshot(readyPost({
+      candidateKind: 'mov_compatibility_trial',
+      publishPacketReady: false,
+      needsMedia: true,
+      mediaUrls: [movUrl, coverUrl],
+      imageUrls: [coverUrl],
+      videoUrls: [],
+      compatibilityTrialVideoUrls: [movUrl],
+      publishBlockers: [
+        'Needs media is still checked',
+        'No canonical HTTPS Rednote media is attached',
+      ],
+    }), parsed)).toMatchObject({
+      mediaUrl: movUrl,
+      compatibilityTrial: 'unverified_mov',
+    });
+  });
+
   it('rejects MOV trials without the separate flag or with unrelated blockers', () => {
     const movUrl = 'https://images.xhs.justlikekatie.com/videos/assets/post.mov';
     const trialPost = readyPost({

@@ -235,6 +235,77 @@ describe('Notion Posts mapping', () => {
     expect(post).not.toHaveProperty('publishAt');
   });
 
+  it('keeps a MOV trial visible when Image URLs also contains a distinct JPG cover', () => {
+    const fixture = pageFixture();
+    fixture.id = '51716941-afcc-4e51-90cf-45e21246d97d';
+    fixture.properties['Publish packet ready'] = {
+      id: 'packet',
+      type: 'checkbox',
+      checkbox: false,
+    };
+    fixture.properties['Needs media'] = {
+      id: 'needs-media',
+      type: 'checkbox',
+      checkbox: true,
+    };
+    fixture.properties.ScheduledDate = {
+      id: 'scheduled-date',
+      type: 'date',
+      date: null,
+    };
+    fixture.properties['Image URLs'] = {
+      id: 'media',
+      type: 'rich_text',
+      rich_text: richText([
+        'https://images.xhs.justlikekatie.com/videos/assets/51/live-trial.mov',
+        'https://images.xhs.justlikekatie.com/uploads/live-trial-cover.jpg',
+      ].join('\n')),
+    };
+    const { resolved, duplicateAliases } = resolvePostsSchema(
+      Object.fromEntries(
+        Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
+      ),
+    );
+
+    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toMatchObject({
+      id: '51716941-afcc-4e51-90cf-45e21246d97d',
+      candidateKind: 'mov_compatibility_trial',
+      imageUrls: [
+        'https://images.xhs.justlikekatie.com/uploads/live-trial-cover.jpg',
+      ],
+      compatibilityTrialVideoUrls: [
+        'https://images.xhs.justlikekatie.com/videos/assets/51/live-trial.mov',
+      ],
+      publishBlockers: [
+        'Needs media is still checked',
+        'No canonical HTTPS Rednote media is attached',
+      ],
+    });
+
+    fixture.properties['Has video'] = {
+      id: 'has-video',
+      type: 'checkbox',
+      checkbox: false,
+    };
+    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toBeNull();
+
+    fixture.properties['Has video'] = {
+      id: 'has-video',
+      type: 'checkbox',
+      checkbox: true,
+    };
+    fixture.properties['Image URLs'] = {
+      id: 'media',
+      type: 'rich_text',
+      rich_text: richText([
+        'https://images.xhs.justlikekatie.com/videos/assets/51/live-trial.mov',
+        'https://images.xhs.justlikekatie.com/videos/assets/51/certified.mp4',
+        'https://images.xhs.justlikekatie.com/uploads/live-trial-cover.jpg',
+      ].join('\n')),
+    };
+    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toBeNull();
+  });
+
   it('excludes packet-false non-MOV records and MOV records with unrelated blockers', () => {
     const fixture = pageFixture();
     fixture.properties['Publish packet ready'] = {
@@ -316,6 +387,64 @@ describe('Notion Posts mapping', () => {
       publishPacketReady: true,
       publishBlockers: [],
     });
+  });
+
+  it('requires canonical primary media for the declared packet type', () => {
+    const videoWithCoverOnly = pageFixture();
+    videoWithCoverOnly.properties['Image URLs'] = {
+      id: 'media',
+      type: 'rich_text',
+      rich_text: richText(
+        'https://images.xhs.justlikekatie.com/uploads/video-cover.jpg',
+      ),
+    };
+    const imageWithVideoOnly = pageFixture();
+    imageWithVideoOnly.properties['Has video'] = {
+      id: 'has-video',
+      type: 'checkbox',
+      checkbox: false,
+    };
+    const imageWithImage = pageFixture();
+    imageWithImage.properties['Has video'] = {
+      id: 'has-video',
+      type: 'checkbox',
+      checkbox: false,
+    };
+    imageWithImage.properties['Image URLs'] = {
+      id: 'media',
+      type: 'rich_text',
+      rich_text: richText(
+        'https://images.xhs.justlikekatie.com/uploads/image-post.jpg',
+      ),
+    };
+    const schemaProperties = Object.fromEntries(
+      Object.entries(videoWithCoverOnly.properties)
+        .map(([name, value]) => [name, { type: value.type }]),
+    );
+    const { resolved, duplicateAliases } = resolvePostsSchema(schemaProperties);
+
+    expect(mapReadyXhsPost(
+      videoWithCoverOnly,
+      resolved,
+      duplicateAliases,
+    ).publishBlockers).toContain('No canonical HTTPS Rednote media is attached');
+    expect(mapReadyXhsPost(
+      imageWithVideoOnly,
+      resolved,
+      duplicateAliases,
+    ).publishBlockers).toContain('No canonical HTTPS Rednote media is attached');
+    expect(mapReadyXhsPost(
+      imageWithImage,
+      resolved,
+      duplicateAliases,
+    ).publishBlockers).not.toContain('No canonical HTTPS Rednote media is attached');
+
+    const schemaWithoutHasVideo = { ...resolved, hasVideo: null };
+    expect(mapReadyXhsPost(
+      pageFixture(),
+      schemaWithoutHasVideo,
+      duplicateAliases,
+    ).publishBlockers).not.toContain('No canonical HTTPS Rednote media is attached');
   });
 
   it('separates canonical MEDIA MOV registrations from certified MP4 videos', () => {

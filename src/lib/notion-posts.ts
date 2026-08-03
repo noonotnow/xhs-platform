@@ -308,8 +308,13 @@ function mappedBlockers(
   }
   if (checkbox(property(page, schema, 'needsMedia'))) blockers.push('Needs media is still checked');
   if (checkbox(property(page, schema, 'needsCaption'))) blockers.push('Needs caption is still checked');
-  if (!urls(property(page, schema, 'mediaUrls')).some((url) =>
-    isCanonicalMediaVideo(url) || isCanonicalMediaImage(url))) {
+  const mediaUrls = urls(property(page, schema, 'mediaUrls'));
+  const hasCanonicalPrimaryMedia = schema.hasVideo
+    ? checkbox(property(page, schema, 'hasVideo'))
+      ? mediaUrls.some(isCanonicalMediaVideo)
+      : mediaUrls.some(isCanonicalMediaImage)
+    : mediaUrls.some((url) => isCanonicalMediaVideo(url) || isCanonicalMediaImage(url));
+  if (!hasCanonicalPrimaryMedia) {
     blockers.push('No canonical HTTPS Rednote media is attached');
   }
   return blockers;
