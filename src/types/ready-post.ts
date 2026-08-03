@@ -1,4 +1,6 @@
-export interface ReadyXhsPost {
+export type ReadyPostCandidateKind = 'packet_ready' | 'mov_compatibility_trial';
+
+export interface XhsPost {
   id: string;
   pageUrl: string;
   headline: string;
@@ -18,6 +20,10 @@ export interface ReadyXhsPost {
   publishAt?: string;
   lastEditedTime: string;
   publishBlockers: string[];
+}
+
+export interface ReadyXhsPost extends XhsPost {
+  candidateKind: ReadyPostCandidateKind;
 }
 
 export interface ReadyXhsPostsResponse {

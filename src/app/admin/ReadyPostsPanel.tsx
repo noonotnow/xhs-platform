@@ -21,6 +21,11 @@ import {
   SAFE_EXTERNAL_LINK_PROPS,
   shouldOfferTitleCopy,
 } from '@/lib/manual-rednote-handoff';
+import { isMovCompatibilityTrialEligible } from '@/lib/mov-compatibility-trial';
+import {
+  displayedLocalPublishJob,
+  isActiveLocalPublishJob,
+} from '@/lib/local-publish-job-display';
 
 interface ApiError {
   error?: string;
@@ -246,8 +251,24 @@ export default function ReadyPostsPanel() {
     () => posts.find((post) => post.id === selectedId) ?? posts[0],
     [posts, selectedId],
   );
+  const packetReadyPosts = useMemo(
+    () => posts.filter((post) => post.candidateKind === 'packet_ready'),
+    [posts],
+  );
+  const movTrialPosts = useMemo(
+    () => posts.filter((post) => post.candidateKind === 'mov_compatibility_trial'),
+    [posts],
+  );
   const mediaChoices = useMemo<MediaChoice[]>(() => {
     if (!selected) return [];
+    if (selected.candidateKind === 'mov_compatibility_trial') {
+      return (selected.compatibilityTrialVideoUrls ?? []).map((url, index) => ({
+        type: 'video' as const,
+        index,
+        url,
+        compatibilityTrial: 'unverified_mov' as const,
+      }));
+    }
     return [
       ...selected.videoUrls.map((url, index) => ({ type: 'video' as const, index, url })),
       ...(selected.compatibilityTrialVideoUrls ?? []).map((url, index) => ({
@@ -263,14 +284,10 @@ export default function ReadyPostsPanel() {
     (choice) => `${choice.compatibilityTrial ?? choice.type}:${choice.index}` === mediaKey,
   ) ?? mediaChoices[0];
   const isMovCompatibilityTrial = selectedMedia?.compatibilityTrial === 'unverified_mov';
-  const movTrialHasUnrelatedBlockers = selected?.publishBlockers.some(
-    (blocker) =>
-      blocker !== 'Needs media is still checked' &&
-      blocker !== 'No canonical HTTPS Rednote media is attached',
-  ) ?? true;
+  const movTrialIsEligible = selected ? isMovCompatibilityTrialEligible(selected) : false;
   const canonicalVideoUrl = selected ? getCanonicalVideoUrl(selected.videoUrls) : undefined;
   const currentJob = selected
-    ? jobs.find((job) => job.notionPageId === selected.id)
+    ? displayedLocalPublishJob(jobs, selected.id)
     : undefined;
   const currentJobStatus = jobStatusCopy(currentJob);
   const currentManualReconciliation = selected
@@ -286,11 +303,7 @@ export default function ReadyPostsPanel() {
       (currentManualReconciliation.status === 'queued' ||
         currentManualReconciliation.status === 'verifying'),
   );
-  const hasActiveJob = Boolean(
-    currentJob &&
-    currentJob.status !== 'failed' &&
-    currentJob.status !== 'reconciled',
-  );
+  const hasActiveJob = Boolean(currentJob && isActiveLocalPublishJob(currentJob));
   const canStartManualReconciliation =
     !currentJob || currentJob.status === 'failed';
   const reviewedTags = tagsFromInput(finalTags);
@@ -565,6 +578,36 @@ export default function ReadyPostsPanel() {
     }
   }
 
+  function postButton(post: ReadyXhsPost) {
+    const job = jobs.find((candidate) => candidate.notionPageId === post.id);
+    const isTrialOnly = post.candidateKind === 'mov_compatibility_trial';
+    const trustedAssetCount = post.videoUrls.length +
+      (post.compatibilityTrialVideoUrls?.length ?? 0) +
+      post.imageUrls.length;
+    return (
+      <button
+        className={`${styles.postButton} ${
+          selected?.id === post.id ? styles.postButtonSelected : ''
+        } ${isTrialOnly ? styles.postButtonTrial : ''}`}
+        key={post.id}
+        type="button"
+        onClick={() => {
+          setSelectedId(post.id);
+          setError('');
+        }}
+      >
+        <span className={styles.postTitle}>{post.headline || 'Untitled post'}</span>
+        <span className={isTrialOnly ? styles.trialRowLabel : styles.readyRowLabel}>
+          {isTrialOnly ? 'MOV staging trial only' : 'Packet ready'}
+        </span>
+        <span className={styles.postMeta}>
+          {job ? `Local job: ${job.status}` : post.status || 'No status'} ·{' '}
+          {trustedAssetCount} trusted asset{trustedAssetCount === 1 ? '' : 's'}
+        </span>
+      </button>
+    );
+  }
+
   return (
     <section className={styles.panel} aria-labelledby="ready-posts-heading">
       <div className={styles.headingRow}>
@@ -598,42 +641,34 @@ export default function ReadyPostsPanel() {
         </p>
       ) : (
         <div className={styles.workspace}>
-          <div className={styles.postList} aria-label="Publish-ready posts">
-            {posts.map((post) => {
-              const job = jobs.find((candidate) => candidate.notionPageId === post.id);
-              return (
-                <button
-                  className={`${styles.postButton} ${
-                    selected?.id === post.id ? styles.postButtonSelected : ''
-                  }`}
-                  key={post.id}
-                  type="button"
-                  onClick={() => {
-                    setSelectedId(post.id);
-                    setError('');
-                  }}
-                >
-                  <span className={styles.postTitle}>{post.headline || 'Untitled post'}</span>
-                  <span className={styles.postMeta}>
-                    {job ? `Local job: ${job.status}` : post.status || 'No status'} ·{' '}
-                    {post.videoUrls.length +
-                      (post.compatibilityTrialVideoUrls?.length ?? 0) +
-                      post.imageUrls.length} trusted asset
-                    {post.videoUrls.length +
-                      (post.compatibilityTrialVideoUrls?.length ?? 0) +
-                      post.imageUrls.length === 1 ? '' : 's'}
-                  </span>
-                </button>
-              );
-            })}
+          <div className={styles.postList} aria-label="Ready and MOV trial candidates">
+            {packetReadyPosts.length > 0 && (
+              <section className={styles.candidateGroup} aria-labelledby="packet-ready-group">
+                <h3 id="packet-ready-group">Packet-ready posts</h3>
+                {packetReadyPosts.map(postButton)}
+              </section>
+            )}
+            {movTrialPosts.length > 0 && (
+              <section className={styles.candidateGroup} aria-labelledby="mov-trial-group">
+                <h3 id="mov-trial-group">MOV staging trials</h3>
+                <p>Unverified, media-blocked records for Creator staging only.</p>
+                {movTrialPosts.map(postButton)}
+              </section>
+            )}
           </div>
 
           {selected && (
             <article className={styles.detail}>
               <div className={styles.statusRow}>
                 <h3 className={styles.detailTitle}>{selected.headline || 'Untitled post'}</h3>
-                <span className={styles.badge}>
-                  {selected.publishPacketReady ? 'Packet ready' : 'Not ready'}
+                <span className={
+                  selected.candidateKind === 'mov_compatibility_trial'
+                    ? styles.trialBadge
+                    : styles.badge
+                }>
+                  {selected.candidateKind === 'mov_compatibility_trial'
+                    ? 'MOV trial only'
+                    : 'Packet ready'}
                 </span>
               </div>
               <p className={styles.muted}>Notion status: {selected.status || 'Not set'}</p>
@@ -895,7 +930,7 @@ export default function ReadyPostsPanel() {
                     hasActiveJob ||
                     hasActiveManualReconciliation ||
                     (isMovCompatibilityTrial
-                      ? movTrialHasUnrelatedBlockers
+                      ? !movTrialIsEligible
                       : selected.publishBlockers.length > 0) ||
                     !selectedMedia ||
                     !finalTitle.trim() ||
@@ -922,7 +957,8 @@ export default function ReadyPostsPanel() {
                 </p>
               </section>
 
-              <details className={styles.handoff}>
+              {selected.candidateKind === 'packet_ready' ? (
+                <details className={styles.handoff}>
                 <summary>Manual handoff and download controls</summary>
                 <p>
                   Use these controls if the local worker is unavailable. Nothing is sent to
@@ -1026,7 +1062,13 @@ export default function ReadyPostsPanel() {
                   Manual publishing is not backfilled automatically. Leave Notion unchanged until
                   the exact published RedNote URL and note ID are reconciled.
                 </p>
-              </details>
+                </details>
+              ) : (
+                <p className={styles.trialManualHandoffDisabled}>
+                  Manual Creator handoff is disabled for unverified MOV trials. Use the staging
+                  queue above so the worker enforces the separate publish approval.
+                </p>
+              )}
 
               <details className={styles.experimental}>
                 <summary>Legacy cloud cookie publisher — retired</summary>
