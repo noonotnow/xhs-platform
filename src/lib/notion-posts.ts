@@ -42,7 +42,7 @@ const PROPERTY_ALIASES = {
   status: ['Status'],
   thumbnail: ['Thumbnail', 'Thumbnail URL'],
   mediaUrls: ['Image URLs', 'Image URL', 'Images'],
-  caption: ['Weibo text', 'Weibo Text', 'Weibo', 'Caption'],
+  caption: ['Caption', 'Caption text', 'Weibo text', 'Weibo Text', 'Weibo'],
   publishPacketReady: ['Publish packet ready', 'Publish Packet Ready', 'Packet ready'],
   hasVideo: ['Has video', 'Has Video'],
   needsMedia: ['Needs media', 'Needs Media'],
@@ -302,7 +302,7 @@ function mappedBlockers(
     if (duplicates[key]) blockers.push(`${key} has multiple aliases in the Posts DB`);
   }
   if (!plainText(property(page, schema, 'headline')).trim()) blockers.push('Headline is empty');
-  if (!caption) blockers.push('Weibo text is empty');
+  if (!caption) blockers.push('Caption is empty');
   if (hasInvalidScheduledDate) {
     blockers.push('ScheduledDate must include a valid publish time and timezone');
   }

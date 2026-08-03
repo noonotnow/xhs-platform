@@ -859,7 +859,7 @@ export default function ReadyPostsPanel() {
                     />
                   </label>
                   <label className={styles.reviewField}>
-                    <span>Final caption</span>
+                    <span>Reviewed caption</span>
                     <textarea
                       maxLength={5000}
                       rows={7}
@@ -868,8 +868,8 @@ export default function ReadyPostsPanel() {
                       disabled={hasActiveJob || hasActiveManualReconciliation}
                     />
                     <small>
-                      Prefilled from Weibo text. Legacy trailing hashtags are removed only when
-                      Final Tags is absent.
+                      Prefilled from Caption. Trailing hashtags are removed only when Final Tags
+                      is absent.
                     </small>
                   </label>
                   <label className={styles.reviewField}>
@@ -883,7 +883,7 @@ export default function ReadyPostsPanel() {
                     />
                     <small>
                       {selected.tagsSource === 'legacy-caption'
-                        ? 'Legacy fallback from trailing Weibo text hashtags. '
+                        ? 'Legacy fallback from trailing Caption hashtags. '
                         : 'Prefilled from Final Tags. '}
                       Up to 20 tags; a leading # is removed before queueing.
                     </small>

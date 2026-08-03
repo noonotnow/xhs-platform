@@ -190,11 +190,11 @@ describe('local publish job input', () => {
         ...trialPost,
         publishBlockers: [
           ...trialPost.publishBlockers,
-          'Weibo text is empty',
+          'Caption is empty',
         ],
       },
       parseQueueLocalPublishInput(input({ compatibilityTrialConfirmed: true })),
-    )).toThrow('Weibo text is empty');
+    )).toThrow('Caption is empty');
   });
 
   it('does not reinterpret a packet-ready record as a MOV trial', () => {
