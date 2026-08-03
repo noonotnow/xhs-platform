@@ -887,6 +887,7 @@ async function ensureExternalReconciliationNote(
 export async function reconcileExternalXhsPost(
   snapshot: ExternalPostSnapshot,
   reconciledAt: string,
+  targetPageId?: string,
 ) {
   const client = getClient();
   const { resolved, duplicateAliases, properties: schemaProperties } =
@@ -917,6 +918,84 @@ export async function reconcileExternalXhsPost(
       snapshot.shareUrl,
     ),
   ]);
+  if (targetPageId) {
+    assertPageId(targetPageId);
+    const rawTarget = await client.pages.retrieve({ page_id: targetPageId });
+    if (!isFullPage(rawTarget)) {
+      throw new NotionPostsError(
+        'Notion returned a partial reconciliation target',
+        'NOTION_PAGE_ERROR',
+        502,
+      );
+    }
+    assertPostsDatabaseParent(rawTarget);
+    const conflictingMatch = [...noteMatches, ...urlMatches].find(
+      (page) => page.id !== rawTarget.id,
+    );
+    if (conflictingMatch) {
+      throw new NotionPostsError(
+        'The verified RedNote identity belongs to another canonical post',
+        'NOTION_RECONCILIATION_CONFLICT',
+        409,
+      );
+    }
+    const result = { status: 'success' as const, noteId: snapshot.noteId, shareUrl: snapshot.shareUrl };
+    const currentResult = publishedResultState(
+      rawTarget,
+      resolved,
+      duplicateAliases,
+      result,
+    );
+    if (currentResult === 'conflict') {
+      throw new NotionPostsError(
+        'The canonical post is already Published with different RedNote metadata',
+        'NOTION_PUBLISH_CONFLICT',
+        409,
+      );
+    }
+    const note = externalReconciliationNote(snapshot.noteId);
+    if (currentResult === 'match') {
+      await ensureExternalReconciliationNote(client, rawTarget.id, note);
+      return {
+        notionPageId: rawTarget.id,
+        outcome: 'targeted_page' as const,
+      };
+    }
+    if (!isReadyRednotePost(rawTarget, resolved)) {
+      throw new NotionPostsError(
+        'The canonical post changed and is no longer eligible for manual reconciliation',
+        'NOTION_RECONCILIATION_TARGET_CHANGED',
+        409,
+      );
+    }
+    const current = mapReadyXhsPost(rawTarget, resolved, duplicateAliases);
+    const currentMediaType = current.hasVideo ? 'video' : 'image';
+    if (
+      current.headline.trim() !== snapshot.title ||
+      current.caption !== snapshot.caption ||
+      currentMediaType !== snapshot.mediaType
+    ) {
+      throw new NotionPostsError(
+        'The canonical post metadata changed after reconciliation was requested',
+        'NOTION_RECONCILIATION_TARGET_CHANGED',
+        409,
+      );
+    }
+    const properties = buildExternalPublishedProperties(
+      resolved,
+      duplicateAliases,
+      schemaProperties,
+      snapshot,
+      reconciledAt,
+      rawTarget,
+    );
+    await client.pages.update({ page_id: rawTarget.id, properties });
+    await ensureExternalReconciliationNote(client, rawTarget.id, note);
+    return {
+      notionPageId: rawTarget.id,
+      outcome: 'targeted_page' as const,
+    };
+  }
   const target = chooseExternalReconciliationTarget(noteMatches, urlMatches);
   const properties = buildExternalPublishedProperties(
     resolved,

@@ -53,6 +53,7 @@ function completedResult(record: {
 export async function reconcileVerifiedExternalPost(input: {
   snapshot: ExternalPostSnapshot;
   idempotencyKey: string;
+  targetNotionPageId?: string;
 }) {
   const started = await beginExternalReconciliation(
     input.snapshot,
@@ -61,10 +62,16 @@ export async function reconcileVerifiedExternalPost(input: {
   if (!started.acquired) return completedResult(started.record);
 
   try {
-    const result = await reconcileExternalXhsPost(
-      input.snapshot,
-      started.record.createdAt,
-    );
+    const result = input.targetNotionPageId
+      ? await reconcileExternalXhsPost(
+          input.snapshot,
+          started.record.createdAt,
+          input.targetNotionPageId,
+        )
+      : await reconcileExternalXhsPost(
+          input.snapshot,
+          started.record.createdAt,
+        );
     const completed = await completeExternalReconciliation(
       started.record.id,
       result.notionPageId,

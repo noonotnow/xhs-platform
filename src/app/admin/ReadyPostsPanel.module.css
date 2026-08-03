@@ -51,6 +51,16 @@
   cursor: pointer;
 }
 
+.reconcileButton,
+.retryButton,
+.reconcileSubmit {
+  min-height: 40px;
+  border-radius: 8px;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
 .refresh,
 .linkButton,
 .copyButton,
@@ -69,6 +79,9 @@
 .copyButton:focus-visible,
 .secondaryButton:focus-visible,
 .creatorButton:focus-visible,
+.reconcileButton:focus-visible,
+.retryButton:focus-visible,
+.reconcileSubmit:focus-visible,
 .experimental summary:focus-visible {
   outline: 3px solid rgba(124, 58, 237, 0.28);
   outline-offset: 2px;
@@ -313,6 +326,14 @@
   font-weight: 700;
 }
 
+.retryButton {
+  margin-top: 9px;
+  padding: 8px 12px;
+  color: inherit;
+  background: #fff;
+  border: 1px solid currentColor;
+}
+
 .jobStatuspending {
   color: #1e3a8a;
   background: #eff6ff;
@@ -341,6 +362,101 @@
   display: grid;
   gap: 12px;
   margin: 14px 0;
+}
+
+.manualReconciliation {
+  margin-top: 14px;
+  padding: 12px;
+  color: #334155;
+  background: #fff;
+  border: 1px solid #ddd6fe;
+  border-radius: 8px;
+}
+
+.manualReconciliationHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.manualReconciliationHeading strong {
+  display: block;
+  color: #3b0764;
+  font-size: 0.875rem;
+}
+
+.manualReconciliationHeading p {
+  max-width: 62ch;
+  margin: 3px 0 0;
+  color: #5b4b6b;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.reconcileButton {
+  flex: 0 0 auto;
+  padding: 8px 13px;
+  color: #5b21b6;
+  background: #fff;
+  border: 1px solid #8b5cf6;
+}
+
+.reconcileButton:hover {
+  color: #fff;
+  background: #6d28d9;
+}
+
+.manualReconciliationForm {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #ede9fe;
+}
+
+.confirmation {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  color: #4b5565;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+.confirmation input {
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  accent-color: #6d28d9;
+}
+
+.reconcileSubmit {
+  padding: 10px 14px;
+  color: #fff;
+  background: #6d28d9;
+  border: 1px solid #5b21b6;
+}
+
+.reconcileSubmit:hover:not(:disabled) {
+  background: #5b21b6;
+}
+
+.reconcileSubmit:disabled,
+.retryButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.inlineError {
+  margin: 10px 0 0;
+  padding: 9px 10px;
+  color: #9f1239;
+  background: #fff1f2;
+  border: 1px solid #fecdd3;
+  border-radius: 8px;
+  font-size: 0.8125rem;
+  line-height: 1.5;
 }
 
 .reviewField {
@@ -697,6 +813,15 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 18px;
+}
+
+.manualReconciliationHeading {
+  align-items: stretch;
+  flex-direction: column;
+}
+
+.reconcileButton {
+  align-self: flex-start;
 }
 
 .auditHeading h3 {

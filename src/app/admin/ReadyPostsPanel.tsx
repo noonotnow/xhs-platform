@@ -6,6 +6,7 @@ import type {
   ExternalReconciliationSummary,
   LocalPublishJobSummary,
   LocalPublishMediaType,
+  ManualReconciliationSummary,
 } from '@/types/local-publish-job';
 import type { ReadyXhsPost, ReadyXhsPostsResponse } from '@/types/ready-post';
 import styles from './ReadyPostsPanel.module.css';
@@ -36,6 +37,14 @@ interface LocalJobResponse extends ApiError {
 
 interface ExternalReconciliationsResponse extends ApiError {
   reconciliations: ExternalReconciliationSummary[];
+}
+
+interface ManualReconciliationsResponse extends ApiError {
+  reconciliations: ManualReconciliationSummary[];
+}
+
+interface ManualReconciliationResponse extends ApiError {
+  reconciliation: ManualReconciliationSummary;
 }
 
 type CopyStatus = {
@@ -163,11 +172,61 @@ function jobStatusCopy(job: LocalPublishJobSummary | undefined) {
   };
 }
 
+function manualReconciliationStatusCopy(
+  reconciliation: ManualReconciliationSummary | undefined,
+) {
+  if (!reconciliation) return null;
+  if (reconciliation.status === 'queued') {
+    return {
+      tone: 'pending',
+      title: 'Manual reconciliation queued',
+      detail: reconciliation.nextAttemptAt
+        ? `The Mac worker will verify the existing post after ${new Date(
+            reconciliation.nextAttemptAt,
+          ).toLocaleString()}. It will not click Publish.`
+        : 'The Mac worker will verify the existing post. It will not click Publish.',
+    };
+  }
+  if (reconciliation.status === 'verifying') {
+    return {
+      tone: 'pending',
+      title: 'Verifying the existing RedNote post',
+      detail:
+        'The worker is checking the exact note ID, public URL, title, caption, and media type. Do not publish again.',
+    };
+  }
+  if (reconciliation.status === 'failed') {
+    return {
+      tone: 'error',
+      title: `Manual reconciliation failed${
+        reconciliation.errorCode ? ` (${reconciliation.errorCode})` : ''
+      }`,
+      detail:
+        reconciliation.errorMessage ||
+        'Check the public post and canonical packet, then retry this request.',
+    };
+  }
+  return {
+    tone: 'success',
+    title: 'Existing post verified and reconciled',
+    detail:
+      'The exact public RedNote post was verified and the canonical Notion row was marked Published.',
+  };
+}
+
 export default function ReadyPostsPanel() {
   const [posts, setPosts] = useState<ReadyXhsPost[]>([]);
   const [jobs, setJobs] = useState<LocalPublishJobSummary[]>([]);
   const [reconciliations, setReconciliations] = useState<ExternalReconciliationSummary[]>([]);
   const [reconciliationError, setReconciliationError] = useState('');
+  const [manualReconciliations, setManualReconciliations] = useState<
+    ManualReconciliationSummary[]
+  >([]);
+  const [manualReconciliationError, setManualReconciliationError] = useState('');
+  const [showManualReconciliation, setShowManualReconciliation] = useState(false);
+  const [manualPublicPost, setManualPublicPost] = useState('');
+  const [manualConfirmed, setManualConfirmed] = useState(false);
+  const [manualSubmitting, setManualSubmitting] = useState(false);
   const [selectedId, setSelectedId] = useState('');
   const [loading, setLoading] = useState(true);
   const [queueing, setQueueing] = useState(false);
@@ -181,6 +240,7 @@ export default function ReadyPostsPanel() {
   const copyRequestRef = useRef(0);
   const selectedPostIdRef = useRef<string>();
   const idempotencyKeysRef = useRef<Record<string, string>>({});
+  const reconciliationKeysRef = useRef<Record<string, string>>({});
 
   const selected = useMemo(
     () => posts.find((post) => post.id === selectedId) ?? posts[0],
@@ -213,11 +273,26 @@ export default function ReadyPostsPanel() {
     ? jobs.find((job) => job.notionPageId === selected.id)
     : undefined;
   const currentJobStatus = jobStatusCopy(currentJob);
+  const currentManualReconciliation = selected
+    ? manualReconciliations.find(
+        (reconciliation) => reconciliation.notionPageId === selected.id,
+      )
+    : undefined;
+  const currentManualStatus = manualReconciliationStatusCopy(
+    currentManualReconciliation,
+  );
+  const hasActiveManualReconciliation = Boolean(
+    currentManualReconciliation &&
+      (currentManualReconciliation.status === 'queued' ||
+        currentManualReconciliation.status === 'verifying'),
+  );
   const hasActiveJob = Boolean(
     currentJob &&
     currentJob.status !== 'failed' &&
     currentJob.status !== 'reconciled',
   );
+  const canStartManualReconciliation =
+    !currentJob || currentJob.status === 'failed';
   const reviewedTags = tagsFromInput(finalTags);
   const missingTags = getMissingTags(reviewedTags, finalCaption);
   const showTitleCopy = shouldOfferTitleCopy(finalTitle, finalCaption);
@@ -285,19 +360,45 @@ export default function ReadyPostsPanel() {
     }
   }, []);
 
+  const loadManualReconciliations = useCallback(async (showError = false) => {
+    try {
+      const path = '/admin/api/manual-reconciliations';
+      const response = await fetch(path, { cache: 'no-store' });
+      const data = await responseJson<ManualReconciliationsResponse>(
+        response,
+        `GET ${path}`,
+      );
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to load manual reconciliations');
+      }
+      setManualReconciliations(data.reconciliations);
+      setManualReconciliationError('');
+    } catch (loadError) {
+      if (showError) {
+        setManualReconciliationError(
+          loadError instanceof Error
+            ? loadError.message
+            : 'Failed to load manual reconciliations',
+        );
+      }
+    }
+  }, []);
+
   useEffect(() => {
     void loadPosts();
     void loadJobs(true);
     void loadReconciliations();
-  }, [loadJobs, loadPosts, loadReconciliations]);
+    void loadManualReconciliations(true);
+  }, [loadJobs, loadManualReconciliations, loadPosts, loadReconciliations]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
       void loadJobs();
       void loadReconciliations();
+      void loadManualReconciliations();
     }, 10_000);
     return () => window.clearInterval(timer);
-  }, [loadJobs, loadReconciliations]);
+  }, [loadJobs, loadManualReconciliations, loadReconciliations]);
 
   useEffect(() => {
     setFinalTitle(selected?.headline ?? '');
@@ -312,6 +413,9 @@ export default function ReadyPostsPanel() {
           : '';
     setMediaKey(firstChoice);
     setCopyStatus(null);
+    setShowManualReconciliation(false);
+    setManualPublicPost('');
+    setManualConfirmed(false);
   }, [selected]);
 
   async function queueSelected() {
@@ -368,6 +472,87 @@ export default function ReadyPostsPanel() {
     }
   }
 
+  async function reconcileSelected() {
+      if (!selected || !manualConfirmed || !manualPublicPost.trim()) return;
+      const idempotencyKey =
+        reconciliationKeysRef.current[selected.id] ?? crypto.randomUUID();
+      reconciliationKeysRef.current[selected.id] = idempotencyKey;
+      setManualSubmitting(true);
+      setManualReconciliationError('');
+      try {
+        const path = '/admin/api/manual-reconciliations';
+        const response = await fetch(path, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Idempotency-Key': idempotencyKey,
+          },
+          body: JSON.stringify({
+            notionPageId: selected.id,
+            publicPost: manualPublicPost,
+            confirmed: true,
+          }),
+        });
+        const data = await responseJson<ManualReconciliationResponse>(
+          response,
+          `POST ${path}`,
+        );
+        if (!response.ok) {
+          throw new Error(data.error || 'Failed to queue manual reconciliation');
+        }
+        delete reconciliationKeysRef.current[selected.id];
+        setManualReconciliations((current) => [
+          data.reconciliation,
+          ...current.filter((item) => item.id !== data.reconciliation.id),
+        ]);
+        setShowManualReconciliation(false);
+        setManualConfirmed(false);
+      } catch (submitError) {
+        setManualReconciliationError(
+          submitError instanceof Error
+            ? submitError.message
+            : 'Failed to queue manual reconciliation',
+        );
+        void loadManualReconciliations();
+      } finally {
+        setManualSubmitting(false);
+      }
+    }
+
+  async function retryManualReconciliation() {
+      if (!currentManualReconciliation) return;
+      setManualSubmitting(true);
+      setManualReconciliationError('');
+      try {
+        const path =
+          `/admin/api/manual-reconciliations/${currentManualReconciliation.id}/retry`;
+        const response = await fetch(path, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ confirmed: true }),
+        });
+        const data = await responseJson<ManualReconciliationResponse>(
+          response,
+          `POST ${path}`,
+        );
+        if (!response.ok) {
+          throw new Error(data.error || 'Failed to retry manual reconciliation');
+        }
+        setManualReconciliations((current) => [
+          data.reconciliation,
+          ...current.filter((item) => item.id !== data.reconciliation.id),
+        ]);
+      } catch (retryError) {
+        setManualReconciliationError(
+          retryError instanceof Error
+            ? retryError.message
+            : 'Failed to retry manual reconciliation',
+        );
+      } finally {
+        setManualSubmitting(false);
+    }
+  }
+
   async function copyField(value: string, label: string) {
     const requestId = ++copyRequestRef.current;
     const postId = selected?.id;
@@ -394,6 +579,7 @@ export default function ReadyPostsPanel() {
           void loadPosts();
           void loadJobs(true);
           void loadReconciliations();
+          void loadManualReconciliations(true);
         }} disabled={loading}>
           {loading ? 'Refreshing…' : 'Refresh posts'}
         </button>
@@ -521,6 +707,111 @@ export default function ReadyPostsPanel() {
                   </div>
                 )}
 
+                {currentManualStatus && (
+                  <div
+                    className={`${styles.jobStatus} ${
+                      styles[`jobStatus${currentManualStatus.tone}`]
+                    }`}
+                    role="status"
+                  >
+                    <strong>{currentManualStatus.title}</strong>
+                    <p>{currentManualStatus.detail}</p>
+                    {currentManualReconciliation?.status === 'failed' && (
+                      <button
+                        className={styles.retryButton}
+                        type="button"
+                        onClick={retryManualReconciliation}
+                        disabled={manualSubmitting || hasActiveJob}
+                      >
+                        {manualSubmitting ? 'Retrying…' : 'Retry verification'}
+                      </button>
+                    )}
+                    {currentManualReconciliation?.status === 'reconciled' && (
+                      <a
+                        href={currentManualReconciliation.shareUrl}
+                        {...SAFE_EXTERNAL_LINK_PROPS}
+                      >
+                        Open reconciled RedNote post
+                      </a>
+                    )}
+                  </div>
+                )}
+
+                {!currentManualReconciliation &&
+                  !hasActiveJob &&
+                  canStartManualReconciliation && (
+                  <div className={styles.manualReconciliation}>
+                    <div className={styles.manualReconciliationHeading}>
+                      <div>
+                        <strong>Already published?</strong>
+                        <p>
+                          Verify an existing public post and backfill this canonical row.
+                          This action never publishes.
+                        </p>
+                      </div>
+                      <button
+                        className={styles.reconcileButton}
+                        type="button"
+                        onClick={() => setShowManualReconciliation((current) => !current)}
+                        aria-expanded={showManualReconciliation}
+                      >
+                        {showManualReconciliation ? 'Cancel' : 'Reconcile'}
+                      </button>
+                    </div>
+                    {showManualReconciliation && (
+                      <div className={styles.manualReconciliationForm}>
+                        <label className={styles.reviewField}>
+                          <span>Public RedNote URL or note ID</span>
+                          <input
+                            autoComplete="off"
+                            maxLength={500}
+                            placeholder="https://www.rednote.com/explore/…"
+                            value={manualPublicPost}
+                            onChange={(event) => setManualPublicPost(event.target.value)}
+                            disabled={manualSubmitting}
+                          />
+                          <small>
+                            Use the exact query-free public URL or bare note ID. The worker verifies
+                            it against the canonical title, caption, and media type.
+                          </small>
+                        </label>
+                        <label className={styles.confirmation}>
+                          <input
+                            type="checkbox"
+                            checked={manualConfirmed}
+                            onChange={(event) => setManualConfirmed(event.target.checked)}
+                            disabled={manualSubmitting}
+                          />
+                          <span>
+                            I confirm this post is already public and should be verified, not
+                            published again.
+                          </span>
+                        </label>
+                        <button
+                          className={styles.reconcileSubmit}
+                          type="button"
+                          onClick={reconcileSelected}
+                          disabled={
+                            manualSubmitting ||
+                            !manualConfirmed ||
+                            !manualPublicPost.trim()
+                          }
+                        >
+                          {manualSubmitting
+                            ? 'Queueing verification…'
+                            : 'Queue existing-post verification'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {manualReconciliationError && (
+                  <p className={styles.inlineError} role="alert">
+                    {manualReconciliationError}
+                  </p>
+                )}
+
                 <div className={styles.reviewFields}>
                   <label className={styles.reviewField}>
                     <span>Final title</span>
@@ -528,7 +819,7 @@ export default function ReadyPostsPanel() {
                       maxLength={100}
                       value={finalTitle}
                       onChange={(event) => setFinalTitle(event.target.value)}
-                      disabled={hasActiveJob}
+                      disabled={hasActiveJob || hasActiveManualReconciliation}
                     />
                   </label>
                   <label className={styles.reviewField}>
@@ -538,7 +829,7 @@ export default function ReadyPostsPanel() {
                       rows={7}
                       value={finalCaption}
                       onChange={(event) => setFinalCaption(event.target.value)}
-                      disabled={hasActiveJob}
+                      disabled={hasActiveJob || hasActiveManualReconciliation}
                     />
                     <small>
                       Prefilled from Weibo text. Legacy trailing hashtags are removed only when
@@ -552,7 +843,7 @@ export default function ReadyPostsPanel() {
                       value={finalTags}
                       onChange={(event) => setFinalTags(event.target.value)}
                       placeholder="Comma-separated tags"
-                      disabled={hasActiveJob}
+                      disabled={hasActiveJob || hasActiveManualReconciliation}
                     />
                     <small>
                       {selected.tagsSource === 'legacy-caption'
@@ -575,7 +866,7 @@ export default function ReadyPostsPanel() {
                         ? `${selectedMedia.compatibilityTrial ?? selectedMedia.type}:${selectedMedia.index}`
                         : ''}
                       onChange={(event) => setMediaKey(event.target.value)}
-                      disabled={hasActiveJob}
+                      disabled={hasActiveJob || hasActiveManualReconciliation}
                     >
                       {mediaChoices.map((choice) => (
                         <option
@@ -602,6 +893,7 @@ export default function ReadyPostsPanel() {
                   disabled={
                     queueing ||
                     hasActiveJob ||
+                    hasActiveManualReconciliation ||
                     (isMovCompatibilityTrial
                       ? movTrialHasUnrelatedBlockers
                       : selected.publishBlockers.length > 0) ||
