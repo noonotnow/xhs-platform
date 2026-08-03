@@ -166,6 +166,26 @@ GET  /api/comments/:noteId — Get comments
 POST /api/comments         — Post comment reply
 ```
 
+### Local RedNote Worker
+
+All worker routes require the configured local worker bearer token and disable
+caching.
+
+| Route | Contract |
+|---|---|
+| `GET /api/local-publish-jobs/next?lane=dispatch` | Atomic single claim for staging/dispatch; `FOR UPDATE SKIP LOCKED LIMIT 1` |
+| `GET /api/local-publish-jobs/next?lane=verification` | Atomic single claim only when verification or reconciliation is due |
+| `GET /api/local-publish-jobs/next` | Backward-compatible combined lane |
+| `POST /api/local-publish-jobs/:id/result` | Per-job token result; preserves staging, human approval, verification, and reconciliation gates |
+| `GET /api/rednote-metrics/due?limit=20` | Bounded metrics batch with a distinct token and lease per post |
+| `POST /api/rednote-metrics/observations` | Consolidated observations and one coalesced run summary |
+
+Metrics cadence is 6-hourly through 48 hours, daily through day 14, weekly
+through day 90, and manual afterward. The server stores a performance snapshot
+only for changed metrics or a scheduled checkpoint. Empty scans and exact
+retries do not write. Metrics storage references the canonical Posts page ID
+and never mutates Notion or CONNECT-owned records.
+
 ---
 
 ## Section 5: OAuth 2.0 Flow Design

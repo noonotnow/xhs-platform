@@ -196,6 +196,54 @@ body `status:"succeeded"` remains accepted as a `verified` alias during rollout.
 `metrics_available` is a later sync concern and is not a publication-verification
 state.
 
+### Quiet worker lanes and metrics
+
+A persistent worker should drain independent lanes instead of consuming one
+combined lifecycle transition per wake:
+
+- `GET /api/local-publish-jobs/next?lane=dispatch` atomically claims one
+  `queued`, expired `claimed`, or expired `staged` job.
+- `GET /api/local-publish-jobs/next?lane=verification` atomically claims one
+  due `submitted`, `scheduled`, or `verification_pending` job, or one
+  reclaimable `verified` reconciliation. Dispatch work cannot consume this
+  lane's capacity, and verification work cannot consume dispatch capacity.
+- Omitting `lane` preserves the existing combined single-claim behavior for
+  older workers. Every response still has its own rotating `claimToken` and
+  `claimExpiresAt`; result contracts and human Publish approval are unchanged.
+
+Metrics use a separate bounded batch because they are read-only collection work:
+
+1. `GET /api/rednote-metrics/due?limit=20` claims at most 20 reconciled posts.
+   The default and maximum are both 20. Add `onDemand=true` to include posts
+   older than 90 days. Every item has its own claim token and lease.
+2. Cadence is derived from the durable publication time: through 48 hours every
+   6 hours, through day 14 daily, through day 90 weekly, then manual/on-demand.
+3. Submit one consolidated request to `POST /api/rednote-metrics/observations`:
+
+   ```json
+   {
+     "observations": [{
+       "notionPageId": "canonical-post-page-id",
+       "claimToken": "11111111-1111-4111-8111-111111111111",
+       "observedAt": "2026-08-02T12:00:00.000Z",
+       "metrics": {
+         "views": 120,
+         "likes": 12,
+         "comments": 3,
+         "saves": 4,
+         "shares": 1
+       }
+     }]
+   }
+   ```
+
+The metrics service writes `post_performance_snapshots` only when values changed
+or a cadence checkpoint is due. Exact retries coalesce without writes, and an
+empty due batch performs no writes. Responses contain one run summary with
+`claimed`, `verified`, `measured`, `snapshotsWritten`, and `failures`; there are
+no field-level updates. These endpoints persist observation history only and do
+not mutate the canonical Notion Posts database or add CONNECT-owned behavior.
+
 The compatibility marker is stored inside the immutable JSONB job snapshot and
 shown in the operator audit. Queue snapshots remain JSONB: new rows store
 `publishAt` and never store `scheduledDate`, while existing snapshots normalize

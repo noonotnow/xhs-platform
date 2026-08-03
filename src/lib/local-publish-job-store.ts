@@ -7,6 +7,7 @@ import type {
   LocalPublishJobStatus,
   LocalPublishJobSummary,
   LocalPublishSnapshot,
+  LocalPublishWorkLane,
 } from '@/types/local-publish-job';
 
 interface LocalPublishJobRow extends QueryResultRow {
@@ -240,27 +241,38 @@ export async function listLocalPublishJobs() {
 
 export async function claimNextStoredLocalPublishJob(
   leaseSeconds: number,
+  lane: LocalPublishWorkLane = 'all',
 ): Promise<ClaimedLocalPublishJob | null> {
   const result = await sql<LocalPublishJobRow>`
     WITH candidate AS (
       SELECT id, status
       FROM local_publish_jobs
-      WHERE status = 'queued'
-        OR (status = 'claimed' AND claim_expires_at <= CURRENT_TIMESTAMP)
-        OR (status = 'staged' AND claim_expires_at <= CURRENT_TIMESTAMP)
-        OR (
-          status IN ('submitted', 'scheduled', 'verification_pending')
-          AND next_verification_at <= CURRENT_TIMESTAMP
-          AND (
-            claim_expires_at IS NULL
-            OR claim_expires_at <= CURRENT_TIMESTAMP
-          )
+      WHERE (
+        ${lane} IN ('all', 'dispatch')
+        AND (
+          status = 'queued'
+          OR (status = 'claimed' AND claim_expires_at <= CURRENT_TIMESTAMP)
+          OR (status = 'staged' AND claim_expires_at <= CURRENT_TIMESTAMP)
         )
+      )
         OR (
-          status = 'verified'
+          ${lane} IN ('all', 'verification')
           AND (
-            claim_expires_at IS NULL
-            OR claim_expires_at <= CURRENT_TIMESTAMP
+            (
+              status IN ('submitted', 'scheduled', 'verification_pending')
+              AND next_verification_at <= CURRENT_TIMESTAMP
+              AND (
+                claim_expires_at IS NULL
+                OR claim_expires_at <= CURRENT_TIMESTAMP
+              )
+            )
+            OR (
+              status = 'verified'
+              AND (
+                claim_expires_at IS NULL
+                OR claim_expires_at <= CURRENT_TIMESTAMP
+              )
+            )
           )
         )
       ORDER BY COALESCE(next_verification_at, claim_expires_at, created_at), created_at

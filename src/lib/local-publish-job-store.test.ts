@@ -107,7 +107,7 @@ describe('local publish atomic claim storage', () => {
   it('uses one locking statement for queued work and stale lease recovery', async () => {
     mocks.sql.mockResolvedValue({ rows: [claimedRow()], rowCount: 1 });
 
-    const claimed = await claimNextStoredLocalPublishJob(7_200);
+    const claimed = await claimNextStoredLocalPublishJob(7_200, 'dispatch');
     const query = (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
 
     expect(query).toContain("status = 'queued'");
@@ -118,6 +118,7 @@ describe('local publish atomic claim storage', () => {
     expect(query).toContain('FOR UPDATE SKIP LOCKED');
     expect(query).toContain('claim_token = gen_random_uuid()');
     expect(query).toContain('claim_attempts = claim_attempts + 1');
+    expect(mocks.sql.mock.calls[0]).toContain('dispatch');
     expect(claimed).toMatchObject({
       id: claimedRow().id,
       claimToken: claimedRow().claim_token,
@@ -133,7 +134,7 @@ describe('local publish atomic claim storage', () => {
       rowCount: 1,
     });
 
-    await expect(claimNextStoredLocalPublishJob(7_200)).resolves.toMatchObject({
+    await expect(claimNextStoredLocalPublishJob(7_200, 'verification')).resolves.toMatchObject({
       status: 'verification_pending',
       noteId: 'note_123',
       shareUrl: 'https://www.rednote.com/explore/note_123',
@@ -142,6 +143,7 @@ describe('local publish atomic claim storage', () => {
     });
     const query = (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
     expect(query).toContain("WHEN candidate.status IN ('queued', 'claimed') THEN 'claimed'");
+    expect(mocks.sql.mock.calls[0]).toContain('verification');
   });
 
   it('returns verified jobs only for idempotent Notion reconciliation', async () => {
@@ -164,6 +166,12 @@ describe('local publish atomic claim storage', () => {
     mocks.sql.mockResolvedValue({ rows: [], rowCount: 0 });
     await expect(claimNextStoredLocalPublishJob(7_200)).resolves.toBeNull();
     expect(mocks.sql).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the legacy combined lane as the default', async () => {
+    mocks.sql.mockResolvedValue({ rows: [], rowCount: 0 });
+    await claimNextStoredLocalPublishJob(7_200);
+    expect(mocks.sql.mock.calls[0]).toContain('all');
   });
 
   it('returns the immutable MOV trial marker to the worker', async () => {

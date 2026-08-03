@@ -1,5 +1,6 @@
 export type LocalPublishMediaType = 'image' | 'video';
 export type LocalPublishCompatibilityTrial = 'unverified_mov';
+export type LocalPublishWorkLane = 'all' | 'dispatch' | 'verification';
 export type LocalPublishJobStatus =
   | 'queued'
   | 'claimed'
