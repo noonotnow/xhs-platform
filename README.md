@@ -89,6 +89,14 @@ login, session, and publish requests. Browser uploads use
 `exp`, `method`, `path`, and `nonce`, signed as
 `base64url(payload).base64url(HMAC-SHA256(payload_segment))` without padding.
 
+For manual Creator login, sign in at `creator.rednote.com`, then use browser
+DevTools Network to select a newly authenticated `creator.rednote.com` request.
+Under Request Headers, right-click the `cookie` request-header value and choose
+**Copy value**. Do not use **Copy all**, **Copy request headers**,
+**Copy as cURL**, or the Application cookie table or export. The browser sends
+the pasted value only to the protected platform route; `XHS_API_KEY` remains
+server-only, and neither service returns the submitted cookie.
+
 Deploy the microservice upload-token verifier and shared
 `UPLOAD_TOKEN_SECRET` first. Then configure the Cloudflare Access application
 and Vercel variables, deploy this application, and finally route the production
