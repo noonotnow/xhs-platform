@@ -4,6 +4,8 @@ import {
   normalizeLocalPublishJobError,
 } from '@/lib/local-publish-jobs';
 import { requireLocalPublishWorker } from '@/lib/local-publish-worker-auth';
+import { LocalPublishJobError } from '@/lib/local-publish-job-input';
+import type { LocalPublishWorkLane } from '@/types/local-publish-job';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -18,7 +20,15 @@ const NO_STORE_HEADERS = {
 export async function GET(request: NextRequest) {
   try {
     requireLocalPublishWorker(request.headers.get('authorization'));
-    const job = await claimNextLocalPublishJob();
+    const rawLane = request.nextUrl.searchParams.get('lane') ?? 'all';
+    if (!['all', 'dispatch', 'verification'].includes(rawLane)) {
+      throw new LocalPublishJobError(
+        'lane must be dispatch or verification',
+        'VALIDATION_ERROR',
+        400,
+      );
+    }
+    const job = await claimNextLocalPublishJob(rawLane as LocalPublishWorkLane);
     if (!job) {
       return new NextResponse(null, { status: 204, headers: NO_STORE_HEADERS });
     }

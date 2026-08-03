@@ -104,6 +104,7 @@ describe('local publish job routes', () => {
       headers: { Authorization: `Bearer ${workerToken}` },
     }));
     expect(claimResponse.status).toBe(200);
+    expect(mocks.claim).toHaveBeenCalledWith('all');
     await expect(claimResponse.json()).resolves.toMatchObject({
       id: jobId,
       claimToken,
@@ -131,5 +132,24 @@ describe('local publish job routes', () => {
     );
     expect(resultResponse.status).toBe(200);
     expect(mocks.submit).toHaveBeenCalledWith(jobId, claimToken, result);
+  });
+
+  it('selects an isolated worker lane without changing the response contract', async () => {
+    mocks.claim.mockResolvedValue(null);
+    const response = await claimJob(request(
+      '/api/local-publish-jobs/next?lane=verification',
+      { headers: { Authorization: `Bearer ${workerToken}` } },
+    ));
+    expect(response.status).toBe(204);
+    expect(mocks.claim).toHaveBeenCalledWith('verification');
+  });
+
+  it('rejects unknown worker lanes before claiming', async () => {
+    const response = await claimJob(request(
+      '/api/local-publish-jobs/next?lane=metrics',
+      { headers: { Authorization: `Bearer ${workerToken}` } },
+    ));
+    expect(response.status).toBe(400);
+    expect(mocks.claim).not.toHaveBeenCalled();
   });
 });

@@ -22,6 +22,7 @@ import {
   type StoredLocalPublishJob,
 } from '@/lib/local-publish-job-store';
 import type { PublishReadyPostResponse, ReadyXhsPost } from '@/types/ready-post';
+import type { LocalPublishWorkLane } from '@/types/local-publish-job';
 
 const DEFAULT_LEASE_SECONDS = 2 * 60 * 60;
 const MIN_LEASE_SECONDS = 60;
@@ -250,8 +251,8 @@ export function verificationBackoffSeconds() {
   return [...DEFAULT_VERIFICATION_BACKOFF_SECONDS] as [number, number, number, number];
 }
 
-export async function claimNextLocalPublishJob() {
-  return claimNextStoredLocalPublishJob(leaseSeconds());
+export async function claimNextLocalPublishJob(lane: LocalPublishWorkLane = 'all') {
+  return claimNextStoredLocalPublishJob(leaseSeconds(), lane);
 }
 
 export async function getLocalPublishJobSummaries() {
