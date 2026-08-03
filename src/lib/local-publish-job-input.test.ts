@@ -12,6 +12,7 @@ function readyPost(overrides: Partial<ReadyXhsPost> = {}): ReadyXhsPost {
     headline: 'Server headline',
     caption: 'Notion caption',
     status: 'Ready',
+    candidateKind: 'packet_ready',
     publishPacketReady: true,
     hasVideo: true,
     needsMedia: false,
@@ -120,6 +121,8 @@ describe('local publish job input', () => {
       compatibilityTrialConfirmed: true,
     }));
     const snapshot = buildLocalPublishSnapshot(readyPost({
+      candidateKind: 'mov_compatibility_trial',
+      publishPacketReady: false,
       mediaUrls: [movUrl],
       videoUrls: [],
       compatibilityTrialVideoUrls: [movUrl],
@@ -141,10 +144,16 @@ describe('local publish job input', () => {
   it('rejects MOV trials without the separate flag or with unrelated blockers', () => {
     const movUrl = 'https://images.xhs.justlikekatie.com/videos/assets/post.mov';
     const trialPost = readyPost({
+      candidateKind: 'mov_compatibility_trial',
+      publishPacketReady: false,
+      needsMedia: true,
       mediaUrls: [movUrl],
       videoUrls: [],
       compatibilityTrialVideoUrls: [movUrl],
-      publishBlockers: ['No canonical HTTPS Rednote media is attached'],
+      publishBlockers: [
+        'Needs media is still checked',
+        'No canonical HTTPS Rednote media is attached',
+      ],
     });
 
     expect(() => buildLocalPublishSnapshot(
@@ -163,19 +172,47 @@ describe('local publish job input', () => {
     )).toThrow('Weibo text is empty');
   });
 
+  it('does not reinterpret a packet-ready record as a MOV trial', () => {
+    const movUrl = 'https://images.xhs.justlikekatie.com/videos/assets/post.mov';
+    expect(() => buildLocalPublishSnapshot(readyPost({
+      mediaUrls: [movUrl],
+      videoUrls: [],
+      compatibilityTrialVideoUrls: [movUrl],
+      needsMedia: true,
+      publishBlockers: [
+        'Needs media is still checked',
+        'No canonical HTTPS Rednote media is attached',
+      ],
+    }), parseQueueLocalPublishInput(input({
+      compatibilityTrialConfirmed: true,
+    })))).toThrow('narrow media-only MOV trial state');
+  });
+
   it('rejects untrusted and non-MOV trial media', () => {
     const parsed = parseQueueLocalPublishInput(input({
       compatibilityTrialConfirmed: true,
     }));
     expect(() => buildLocalPublishSnapshot(readyPost({
+      candidateKind: 'mov_compatibility_trial',
+      publishPacketReady: false,
+      needsMedia: true,
       compatibilityTrialVideoUrls: ['https://attacker.example/post.mov'],
-      publishBlockers: ['No canonical HTTPS Rednote media is attached'],
+      publishBlockers: [
+        'Needs media is still checked',
+        'No canonical HTTPS Rednote media is attached',
+      ],
     }), parsed)).toThrow('trusted canonical HTTPS asset');
     expect(() => buildLocalPublishSnapshot(readyPost({
+      candidateKind: 'mov_compatibility_trial',
+      publishPacketReady: false,
+      needsMedia: true,
       compatibilityTrialVideoUrls: [
         'https://images.xhs.justlikekatie.com/videos/assets/post.mp4',
       ],
-      publishBlockers: ['No canonical HTTPS Rednote media is attached'],
+      publishBlockers: [
+        'Needs media is still checked',
+        'No canonical HTTPS Rednote media is attached',
+      ],
     }), parsed)).toThrow('trusted canonical HTTPS asset');
   });
 });

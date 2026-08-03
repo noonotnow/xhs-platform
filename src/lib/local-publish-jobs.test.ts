@@ -51,6 +51,7 @@ function readyPost(): ReadyXhsPost {
     headline: snapshot.headline,
     caption: snapshot.caption,
     status: 'Ready',
+    candidateKind: 'packet_ready',
     publishPacketReady: true,
     hasVideo: true,
     needsMedia: false,

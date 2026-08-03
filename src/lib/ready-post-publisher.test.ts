@@ -13,6 +13,7 @@ function readyPost(overrides: Partial<ReadyXhsPost> = {}): ReadyXhsPost {
     headline: 'Ready micropost',
     caption: 'Caption from CREATE',
     status: 'Ready',
+    candidateKind: 'packet_ready',
     publishPacketReady: true,
     hasVideo: true,
     needsMedia: false,

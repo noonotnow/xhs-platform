@@ -14,7 +14,13 @@ import type {
   QueryDatabaseResponse,
   UpdatePageParameters,
 } from '@notionhq/client/build/src/api-endpoints';
-import type { PublishReadyPostResponse, ReadyXhsPost } from '@/types/ready-post';
+import { isMovCompatibilityTrialEligible } from '@/lib/mov-compatibility-trial';
+import type {
+  PublishReadyPostResponse,
+  ReadyPostCandidateKind,
+  ReadyXhsPost,
+  XhsPost,
+} from '@/types/ready-post';
 import type {
   ExternalPostSnapshot,
   ExternalReconciliationOutcome,
@@ -313,7 +319,7 @@ export function mapReadyXhsPost(
   page: PageObjectResponse,
   schema: ResolvedSchema,
   duplicates: Partial<Record<CanonicalProperty, string[]>> = {},
-): ReadyXhsPost {
+): XhsPost {
   const mediaUrls = urls(property(page, schema, 'mediaUrls'));
   const rawCaption = plainText(property(page, schema, 'caption'));
   const finalTags = multiSelectNames(property(page, schema, 'tags'));
@@ -355,7 +361,7 @@ export function mapReadyXhsPost(
   };
 }
 
-function isReadyRednotePost(page: PageObjectResponse, schema: ResolvedSchema) {
+function isUnpublishedRednotePost(page: PageObjectResponse, schema: ResolvedSchema) {
   const platforms = values(property(page, schema, 'platform')).map(normalized);
   const isRednote = platforms.some((platform) =>
     platform === 'xhs' ||
@@ -363,9 +369,30 @@ function isReadyRednotePost(page: PageObjectResponse, schema: ResolvedSchema) {
     platform.includes('xiaohongshu') ||
     platform.includes('小红书'),
   );
-  return isRednote &&
-    checkbox(property(page, schema, 'publishPacketReady')) &&
-    normalized(plainText(property(page, schema, 'status'))) !== 'published';
+  return isRednote && normalized(plainText(property(page, schema, 'status'))) !== 'published';
+}
+
+export function classifyReadyPostCandidate(post: XhsPost): ReadyPostCandidateKind | null {
+  if (post.publishPacketReady) return 'packet_ready';
+  if (isMovCompatibilityTrialEligible(post)) return 'mov_compatibility_trial';
+  return null;
+}
+
+export function toReadyPostCandidate(
+  page: PageObjectResponse,
+  schema: ResolvedSchema,
+  duplicates: Partial<Record<CanonicalProperty, string[]>>,
+): ReadyXhsPost | null {
+  if (!isUnpublishedRednotePost(page, schema)) return null;
+  const post = mapReadyXhsPost(page, schema, duplicates);
+  const candidateKind = classifyReadyPostCandidate(post);
+  if (
+    candidateKind === 'mov_compatibility_trial' &&
+    (!schema.publishPacketReady || duplicates.publishPacketReady)
+  ) {
+    return null;
+  }
+  return candidateKind ? { ...post, candidateKind } : null;
 }
 
 function assertPageId(pageId: string) {
@@ -402,35 +429,54 @@ async function loadSchema(client: Client) {
   };
 }
 
-export function buildReadyPostsQueryFilter(
-  propertyName: string | null,
-  propertyType: string | undefined,
+export function buildReadyPostCandidatesQueryFilter(
+  packetPropertyName: string | null,
+  packetPropertyType: string | undefined,
+  mediaPropertyName: string | null,
+  mediaPropertyType: string | undefined,
 ): DatabaseFilter | undefined {
-  return propertyName && propertyType === 'checkbox'
-    ? { property: propertyName, checkbox: { equals: true } }
-    : undefined;
+  if (
+    !packetPropertyName ||
+    packetPropertyType !== 'checkbox' ||
+    !mediaPropertyName ||
+    mediaPropertyType !== 'rich_text'
+  ) {
+    return undefined;
+  }
+  return {
+    or: [
+      { property: packetPropertyName, checkbox: { equals: true } },
+      { property: mediaPropertyName, rich_text: { contains: '.mov' } },
+    ],
+  };
 }
 
-async function queryReadyCandidatePages(
+export async function queryReadyCandidatePages(
   client: Client,
   schema: ResolvedSchema,
   properties: PropertyMap,
+  databaseId = getDatabaseId(),
 ) {
-  const filter = buildReadyPostsQueryFilter(
+  const filter = buildReadyPostCandidatesQueryFilter(
     schema.publishPacketReady,
     schema.publishPacketReady
       ? properties[schema.publishPacketReady]?.type
       : undefined,
+    schema.mediaUrls,
+    schema.mediaUrls ? properties[schema.mediaUrls]?.type : undefined,
   );
   const response: QueryDatabaseResponse = await client.databases.query({
-    database_id: getDatabaseId(),
+    database_id: databaseId,
     page_size: 100,
     sorts: [{ timestamp: 'last_edited_time', direction: 'descending' }],
     ...(filter ? { filter } : {}),
   });
   if (response.has_more) {
     throw new NotionPostsError(
-      'More than 100 publish-ready posts were found; reduce the ready queue before retrying',
+      filter
+        ? 'More than 100 ready or MOV trial candidates were found; reduce the queue before retrying'
+        : 'The Posts schema requires a bounded candidate scan, but more than 100 records matched; ' +
+          'restore checkbox/rich-text query fields or reduce the database before retrying',
       'READY_POSTS_LIMIT_EXCEEDED',
       503,
     );
@@ -472,9 +518,10 @@ export async function listReadyXhsPosts(
   const { resolved, duplicateAliases, warnings, properties } = schema;
   const pages = await notionBoundary('query', requestId, () =>
     queryReadyCandidatePages(client, resolved, properties));
-  const posts = pages
-    .filter((page) => isReadyRednotePost(page, resolved))
-    .map((page) => mapReadyXhsPost(page, resolved, duplicateAliases));
+  const posts = pages.flatMap((page) => {
+    const post = toReadyPostCandidate(page, resolved, duplicateAliases);
+    return post ? [post] : [];
+  });
   return { posts, warnings };
 }
 
@@ -487,14 +534,15 @@ export async function getReadyXhsPost(pageId: string) {
     throw new NotionPostsError('Notion returned a partial page', 'NOTION_PAGE_ERROR', 502);
   }
   assertPostsDatabaseParent(rawPage);
-  if (!isReadyRednotePost(rawPage, resolved)) {
+  const post = toReadyPostCandidate(rawPage, resolved, duplicateAliases);
+  if (!post) {
     throw new NotionPostsError(
-      'Post is no longer ready for Rednote publishing',
+      'Post is no longer packet-ready or eligible for a MOV staging trial',
       'POST_NOT_READY',
       409,
     );
   }
-  return mapReadyXhsPost(rawPage, resolved, duplicateAliases);
+  return post;
 }
 
 function richText(content: string) {
@@ -961,14 +1009,14 @@ export async function reconcileExternalXhsPost(
         outcome: 'targeted_page' as const,
       };
     }
-    if (!isReadyRednotePost(rawTarget, resolved)) {
+    const current = toReadyPostCandidate(rawTarget, resolved, duplicateAliases);
+    if (!current || current.candidateKind !== 'packet_ready') {
       throw new NotionPostsError(
         'The canonical post changed and is no longer eligible for manual reconciliation',
         'NOTION_RECONCILIATION_TARGET_CHANGED',
         409,
       );
     }
-    const current = mapReadyXhsPost(rawTarget, resolved, duplicateAliases);
     const currentMediaType = current.hasVideo ? 'video' : 'image';
     if (
       current.headline.trim() !== snapshot.title ||

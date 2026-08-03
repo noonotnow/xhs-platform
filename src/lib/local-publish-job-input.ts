@@ -4,6 +4,10 @@ import {
   isCanonicalMediaMov,
   isCanonicalMediaVideo,
 } from '@/lib/notion-posts';
+import {
+  isMovCompatibilityTrialEligible,
+  movCompatibilityTrialBlockers,
+} from '@/lib/mov-compatibility-trial';
 import type { ReadyXhsPost } from '@/types/ready-post';
 import type {
   LocalPublishMediaType,
@@ -15,13 +19,6 @@ const MAX_CAPTION_LENGTH = 5_000;
 const MAX_TAG_LENGTH = 100;
 const MAX_TAGS = 20;
 const CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
-const MOV_COMPATIBILITY_BLOCKER = 'No canonical HTTPS Rednote media is attached';
-const MOV_MEDIA_STATE_BLOCKER = 'Needs media is still checked';
-const MOV_TRIAL_ALLOWED_BLOCKERS = new Set([
-  MOV_COMPATIBILITY_BLOCKER,
-  MOV_MEDIA_STATE_BLOCKER,
-]);
-
 export class LocalPublishJobError extends Error {
   constructor(
     message: string,
@@ -159,16 +156,11 @@ export function buildLocalPublishSnapshot(
     );
   }
   if (compatibilityTrial) {
-    const unrelatedBlockers = post.publishBlockers.filter(
-      (blocker) => !MOV_TRIAL_ALLOWED_BLOCKERS.has(blocker),
-    );
-    if (
-      !post.publishPacketReady ||
-      unrelatedBlockers.length > 0
-    ) {
+    const unrelatedBlockers = movCompatibilityTrialBlockers(post);
+    if (!isMovCompatibilityTrialEligible(post)) {
       const blockers = unrelatedBlockers.length > 0
         ? unrelatedBlockers.join('; ')
-        : 'the packet has not completed review';
+        : 'the post is not in the narrow media-only MOV trial state';
       throw new LocalPublishJobError(
         `MOV compatibility trial cannot be queued: ${blockers}`,
         'COMPATIBILITY_TRIAL_BLOCKED',

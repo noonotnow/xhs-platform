@@ -1,8 +1,8 @@
-import { describe, expect, it } from 'vitest';
-import { APIErrorCode, APIResponseError } from '@notionhq/client';
+import { describe, expect, it, vi } from 'vitest';
+import { APIErrorCode, APIResponseError, type Client } from '@notionhq/client';
 import type { PageObjectResponse } from '@notionhq/client/build/src/api-endpoints';
 import {
-  buildReadyPostsQueryFilter,
+  buildReadyPostCandidatesQueryFilter,
   isCanonicalMediaMov,
   isCanonicalMediaVideo,
   buildPublishedProperties,
@@ -10,7 +10,9 @@ import {
   normalizeNotionPostsError,
   publishedResultState,
   publishedNextAction,
+  queryReadyCandidatePages,
   resolvePostsSchema,
+  toReadyPostCandidate,
 } from '@/lib/notion-posts';
 
 describe('normalizeNotionPostsError', () => {
@@ -33,17 +35,46 @@ describe('normalizeNotionPostsError', () => {
   });
 });
 
-describe('buildReadyPostsQueryFilter', () => {
-  it('limits the Notion query to publish-ready candidates', () => {
-    expect(buildReadyPostsQueryFilter('Publish packet ready', 'checkbox')).toEqual({
-      property: 'Publish packet ready',
-      checkbox: { equals: true },
+describe('buildReadyPostCandidatesQueryFilter', () => {
+  it('combines packet-ready and rich-text MOV candidate filters', () => {
+    expect(buildReadyPostCandidatesQueryFilter(
+      'Publish packet ready',
+      'checkbox',
+      'Image URLs',
+      'rich_text',
+    )).toEqual({
+      or: [
+        {
+          property: 'Publish packet ready',
+          checkbox: { equals: true },
+        },
+        {
+          property: 'Image URLs',
+          rich_text: { contains: '.mov' },
+        },
+      ],
     });
   });
 
-  it('falls back to client-side filtering for an incompatible schema', () => {
-    expect(buildReadyPostsQueryFilter('Publish packet ready', 'formula')).toBeUndefined();
-    expect(buildReadyPostsQueryFilter(null, undefined)).toBeUndefined();
+  it('uses a bounded client-side candidate scan for incompatible schema variants', () => {
+    expect(buildReadyPostCandidatesQueryFilter(
+      'Publish packet ready',
+      'formula',
+      'Image URLs',
+      'rich_text',
+    )).toBeUndefined();
+    expect(buildReadyPostCandidatesQueryFilter(
+      'Publish packet ready',
+      'checkbox',
+      'Images',
+      'files',
+    )).toBeUndefined();
+    expect(buildReadyPostCandidatesQueryFilter(
+      null,
+      undefined,
+      null,
+      undefined,
+    )).toBeUndefined();
   });
 });
 
@@ -150,6 +181,143 @@ function pageFixture(): PageObjectResponse {
 }
 
 describe('Notion Posts mapping', () => {
+  it('includes the exact CREATE MOV state only as a compatibility-trial candidate', () => {
+    const fixture = pageFixture();
+    fixture.properties.Status = {
+      id: 'status',
+      type: 'status',
+      status: { id: 'in-progress', name: 'In progress', color: 'blue' },
+    };
+    fixture.properties['Publish packet ready'] = {
+      id: 'packet',
+      type: 'checkbox',
+      checkbox: false,
+    };
+    fixture.properties['Needs media'] = {
+      id: 'needs-media',
+      type: 'checkbox',
+      checkbox: true,
+    };
+    fixture.properties.ScheduledDate = {
+      id: 'scheduled-date',
+      type: 'date',
+      date: null,
+    };
+    fixture.properties['Image URLs'] = {
+      id: 'media',
+      type: 'rich_text',
+      rich_text: richText(
+        'https://images.xhs.justlikekatie.com/videos/assets/51/live-trial.mov',
+      ),
+    };
+    const { resolved, duplicateAliases } = resolvePostsSchema(
+      Object.fromEntries(
+        Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
+      ),
+    );
+
+    const post = toReadyPostCandidate(fixture, resolved, duplicateAliases);
+    expect(post).toMatchObject({
+      candidateKind: 'mov_compatibility_trial',
+      status: 'In progress',
+      publishPacketReady: false,
+      hasVideo: true,
+      needsMedia: true,
+      needsCaption: false,
+      compatibilityTrialVideoUrls: [
+        'https://images.xhs.justlikekatie.com/videos/assets/51/live-trial.mov',
+      ],
+      publishBlockers: [
+        'Needs media is still checked',
+        'No canonical HTTPS Rednote media is attached',
+      ],
+    });
+    expect(post).not.toHaveProperty('publishAt');
+  });
+
+  it('excludes packet-false non-MOV records and MOV records with unrelated blockers', () => {
+    const fixture = pageFixture();
+    fixture.properties['Publish packet ready'] = {
+      id: 'packet',
+      type: 'checkbox',
+      checkbox: false,
+    };
+    const schemaProperties = Object.fromEntries(
+      Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
+    );
+    const { resolved, duplicateAliases } = resolvePostsSchema(schemaProperties);
+    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toBeNull();
+
+    fixture.properties['Image URLs'] = {
+      id: 'media',
+      type: 'rich_text',
+      rich_text: richText(
+        'https://images.xhs.justlikekatie.com/videos/assets/51/trial.mov',
+      ),
+    };
+    fixture.properties['Needs media'] = {
+      id: 'needs-media',
+      type: 'checkbox',
+      checkbox: true,
+    };
+    fixture.properties['Needs caption'] = {
+      id: 'needs-caption',
+      type: 'checkbox',
+      checkbox: true,
+    };
+    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toBeNull();
+  });
+
+  it('fails closed for MOV trials when packet readiness is missing or ambiguous', () => {
+    const fixture = pageFixture();
+    fixture.properties['Publish packet ready'] = {
+      id: 'packet',
+      type: 'checkbox',
+      checkbox: false,
+    };
+    fixture.properties['Needs media'] = {
+      id: 'needs-media',
+      type: 'checkbox',
+      checkbox: true,
+    };
+    fixture.properties['Image URLs'] = {
+      id: 'media',
+      type: 'rich_text',
+      rich_text: richText(
+        'https://images.xhs.justlikekatie.com/videos/assets/51/trial.mov',
+      ),
+    };
+    const schemaProperties = Object.fromEntries(
+      Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
+    );
+    const { resolved } = resolvePostsSchema(schemaProperties);
+
+    expect(toReadyPostCandidate(
+      fixture,
+      { ...resolved, publishPacketReady: null },
+      {},
+    )).toBeNull();
+    expect(toReadyPostCandidate(
+      fixture,
+      resolved,
+      { publishPacketReady: ['Publish packet ready', 'Packet ready'] },
+    )).toBeNull();
+  });
+
+  it('keeps packet-ready unpublished Rednote records in normal readiness semantics', () => {
+    const fixture = pageFixture();
+    const { resolved, duplicateAliases } = resolvePostsSchema(
+      Object.fromEntries(
+        Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
+      ),
+    );
+    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toMatchObject({
+      candidateKind: 'packet_ready',
+      publishPacketReady: true,
+      publishBlockers: [],
+    });
+  });
+
   it('separates canonical MEDIA MOV registrations from certified MP4 videos', () => {
     const fixture = pageFixture();
     fixture.properties['Image URLs'] = {
@@ -179,6 +347,64 @@ describe('Notion Posts mapping', () => {
       'Needs media is still checked',
       'No canonical HTTPS Rednote media is attached',
     ]);
+  });
+
+  describe('queryReadyCandidatePages', () => {
+    const schema = {
+      headline: 'Headline',
+      platform: 'Platform',
+      status: 'Status',
+      thumbnail: 'Thumbnail',
+      mediaUrls: 'Image URLs',
+      caption: 'Weibo text',
+      publishPacketReady: 'Publish packet ready',
+      hasVideo: 'Has video',
+      needsMedia: 'Needs media',
+      needsCaption: 'Needs caption',
+      tags: 'Final Tags',
+      xhsNoteId: 'Rednote Note ID',
+      xhsShareUrl: 'Rednote URL',
+      publishedAt: null,
+      nextAction: 'Next action',
+      scheduledDate: 'ScheduledDate',
+    } as const;
+
+    it('queries the precise OR candidate set without any Notion mutation', async () => {
+      const query = vi.fn().mockResolvedValue({ results: [], has_more: false });
+      const update = vi.fn();
+      const client = { databases: { query }, pages: { update } } as unknown as Client;
+
+      await expect(queryReadyCandidatePages(client, schema, {
+        'Publish packet ready': { type: 'checkbox' },
+        'Image URLs': { type: 'rich_text' },
+      }, 'database')).resolves.toEqual([]);
+
+      expect(query).toHaveBeenCalledWith(expect.objectContaining({
+        database_id: 'database',
+        page_size: 100,
+        filter: {
+          or: [
+            { property: 'Publish packet ready', checkbox: { equals: true } },
+            { property: 'Image URLs', rich_text: { contains: '.mov' } },
+          ],
+        },
+      }));
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    it('fails explicitly when a fallback scan exceeds its safe cap', async () => {
+      const query = vi.fn().mockResolvedValue({ results: [], has_more: true });
+      const client = { databases: { query } } as unknown as Client;
+
+      await expect(queryReadyCandidatePages(client, schema, {
+        'Publish packet ready': { type: 'formula' },
+        'Image URLs': { type: 'files' },
+      }, 'database')).rejects.toMatchObject({
+        code: 'READY_POSTS_LIMIT_EXCEEDED',
+        status: 503,
+      });
+      expect(query).toHaveBeenCalledWith(expect.not.objectContaining({ filter: expect.anything() }));
+    });
   });
 
   it('uses CREATE canonical aliases and exposes a publishable MEDIA video', () => {
