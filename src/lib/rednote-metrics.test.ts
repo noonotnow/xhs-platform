@@ -118,4 +118,20 @@ describe('RedNote metric work storage', () => {
       failures: 1,
     });
   });
+
+  it('commits current items while coalescing stale items into one partial-failure summary', async () => {
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [{ snapshots_written: 1 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 });
+    await expect(recordRednoteMetricObservations([
+      observation,
+      { ...observation, notionPageId: 'stale-post' },
+    ])).resolves.toEqual({
+      claimed: 0,
+      verified: 0,
+      measured: 1,
+      snapshotsWritten: 1,
+      failures: 1,
+    });
+  });
 });

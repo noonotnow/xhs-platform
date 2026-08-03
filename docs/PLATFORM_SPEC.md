@@ -186,6 +186,20 @@ only for changed metrics or a scheduled checkpoint. Empty scans and exact
 retries do not write. Metrics storage references the canonical Posts page ID
 and never mutates Notion or CONNECT-owned records.
 
+Lane claims return HTTP 204 with no body when empty. Metrics due-list requests
+always return HTTP 200 with `{items,summary}`, including `items: []` when empty.
+Each due item carries its own body-level `claimToken` for the consolidated
+observation request; there is no batch claim-token header. Optional
+`previousMetrics` and `lastObservedAt` values are baselines from the last
+accepted scrape, not targets to re-submit without scraping.
+
+For a valid observation batch, stale item tokens are counted in
+`summary.failures` while valid items commit and contribute to
+`summary.measured`; the response remains HTTP 200. Exact token/timestamp/metrics
+replays are idempotent after expiry and write nothing. Changed expired replays
+fail per item. Validation, authentication, stale single-job results, and
+unexpected storage failures use 400, 401, 409, and 500 respectively.
+
 ---
 
 ## Section 5: OAuth 2.0 Flow Design

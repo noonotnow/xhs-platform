@@ -42,6 +42,24 @@ describe('RedNote metrics routes', () => {
     expect(mocks.claim).toHaveBeenCalledWith(20, false);
   });
 
+  it('returns an empty 200 envelope instead of the lane claim 204 behavior', async () => {
+    mocks.claim.mockResolvedValue([]);
+    const response = await getDue(request('/api/rednote-metrics/due', {
+      headers: { Authorization: `Bearer ${workerToken}` },
+    }));
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      items: [],
+      summary: {
+        claimed: 0,
+        verified: 0,
+        measured: 0,
+        snapshotsWritten: 0,
+        failures: 0,
+      },
+    });
+  });
+
   it('returns one consolidated observation summary', async () => {
     mocks.record.mockResolvedValue({
       claimed: 0,

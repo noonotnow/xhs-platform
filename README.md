@@ -210,12 +210,38 @@ combined lifecycle transition per wake:
 - Omitting `lane` preserves the existing combined single-claim behavior for
   older workers. Every response still has its own rotating `claimToken` and
   `claimExpiresAt`; result contracts and human Publish approval are unchanged.
+  A lane with no due job returns HTTP 204 with no response body.
 
 Metrics use a separate bounded batch because they are read-only collection work:
 
 1. `GET /api/rednote-metrics/due?limit=20` claims at most 20 reconciled posts.
    The default and maximum are both 20. Add `onDemand=true` to include posts
-   older than 90 days. Every item has its own claim token and lease.
+   older than 90 days. It always returns HTTP 200 with
+   `{"items":[],"summary":...}` when empty. Every item has its own claim token
+   and lease:
+
+   ```json
+   {
+     "notionPageId": "canonical-post-page-id",
+     "noteId": "rednote-id",
+     "shareUrl": "https://www.rednote.com/explore/rednote-id",
+     "publishedAt": "2026-08-01T12:00:00.000Z",
+     "claimToken": "11111111-1111-4111-8111-111111111111",
+     "claimExpiresAt": "2026-08-02T12:30:00.000Z",
+     "previousMetrics": {
+       "views": 100,
+       "likes": 10,
+       "comments": 2,
+       "saves": 3,
+       "shares": 1
+     },
+     "lastObservedAt": "2026-08-02T06:00:00.000Z"
+   }
+   ```
+
+   `previousMetrics` is an optional server baseline from the last accepted
+   observation. It is not a scrape target; the worker must scrape fresh current
+   values. `lastObservedAt` has the same baseline meaning.
 2. Cadence is derived from the durable publication time: through 48 hours every
    6 hours, through day 14 daily, through day 90 weekly, then manual/on-demand.
 3. Submit one consolidated request to `POST /api/rednote-metrics/observations`:
@@ -237,12 +263,22 @@ Metrics use a separate bounded batch because they are read-only collection work:
    }
    ```
 
+   The bearer token remains in `Authorization`; each metrics claim token is
+   placed on its own observation as `claimToken`, not in a shared header.
+
 The metrics service writes `post_performance_snapshots` only when values changed
 or a cadence checkpoint is due. Exact retries coalesce without writes, and an
 empty due batch performs no writes. Responses contain one run summary with
 `claimed`, `verified`, `measured`, `snapshotsWritten`, and `failures`; there are
 no field-level updates. These endpoints persist observation history only and do
 not mutate the canonical Notion Posts database or add CONNECT-owned behavior.
+Within a structurally valid batch, an expired or superseded item token increments
+`failures` while other current items still commit; the endpoint still returns
+HTTP 200 with the one summary. An exact replay of the same token, timestamp, and
+metrics is accepted after lease expiry and performs no writes. A changed replay
+after expiry is stale and counted as a failure. Invalid JSON/schema or bounds
+return 400, invalid bearer auth returns 401, and unexpected storage failures
+return 500.
 
 The compatibility marker is stored inside the immutable JSONB job snapshot and
 shown in the operator audit. Queue snapshots remain JSONB: new rows store
