@@ -386,6 +386,12 @@ export function toReadyPostCandidate(
   if (!isUnpublishedRednotePost(page, schema)) return null;
   const post = mapReadyXhsPost(page, schema, duplicates);
   const candidateKind = classifyReadyPostCandidate(post);
+  if (
+    candidateKind === 'mov_compatibility_trial' &&
+    (!schema.publishPacketReady || duplicates.publishPacketReady)
+  ) {
+    return null;
+  }
   return candidateKind ? { ...post, candidateKind } : null;
 }
 

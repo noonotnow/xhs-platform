@@ -742,7 +742,7 @@ export default function ReadyPostsPanel() {
                   </div>
                 )}
 
-                {currentManualStatus && (
+                {selected.candidateKind === 'packet_ready' && currentManualStatus && (
                   <div
                     className={`${styles.jobStatus} ${
                       styles[`jobStatus${currentManualStatus.tone}`]
@@ -772,7 +772,8 @@ export default function ReadyPostsPanel() {
                   </div>
                 )}
 
-                {!currentManualReconciliation &&
+                {selected.candidateKind === 'packet_ready' &&
+                  !currentManualReconciliation &&
                   !hasActiveJob &&
                   canStartManualReconciliation && (
                   <div className={styles.manualReconciliation}>
@@ -841,7 +842,7 @@ export default function ReadyPostsPanel() {
                   </div>
                 )}
 
-                {manualReconciliationError && (
+                {selected.candidateKind === 'packet_ready' && manualReconciliationError && (
                   <p className={styles.inlineError} role="alert">
                     {manualReconciliationError}
                   </p>

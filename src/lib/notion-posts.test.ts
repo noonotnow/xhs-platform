@@ -268,6 +268,42 @@ describe('Notion Posts mapping', () => {
     expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toBeNull();
   });
 
+  it('fails closed for MOV trials when packet readiness is missing or ambiguous', () => {
+    const fixture = pageFixture();
+    fixture.properties['Publish packet ready'] = {
+      id: 'packet',
+      type: 'checkbox',
+      checkbox: false,
+    };
+    fixture.properties['Needs media'] = {
+      id: 'needs-media',
+      type: 'checkbox',
+      checkbox: true,
+    };
+    fixture.properties['Image URLs'] = {
+      id: 'media',
+      type: 'rich_text',
+      rich_text: richText(
+        'https://images.xhs.justlikekatie.com/videos/assets/51/trial.mov',
+      ),
+    };
+    const schemaProperties = Object.fromEntries(
+      Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
+    );
+    const { resolved } = resolvePostsSchema(schemaProperties);
+
+    expect(toReadyPostCandidate(
+      fixture,
+      { ...resolved, publishPacketReady: null },
+      {},
+    )).toBeNull();
+    expect(toReadyPostCandidate(
+      fixture,
+      resolved,
+      { publishPacketReady: ['Publish packet ready', 'Packet ready'] },
+    )).toBeNull();
+  });
+
   it('keeps packet-ready unpublished Rednote records in normal readiness semantics', () => {
     const fixture = pageFixture();
     const { resolved, duplicateAliases } = resolvePostsSchema(

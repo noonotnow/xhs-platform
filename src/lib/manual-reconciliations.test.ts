@@ -73,6 +73,7 @@ describe('manual reconciliation orchestration', () => {
       headline: request.expected.title,
       caption: request.expected.caption,
       hasVideo: true,
+      candidateKind: 'packet_ready',
     });
     mocks.insert.mockResolvedValue({
       request: { ...request, status: 'queued' },
@@ -90,6 +91,27 @@ describe('manual reconciliation orchestration', () => {
       expected: request.expected,
       idempotencyKey: request.idempotencyKey,
     });
+  });
+
+  it('rejects MOV compatibility trials before creating reconciliation work', async () => {
+    mocks.find.mockResolvedValue(null);
+    mocks.getPost.mockResolvedValue({
+      id: request.notionPageId,
+      headline: request.expected.title,
+      caption: request.expected.caption,
+      hasVideo: true,
+      candidateKind: 'mov_compatibility_trial',
+    });
+
+    await expect(createManualReconciliation({
+      notionPageId: request.notionPageId,
+      publicPost: request.shareUrl,
+      confirmed: true,
+    }, request.idempotencyKey)).rejects.toMatchObject({
+      code: 'MANUAL_RECONCILIATION_NOT_ALLOWED',
+      status: 409,
+    });
+    expect(mocks.insert).not.toHaveBeenCalled();
   });
 
   it('targets the exact canonical row and completes only after the external receipt', async () => {

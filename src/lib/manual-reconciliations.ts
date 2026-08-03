@@ -34,6 +34,18 @@ function expectedSnapshot(post: Awaited<ReturnType<typeof getReadyXhsPost>>) {
   };
 }
 
+function assertManualReconciliationCandidate(
+  post: Awaited<ReturnType<typeof getReadyXhsPost>>,
+) {
+  if (post.candidateKind !== 'packet_ready') {
+    throw new LocalPublishJobError(
+      'MOV compatibility trials cannot enter manual published-post reconciliation',
+      'MANUAL_RECONCILIATION_NOT_ALLOWED',
+      409,
+    );
+  }
+}
+
 function leaseSeconds() {
   const configured = Number(process.env.MANUAL_RECONCILIATION_LEASE_SECONDS);
   if (!Number.isSafeInteger(configured)) return DEFAULT_LEASE_SECONDS;
@@ -78,6 +90,7 @@ export async function createManualReconciliation(
     };
   }
   const post = await getReadyXhsPost(input.notionPageId);
+  assertManualReconciliationCandidate(post);
   const result = await insertManualReconciliation({
     ...input,
     expected: expectedSnapshot(post),
@@ -103,6 +116,7 @@ export async function retryFailedManualReconciliation(
     return manualReconciliationSummary(existing);
   }
   const post = await getReadyXhsPost(existing.notionPageId);
+  assertManualReconciliationCandidate(post);
   return manualReconciliationSummary(
     await retryManualReconciliation(id, expectedSnapshot(post)),
   );
