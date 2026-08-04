@@ -490,6 +490,34 @@ describe('Notion Posts mapping', () => {
     ]);
   });
 
+  it('promotes only a descriptor-qualified MOV into normal video readiness', () => {
+    const fixture = pageFixture();
+    const movUrl =
+      'https://images.xhs.justlikekatie.com/videos/assets/74/' +
+      '7451b49c-9dd9-4100-9935-105e6ebaa39b.mov';
+    fixture.properties['Image URLs'] = {
+      id: 'media',
+      type: 'rich_text',
+      rich_text: richText(movUrl),
+    };
+    const { resolved, duplicateAliases } = resolvePostsSchema(
+      Object.fromEntries(
+        Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
+      ),
+    );
+
+    expect(mapReadyXhsPost(
+      fixture,
+      resolved,
+      duplicateAliases,
+      new Set([movUrl]),
+    )).toMatchObject({
+      videoUrls: [movUrl],
+      compatibilityTrialVideoUrls: [],
+      publishBlockers: [],
+    });
+  });
+
   describe('queryReadyCandidatePages', () => {
     const schema = {
       headline: 'Headline',

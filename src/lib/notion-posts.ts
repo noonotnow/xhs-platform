@@ -15,6 +15,7 @@ import type {
   UpdatePageParameters,
 } from '@notionhq/client/build/src/api-endpoints';
 import { isMovCompatibilityTrialEligible } from '@/lib/mov-compatibility-trial';
+import { compatibleCanonicalMovUrls } from '@/lib/media-descriptor';
 import type {
   PublishReadyPostResponse,
   ReadyPostCandidateKind,
@@ -295,6 +296,7 @@ function mappedBlockers(
   duplicates: Partial<Record<CanonicalProperty, string[]>>,
   caption: string,
   hasInvalidScheduledDate: boolean,
+  compatibleMovUrls: ReadonlySet<string>,
 ) {
   const blockers: string[] = [];
   for (const key of ['status', 'xhsShareUrl'] as const) {
@@ -311,9 +313,12 @@ function mappedBlockers(
   const mediaUrls = urls(property(page, schema, 'mediaUrls'));
   const hasCanonicalPrimaryMedia = schema.hasVideo
     ? checkbox(property(page, schema, 'hasVideo'))
-      ? mediaUrls.some(isCanonicalMediaVideo)
+      ? mediaUrls.some((url) => isCanonicalMediaVideo(url) || compatibleMovUrls.has(url))
       : mediaUrls.some(isCanonicalMediaImage)
-    : mediaUrls.some((url) => isCanonicalMediaVideo(url) || isCanonicalMediaImage(url));
+    : mediaUrls.some((url) =>
+      isCanonicalMediaVideo(url) ||
+      compatibleMovUrls.has(url) ||
+      isCanonicalMediaImage(url));
   if (!hasCanonicalPrimaryMedia) {
     blockers.push('No canonical HTTPS Rednote media is attached');
   }
@@ -324,6 +329,7 @@ export function mapReadyXhsPost(
   page: PageObjectResponse,
   schema: ResolvedSchema,
   duplicates: Partial<Record<CanonicalProperty, string[]>> = {},
+  compatibleMovUrls: ReadonlySet<string> = new Set(),
 ): XhsPost {
   const mediaUrls = urls(property(page, schema, 'mediaUrls'));
   const rawCaption = plainText(property(page, schema, 'caption'));
@@ -349,8 +355,10 @@ export function mapReadyXhsPost(
     needsCaption: checkbox(property(page, schema, 'needsCaption')),
     mediaUrls,
     imageUrls: mediaUrls.filter(isCanonicalMediaImage),
-    videoUrls: mediaUrls.filter(isCanonicalMediaVideo),
-    compatibilityTrialVideoUrls: mediaUrls.filter(isCanonicalMediaMov),
+    videoUrls: mediaUrls.filter((url) =>
+      isCanonicalMediaVideo(url) || compatibleMovUrls.has(url)),
+    compatibilityTrialVideoUrls: mediaUrls.filter((url) =>
+      isCanonicalMediaMov(url) && !compatibleMovUrls.has(url)),
     thumbnailUrl: urls(property(page, schema, 'thumbnail'))[0] ?? '',
     tags,
     tagsSource,
@@ -362,6 +370,7 @@ export function mapReadyXhsPost(
       duplicates,
       legacyCopy.caption,
       Boolean(scheduledDate) && !publishAt,
+      compatibleMovUrls,
     ),
   };
 }
@@ -388,6 +397,7 @@ export function toReadyPostCandidate(
   schema: ResolvedSchema,
   duplicates: Partial<Record<CanonicalProperty, string[]>>,
   includePublished = false,
+  compatibleMovUrls: ReadonlySet<string> = new Set(),
 ): ReadyXhsPost | null {
   const isPublished = normalized(plainText(property(page, schema, 'status'))) === 'published';
   if (
@@ -402,7 +412,7 @@ export function toReadyPostCandidate(
   ) {
     return null;
   }
-  const post = mapReadyXhsPost(page, schema, duplicates);
+  const post = mapReadyXhsPost(page, schema, duplicates, compatibleMovUrls);
   const candidateKind = classifyReadyPostCandidate(post);
   if (
     candidateKind === 'mov_compatibility_trial' &&
@@ -613,12 +623,17 @@ export async function listReadyXhsPosts(
       getDatabaseId(),
       includePublishedCandidates,
     ));
+  const compatibleMovUrls = await compatibleCanonicalMovUrls(
+    pages.flatMap((page) => urls(property(page, resolved, 'mediaUrls')).filter(isCanonicalMediaMov)),
+    { requestId },
+  );
   const posts = pages.flatMap((page) => {
     const post = toReadyPostCandidate(
       page,
       resolved,
       duplicateAliases,
       includePublishedCandidates,
+      compatibleMovUrls,
     );
     return post ? [post] : [];
   });
@@ -634,7 +649,17 @@ export async function getReadyXhsPost(pageId: string) {
     throw new NotionPostsError('Notion returned a partial page', 'NOTION_PAGE_ERROR', 502);
   }
   assertPostsDatabaseParent(rawPage);
-  const post = toReadyPostCandidate(rawPage, resolved, duplicateAliases);
+  const compatibleMovUrls = await compatibleCanonicalMovUrls(
+    urls(property(rawPage, resolved, 'mediaUrls')).filter(isCanonicalMediaMov),
+    { requestId: crypto.randomUUID() },
+  );
+  const post = toReadyPostCandidate(
+    rawPage,
+    resolved,
+    duplicateAliases,
+    false,
+    compatibleMovUrls,
+  );
   if (!post) {
     throw new NotionPostsError(
       'Post is no longer packet-ready or eligible for a MOV staging trial',

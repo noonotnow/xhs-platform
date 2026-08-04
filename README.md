@@ -72,6 +72,9 @@ in Vercel:
 | `PLAN_SECRET` | At least 32 random characters shared with Vibe Atlas for integration media uploads |
 | `NOTION_API_KEY` | Server-only Notion integration token with read/write access to the canonical Posts DB |
 | `NOTION_POSTS_DB_ID` | Canonical Posts database ID shared with the production CREATE workflow |
+| `MEDIA_API_BASE_URL` | HTTPS base URL for the server-to-server MEDIA descriptor API |
+| `MEDIA_ASSETS_READ_CREDENTIAL` | Server-only complete MEDIA `Authorization` value for a credential scoped only to `assets:read` |
+| `MEDIA_DESCRIPTOR_TIMEOUT_MS` | Optional per-descriptor timeout; defaults to 3000 ms and is clamped to 250–10000 |
 | `LOCAL_PUBLISH_WORKER_TOKEN` | At least 32 random characters shared only with the trusted Mac-local browser worker |
 | `LOCAL_PUBLISH_JOB_LEASE_SECONDS` | Optional worker claim lease; defaults to 7200 seconds and is clamped to 60–86400 |
 | `LOCAL_PUBLISH_VERIFICATION_BACKOFF_SECONDS` | Optional four-value retry schedule; defaults to `900,3600,21600,86400` seconds (15m, 1h, 6h, 24h) |
@@ -134,14 +137,17 @@ Caption as a legacy fallback; rich-text tag strings are never parsed, and
 hashtags elsewhere in the body are preserved. Do not add separate Chinese Draft
 or Final Caption properties.
 
-Trusted canonical MEDIA `.mov` registrations remain compatibility-unverified and
-are not added to the normal ready video set. Admin exposes a separate warning and
-staging-trial action only for these MOV assets. Queueing that lane requires a
-second explicit compatibility-trial confirmation; the server re-reads Notion and
-accepts only a reviewed packet whose blockers are limited to `Needs media` and
-the absence of certified canonical media. Missing title/caption, incomplete
-packet review, untrusted media, schema ambiguity, and every unrelated blocker
-still fail closed. Normal MP4 and image readiness rules are unchanged.
+Trusted canonical MEDIA `.mov` registrations enter the normal ready video set only
+after XHS fetches the asset descriptor server-to-server with an `assets:read`
+credential. The URL must exactly match the canonical
+`/videos/assets/<shard>/<uuid>.mov` shape, and the descriptor must return that UUID
+and exact delivery URL with `mediaType=video`, `mimeType=video/quicktime`,
+`containerFormat=quicktime`, `processingState=ready`,
+`compatibility.xhsPublishing=compatible`, and `compatibility.reason=null`.
+Configuration, authentication, timeout, fetch, JSON, URL, identity, and verdict
+failures leave the existing MOV media blocker in place. The credential is never
+returned to the browser. Unqualified MOV assets retain the separate warning and
+staging-trial lane; normal MP4 and image readiness rules are unchanged.
 
 Apply the required queue migration before deploying the publishing pipeline:
 
