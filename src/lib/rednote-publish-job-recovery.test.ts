@@ -57,6 +57,7 @@ function candidate(
     jobStatus: 'failed',
     jobSnapshot: snapshot,
     jobErrorCode: 'BOUNDED_BATCH_BYPASS_DISABLED',
+    jobClaimAttempts: 1,
     jobClaimToken: '55555555-5555-4555-8555-555555555555',
     jobClaimedAt: '2026-08-04T17:04:33.424Z',
     jobClaimExpiresAt: '2026-08-04T19:04:33.424Z',
@@ -92,14 +93,69 @@ describe('bounded publish job recovery validation', () => {
         ...input,
         recoveredBy: actor,
         recoveredAt: '2026-08-04T17:30:00.000Z',
+        priorClaimAttempts: 1,
+        priorClaimedAt: '2026-08-04T17:04:33.424Z',
+        priorCompletedAt: '2026-08-04T17:04:33.963Z',
       },
     });
+
     expect(validateRecoveryCandidate(recovered, input, actor)).toBe('already_recovered');
     expect(() => validateRecoveryCandidate(
       { ...recovered, jobStatus: 'claimed' },
       input,
       actor,
-    )).toThrow(/left its original safe queued state/i);
+    )).toThrow(/distinct later terminal/i);
+  });
+
+  it('accepts the 8-second active-drain refailure as a distinct generation', () => {
+    const refailed = candidate({
+      jobClaimAttempts: 2,
+      jobClaimedAt: '2026-08-04T17:30:08.000Z',
+      jobClaimExpiresAt: '2026-08-04T19:30:08.000Z',
+      jobCompletedAt: '2026-08-04T17:30:08.500Z',
+      audit: {
+        id: '66666666-6666-4666-8666-666666666666',
+        ...input,
+        recoveredBy: actor,
+        recoveredAt: '2026-08-04T17:30:00.000Z',
+        priorClaimAttempts: 1,
+        priorClaimedAt: '2026-08-04T17:04:33.424Z',
+        priorCompletedAt: '2026-08-04T17:04:33.963Z',
+      },
+    });
+    expect(validateRecoveryCandidate(refailed, input, actor)).toBe('recover');
+  });
+
+  it.each([
+    ['unchanged generation', { jobClaimAttempts: 1 }],
+    ['missing later claim', { jobClaimAttempts: 2, jobClaimedAt: null }],
+    [
+      'claim before latest recovery',
+      { jobClaimAttempts: 2, jobClaimedAt: '2026-08-04T17:29:59.000Z' },
+    ],
+    [
+      'completion before claim',
+      {
+        jobClaimAttempts: 2,
+        jobClaimedAt: '2026-08-04T17:30:08.000Z',
+        jobCompletedAt: '2026-08-04T17:30:07.000Z',
+      },
+    ],
+  ])('rejects repeat recovery for %s', (_label, overrides) => {
+    expect(() => validateRecoveryCandidate(candidate(Object.assign({
+      jobClaimAttempts: 2,
+      jobClaimedAt: '2026-08-04T17:30:08.000Z',
+      jobCompletedAt: '2026-08-04T17:30:08.500Z',
+      audit: {
+        id: '66666666-6666-4666-8666-666666666666',
+        ...input,
+        recoveredBy: actor,
+        recoveredAt: '2026-08-04T17:30:00.000Z',
+        priorClaimAttempts: 1,
+        priorClaimedAt: '2026-08-04T17:04:33.424Z',
+        priorCompletedAt: '2026-08-04T17:04:33.963Z',
+      },
+    }, overrides)), input, actor)).toThrow(/distinct later terminal/i);
   });
 
   it.each([

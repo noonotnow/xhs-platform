@@ -289,8 +289,10 @@ steps above.
 
 #### Recovering a bypass-disabled approved job
 
-`migrations/010_rednote_publish_job_recoveries.sql` adds an append-only recovery
-audit. It is the only supported recovery for a bounded job that terminal-failed
+`migrations/010_rednote_publish_job_recoveries.sql` adds the append-only recovery
+audit and `migrations/011_generation_aware_rednote_publish_job_recoveries.sql`
+scopes its uniqueness to each terminal claim generation. This is the only
+supported recovery for a bounded job that terminal-failed
 with exact error `BOUNDED_BATCH_BYPASS_DISABLED` before staging or dispatch. It
 updates the original `local_publish_jobs` row back to `queued`; it does not create
 a job, replace an item, rebuild or approve a manifest, change the frozen snapshot
@@ -298,14 +300,17 @@ or publish time, or change the original batch approval.
 
 Use this deployment and operator sequence exactly:
 
-1. Leave the worker's bounded-batch bypass disabled and stop before any recovery
-   action.
-2. Apply the additive migration to the application database with the unpooled
+1. Unload the worker LaunchAgent, then confirm the worker is stopped and no claim
+   or drain remains active. Leave bounded-batch bypass disabled. Do not recover
+   while a worker can claim queued work.
+2. Apply the additive migrations to the application database with the unpooled
    migration connection:
 
    ```bash
    psql "$XHS_DATABASE_POSTGRES_URL_NON_POOLING" -v ON_ERROR_STOP=1 \
      -f migrations/010_rednote_publish_job_recoveries.sql
+   psql "$XHS_DATABASE_POSTGRES_URL_NON_POOLING" -v ON_ERROR_STOP=1 \
+     -f migrations/011_generation_aware_rednote_publish_job_recoveries.sql
    ```
 
 3. Deploy the platform release containing the recovery API and UI. Do not rebuild,
@@ -314,14 +319,22 @@ Use this deployment and operator sequence exactly:
    recovery** appears only when the approved batch, two-way item/job linkage,
    immutable snapshots, manifest/item hashes, source revision, exact error,
    pre-dispatch null evidence, and absence of alternate ownership still match.
-5. Compare every displayed job, batch, item, manifest hash, item hash, source
-   revision, and original publish time with the approved change record. Select
-   **Confirm exact-job recovery** once for each intended item and accept the
-   confirmation that no second approval or replacement job is created.
-6. A created response writes one immutable audit row and moves the same job and
-   item to `queued`. An exact repeated request is idempotent only while that job is
-   still safely queued; a changed request or a job already claimed by a worker
-   fails closed.
+5. Confirm the Day 5 job remains safely queued and do not recover or otherwise
+   mutate it. Compare every displayed Vibe Atlas job, batch, item, manifest hash,
+   item hash, source revision, and original publish time with the approved change
+   record. Select
+   **Confirm exact-job recovery** once for the proven later failure generation and
+   accept the confirmation that no second approval or replacement job is created.
+6. A created response writes one immutable audit row for that claim generation and
+   moves the same job and item to `queued`. An exact repeated request is idempotent
+   only while that job is
+   still safely queued at the latest audited generation. A later recovery is
+   allowed only after a distinct greater claim attempt has later exact claimed and
+   completed timestamps and independently satisfies every original precondition.
+   Unchanged generations, changed evidence, or a job claimed by a worker fail closed.
+7. Confirm both the Vibe Atlas and Day 5 rows are queued. Keep the worker unloaded.
+   Enable the bounded-batch bypass in a separately controlled change, confirm it,
+   and only then start the worker in a separately controlled start step.
 
 The authenticated action is
 `POST /admin/api/publish-job-recoveries` with exactly:

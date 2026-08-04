@@ -23,6 +23,9 @@ export interface ExistingRecoveryAudit {
   snapshotRevision: string;
   recoveredBy: string;
   recoveredAt: string;
+  priorClaimAttempts: number;
+  priorClaimedAt: string | null;
+  priorCompletedAt: string;
 }
 
 export interface RecoveryCandidateState {
@@ -41,6 +44,7 @@ export interface RecoveryCandidateState {
   jobStatus: string;
   jobSnapshot: LocalPublishSnapshot;
   jobErrorCode: string | null;
+  jobClaimAttempts: number;
   jobClaimToken: string | null;
   jobClaimedAt: string | null;
   jobClaimExpiresAt: string | null;
@@ -209,18 +213,36 @@ export function validateRecoveryCandidate(
     ) {
       throw recoveryError('This job was already recovered with different evidence or actor.');
     }
-    if (
-      state.itemState !== 'queued' ||
-      state.jobStatus !== 'queued' ||
-      state.jobErrorCode ||
-      state.jobClaimToken ||
-      state.jobClaimedAt ||
-      state.jobClaimExpiresAt ||
-      state.jobCompletedAt
-    ) {
-      throw recoveryError('The recovered job has left its original safe queued state.');
+    const safelyQueued =
+      state.itemState === 'queued' &&
+      state.jobStatus === 'queued' &&
+      !state.jobErrorCode &&
+      !state.jobClaimToken &&
+      !state.jobClaimedAt &&
+      !state.jobClaimExpiresAt &&
+      !state.jobCompletedAt;
+    if (safelyQueued) {
+      if (state.jobClaimAttempts !== state.audit.priorClaimAttempts) {
+        throw recoveryError('The safely queued job does not match the latest audited claim generation.');
+      }
+      return 'already_recovered';
     }
-    return 'already_recovered';
+    if (
+      state.itemState !== 'failed' ||
+      state.jobStatus !== 'failed' ||
+      state.jobErrorCode !== RECOVERABLE_BOUNDED_BATCH_ERROR ||
+      !state.jobClaimedAt ||
+      !state.jobCompletedAt ||
+      state.jobClaimAttempts <= state.audit.priorClaimAttempts ||
+      new Date(state.jobClaimedAt) <= new Date(state.audit.priorCompletedAt) ||
+      new Date(state.jobClaimedAt) <= new Date(state.audit.recoveredAt) ||
+      new Date(state.jobCompletedAt) <= new Date(state.jobClaimedAt)
+    ) {
+      throw recoveryError(
+        'The job does not prove a distinct later terminal bypass-disabled claim generation.',
+      );
+    }
+    return 'recover';
   }
   if (
     state.itemState !== 'failed' ||
