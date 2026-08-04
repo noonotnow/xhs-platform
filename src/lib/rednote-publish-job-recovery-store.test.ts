@@ -63,8 +63,10 @@ function row(recovered = false, generation = 1) {
     claim_token: recovered ? null : '66666666-6666-4666-8666-666666666666',
     claim_attempts: generation,
     claimed_at: recovered ? null : '2026-08-04T17:04:33.424Z',
+    claimed_at_raw: recovered ? null : '2026-08-04 17:04:33.424+00',
     claim_expires_at: recovered ? null : '2026-08-04T19:04:33.424Z',
     completed_at: recovered ? null : '2026-08-04T17:04:33.963Z',
+    completed_at_raw: recovered ? null : '2026-08-04 17:04:33.963+00',
     staged_at: null,
     dispatch_authorized_at: null,
     dispatched_at: null,
@@ -160,9 +162,18 @@ describe('stored approved publish job recovery', () => {
       'BOUNDED_BATCH_BYPASS_DISABLED',
       'Worker bypass is disabled',
       1,
-      '2026-08-04T17:04:33.424Z',
-      '2026-08-04T17:04:33.963Z',
+      '2026-08-04 17:04:33.424+00',
+      '2026-08-04 17:04:33.963+00',
       actor,
+    ]);
+    const updateCall = mocks.query.mock.calls.find(([statement]) =>
+      String(statement).includes('UPDATE local_publish_jobs'));
+    expect(updateCall?.[1]).toEqual([
+      input.jobId,
+      input.itemId,
+      1,
+      '2026-08-04 17:04:33.424+00',
+      '2026-08-04 17:04:33.963+00',
     ]);
     const ownership = statements.find((value) => value.includes('AS active_ownership'))!;
     expect(ownership).toContain('manual_reconciliation_requests');
@@ -184,9 +195,11 @@ describe('stored approved publish job recovery', () => {
             job_error_code: 'BOUNDED_BATCH_BYPASS_DISABLED',
             job_error_message: 'Worker bypass is disabled',
             claim_token: '88888888-8888-4888-8888-888888888888',
-            claimed_at: '2026-08-04T17:30:08.000Z',
+            claimed_at: new Date('2026-08-04T18:35:27.626Z'),
+            claimed_at_raw: '2026-08-04 18:35:27.626710+00',
             claim_expires_at: '2026-08-04T19:30:08.000Z',
-            completed_at: '2026-08-04T17:30:08.500Z',
+            completed_at: new Date('2026-08-04T18:35:28.151Z'),
+            completed_at_raw: '2026-08-04 18:35:28.151762+00',
           }],
         };
       }
@@ -218,9 +231,21 @@ describe('stored approved publish job recovery', () => {
       value.includes('FROM local_publish_jobs AS job'))!;
     expect(candidateQuery).toContain('LEFT JOIN LATERAL');
     expect(candidateQuery).toContain('ORDER BY prior_claim_attempts DESC, recovered_at DESC');
+    expect(candidateQuery).toContain('job.claimed_at::text AS claimed_at_raw');
+    expect(candidateQuery).toContain('job.completed_at::text AS completed_at_raw');
     const insertCall = mocks.query.mock.calls.find(([statement]) =>
       String(statement).includes('INSERT INTO rednote_publish_job_recoveries'));
     expect(insertCall?.[1]?.[8]).toBe(2);
+    expect(insertCall?.[1]?.slice(9, 11)).toEqual([
+      '2026-08-04 18:35:27.626710+00',
+      '2026-08-04 18:35:28.151762+00',
+    ]);
+    const updateCall = mocks.query.mock.calls.find(([statement]) =>
+      String(statement).includes('UPDATE local_publish_jobs'));
+    expect(updateCall?.[1]?.slice(3, 5)).toEqual([
+      '2026-08-04 18:35:27.626710+00',
+      '2026-08-04 18:35:28.151762+00',
+    ]);
     expect(statements.indexOf(
       "SELECT pg_advisory_xact_lock(hashtextextended('rednote-bootstrap-batch', 0))",
     )).toBeLessThan(statements.indexOf(candidateQuery));
@@ -229,7 +254,15 @@ describe('stored approved publish job recovery', () => {
   it('returns the same audit for an exact queued retry without another write', async () => {
     mocks.query.mockImplementation(async (statement: string) => {
       if (statement.includes('FROM local_publish_jobs AS job')) {
-        return { rows: [row(true)] };
+        return {
+          rows: [{
+            ...row(true),
+            claim_attempts: 2,
+            recovery_prior_claim_attempts: 2,
+            recovery_prior_claimed_at: '2026-08-04 18:35:27.626710+00',
+            recovery_prior_completed_at: '2026-08-04 18:35:28.151762+00',
+          }],
+        };
       }
       if (statement.includes('AS active_ownership')) {
         return { rows: [{ active_ownership: false }] };
@@ -240,11 +273,37 @@ describe('stored approved publish job recovery', () => {
     await expect(recoverStoredApprovedPublishJob(input, actor)).resolves.toMatchObject({
       id: recoveryId,
       jobId: input.jobId,
+      priorClaimAttempts: 2,
       alreadyRecovered: true,
     });
     const statements = mocks.query.mock.calls.map(([statement]) => String(statement));
     expect(statements.some((value) => value.startsWith('INSERT'))).toBe(false);
     expect(statements.some((value) => value.startsWith('UPDATE'))).toBe(false);
     expect(statements).toContain('COMMIT');
+  });
+
+  it('rolls back the audit when the exact timestamp compare-and-set fails', async () => {
+    mocks.query.mockImplementation(async (statement: string) => {
+      if (statement.includes('FROM local_publish_jobs AS job')) return { rows: [row()] };
+      if (statement.includes('AS active_ownership')) {
+        return { rows: [{ active_ownership: false }] };
+      }
+      if (statement.includes('INSERT INTO rednote_publish_job_recoveries')) {
+        return {
+          rows: [{ id: recoveryId, recovered_at: '2026-08-04T17:30:00.000Z' }],
+        };
+      }
+      if (statement.includes('UPDATE local_publish_jobs')) return { rows: [], rowCount: 0 };
+      return { rows: [], rowCount: 1 };
+    });
+
+    await expect(recoverStoredApprovedPublishJob(input, actor)).rejects.toThrow(
+      'The publish job changed before recovery could be committed.',
+    );
+    const statements = mocks.query.mock.calls.map(([statement]) => String(statement));
+    expect(statements).toContain('ROLLBACK');
+    expect(statements).not.toContain('COMMIT');
+    expect(statements.some((value) =>
+      value.includes('SELECT state, local_publish_job_id'))).toBe(false);
   });
 });
