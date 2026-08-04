@@ -303,7 +303,7 @@ async function batchSourceMatches(job: Awaited<ReturnType<typeof authorizeStored
           mediaUrl: job.mediaUrl,
           ...(job.thumbnailUrl ? { thumbnailUrl: job.thumbnailUrl } : {}),
           publishAt: job.publishAt,
-          notionLastEditedTime: job.snapshotRevision,
+          notionLastEditedTime: job.batchAuthorization.snapshotRevision,
         }),
     );
   } catch (error) {

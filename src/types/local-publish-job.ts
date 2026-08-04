@@ -71,7 +71,6 @@ interface ClaimedLocalPublishJobBase
   id: string;
   claimToken: string;
   claimExpiresAt: string;
-  snapshotRevision: string;
   batchAuthorization?: BatchAuthorization;
 }
 

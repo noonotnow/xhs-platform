@@ -126,9 +126,9 @@ describe('local publish atomic claim storage', () => {
       claimToken: claimedRow().claim_token,
       claimExpiresAt: '2026-08-01T14:00:00.000Z',
       mediaUrl: snapshot.mediaUrl,
-      snapshotRevision: snapshot.notionLastEditedTime,
     });
     expect(claimed).not.toHaveProperty('notionLastEditedTime');
+    expect(claimed).not.toHaveProperty('snapshotRevision');
   });
 
   it('durably consumes a staged dispatch permit before the publish click', async () => {

@@ -173,7 +173,7 @@ The local worker contract is:
    `Authorization: Bearer <LOCAL_PUBLISH_WORKER_TOKEN>`. HTTP 204 means the queue
    is empty. A claim returns `id`, `notionPageId`, `headline`, `title`, `caption`,
    `tags`, `platform`, `mediaType`, `mediaUrl`, optional `thumbnailUrl`, optional
-   canonical UTC `publishAt`, `snapshotRevision`, `claimToken`, `claimExpiresAt`,
+   canonical UTC `publishAt`, `claimToken`, `claimExpiresAt`,
    and `status`. Unscheduled records can never enter a batch. An
    unverified MOV trial additionally
    returns `"compatibilityTrial":"unverified_mov"`; normal jobs omit this field.

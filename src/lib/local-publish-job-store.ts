@@ -423,7 +423,6 @@ async function claimedResponse(row: LocalPublishJobRow): Promise<ClaimedLocalPub
       : {}),
     ...(job.snapshot.thumbnailUrl ? { thumbnailUrl: job.snapshot.thumbnailUrl } : {}),
     ...(job.snapshot.publishAt ? { publishAt: job.snapshot.publishAt } : {}),
-    snapshotRevision: job.snapshot.notionLastEditedTime,
     claimToken: row.claim_token,
     claimExpiresAt: timestamp(row.claim_expires_at),
     ...(job.batchAuthorization ? { batchAuthorization: job.batchAuthorization } : {}),

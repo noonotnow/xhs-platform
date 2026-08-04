@@ -152,7 +152,6 @@ describe('local publish job routes', () => {
       id: jobId,
       status: 'staged',
       claimToken,
-      snapshotRevision: '2026-08-04T12:00:00.000Z',
       batchAuthorization: {
         approvedState: 'approved',
         lateAction: 'schedule',
