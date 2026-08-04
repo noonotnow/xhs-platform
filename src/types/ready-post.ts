@@ -1,4 +1,7 @@
-export type ReadyPostCandidateKind = 'packet_ready' | 'mov_compatibility_trial';
+export type ReadyPostCandidateKind =
+  | 'packet_ready'
+  | 'mov_compatibility_trial'
+  | 'active_unpublished';
 
 export interface XhsPost {
   id: string;

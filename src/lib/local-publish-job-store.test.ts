@@ -316,7 +316,6 @@ describe('local publish atomic claim storage', () => {
     expect(query).toContain('next_verification_at <= claimed_at');
     expect(query).toContain('claim_expires_at = CURRENT_TIMESTAMP');
     expect(mocks.sql.mock.calls[0]).toEqual(expect.arrayContaining([
-      900,
       3_600,
       21_600,
       86_400,

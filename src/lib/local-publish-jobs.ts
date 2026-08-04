@@ -23,6 +23,11 @@ import {
 } from '@/lib/local-publish-job-store';
 import type { PublishReadyPostResponse, ReadyXhsPost } from '@/types/ready-post';
 import type { LocalPublishWorkLane } from '@/types/local-publish-job';
+import {
+  buildBatchSnapshot,
+  manifestHash,
+} from '@/lib/rednote-publish-batches';
+import { invalidateStoredBatchItem } from '@/lib/rednote-publish-batch-store';
 
 const DEFAULT_LEASE_SECONDS = 2 * 60 * 60;
 const MIN_LEASE_SECONDS = 60;
@@ -252,7 +257,61 @@ export function verificationBackoffSeconds() {
 }
 
 export async function claimNextLocalPublishJob(lane: LocalPublishWorkLane = 'all') {
-  return claimNextStoredLocalPublishJob(leaseSeconds(), lane);
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const job = await claimNextStoredLocalPublishJob(leaseSeconds(), lane);
+    if (!job || job.authorization.mode !== 'bounded_batch') return job;
+    if (
+      job.status !== 'claimed' &&
+      job.status !== 'staged'
+    ) {
+      return job;
+    }
+    try {
+      const post = await getReadyXhsPost(job.notionPageId);
+      const current = buildBatchSnapshot(post);
+      const exactSnapshot = current && (
+        job.publishAt
+          ? current
+          : Object.fromEntries(
+              Object.entries(current).filter(([key]) => key !== 'publishAt'),
+            )
+      );
+      if (
+        current &&
+        manifestHash(current) === job.authorization.itemHash &&
+        isDeepStrictEqual(exactSnapshot, {
+          notionPageId: job.notionPageId,
+          headline: job.headline,
+          title: job.title,
+          caption: job.caption,
+          tags: job.tags,
+          platform: job.platform,
+          mediaType: job.mediaType,
+          mediaIndex: current.mediaIndex,
+          mediaUrl: job.mediaUrl,
+          ...(job.thumbnailUrl ? { thumbnailUrl: job.thumbnailUrl } : {}),
+          ...(job.publishAt ? { publishAt: job.publishAt } : {}),
+          notionLastEditedTime: current.notionLastEditedTime,
+        })
+      ) {
+        return job;
+      }
+    } catch (error) {
+      if (!(error instanceof NotionPostsError) || error.status >= 500) throw error;
+      // Authoritative Notion eligibility failures invalidate only this item.
+    }
+    await invalidateStoredBatchItem(
+      job.authorization.batchItemId!,
+      job.id,
+      job.claimToken,
+      'The Notion source changed after batch approval. Refresh it into a new batch.',
+    );
+  }
+  throw new LocalPublishJobError(
+    'Too many stale batch items were invalidated in one claim request',
+    'BATCH_CLAIM_RETRY_LIMIT',
+    409,
+  );
 }
 
 export async function getLocalPublishJobSummaries() {

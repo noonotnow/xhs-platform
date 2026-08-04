@@ -287,7 +287,10 @@ describe('Notion Posts mapping', () => {
       type: 'checkbox',
       checkbox: false,
     };
-    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toBeNull();
+    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toMatchObject({
+      candidateKind: 'active_unpublished',
+      publishBlockers: ['Needs media is still checked'],
+    });
 
     fixture.properties['Has video'] = {
       id: 'has-video',
@@ -303,10 +306,13 @@ describe('Notion Posts mapping', () => {
         'https://images.xhs.justlikekatie.com/uploads/live-trial-cover.jpg',
       ].join('\n')),
     };
-    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toBeNull();
+    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toMatchObject({
+      candidateKind: 'active_unpublished',
+      publishPacketReady: false,
+    });
   });
 
-  it('excludes packet-false non-MOV records and MOV records with unrelated blockers', () => {
+  it('keeps incomplete packet-false records visible without making them approvable', () => {
     const fixture = pageFixture();
     fixture.properties['Publish packet ready'] = {
       id: 'packet',
@@ -317,7 +323,10 @@ describe('Notion Posts mapping', () => {
       Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
     );
     const { resolved, duplicateAliases } = resolvePostsSchema(schemaProperties);
-    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toBeNull();
+    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toMatchObject({
+      candidateKind: 'active_unpublished',
+      publishPacketReady: false,
+    });
 
     fixture.properties['Image URLs'] = {
       id: 'media',
@@ -336,7 +345,10 @@ describe('Notion Posts mapping', () => {
       type: 'checkbox',
       checkbox: true,
     };
-    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toBeNull();
+    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toMatchObject({
+      candidateKind: 'active_unpublished',
+      publishBlockers: expect.arrayContaining(['Needs caption is still checked']),
+    });
   });
 
   it('fails closed for MOV trials when packet readiness is missing or ambiguous', () => {
@@ -498,7 +510,7 @@ describe('Notion Posts mapping', () => {
       scheduledDate: 'ScheduledDate',
     } as const;
 
-    it('queries the precise OR candidate set without any Notion mutation', async () => {
+    it('queries a bounded active-record set without any Notion mutation', async () => {
       const query = vi.fn().mockResolvedValue({ results: [], has_more: false });
       const update = vi.fn();
       const client = { databases: { query }, pages: { update } } as unknown as Client;
@@ -506,18 +518,19 @@ describe('Notion Posts mapping', () => {
       await expect(queryReadyCandidatePages(client, schema, {
         'Publish packet ready': { type: 'checkbox' },
         'Image URLs': { type: 'rich_text' },
+        Status: { type: 'status' },
       }, 'database')).resolves.toEqual([]);
 
       expect(query).toHaveBeenCalledWith(expect.objectContaining({
         database_id: 'database',
         page_size: 100,
-        filter: {
-          or: [
-            { property: 'Publish packet ready', checkbox: { equals: true } },
-            { property: 'Image URLs', rich_text: { contains: '.mov' } },
-          ],
-        },
       }));
+      expect(query.mock.calls[0][0]).toMatchObject({
+        filter: {
+          property: 'Status',
+          status: { does_not_equal: 'Published' },
+        },
+      });
       expect(update).not.toHaveBeenCalled();
     });
 

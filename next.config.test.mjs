@@ -18,6 +18,10 @@ describe('protected admin rewrites', () => {
         source: '/admin/api/xhs/:path*',
         destination: '/api/xhs/:path*',
       },
+      {
+        source: '/admin/api/publish-batches',
+        destination: '/api/xhs/publish-batches',
+      },
     ]);
   });
 });

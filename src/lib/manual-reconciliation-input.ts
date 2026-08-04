@@ -70,7 +70,7 @@ export function normalizeManualRedNoteIdentity(value: unknown) {
   const noteId = urlMatch?.[1] ?? (NOTE_ID.test(publicPost) ? publicPost : '');
   if (!noteId) {
     throw new LocalPublishJobError(
-      'publicPost must be a bare RedNote note ID or an exact query-free rednote.com explore URL',
+      'Remove xsec_token, query, creator-manager, fragment, trailing-slash, or alternate-host parameters. Use a bare note ID or the exact query-free https://www.rednote.com/explore/NOTE_ID.',
       'INVALID_REDNOTE_IDENTITY',
       400,
     );

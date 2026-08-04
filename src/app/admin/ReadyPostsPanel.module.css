@@ -7,6 +7,51 @@
   border-radius: 12px;
 }
 
+.batchApproval {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 18px;
+  padding: 16px;
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+}
+
+.batchApproval h3,
+.batchApproval p {
+  margin: 0;
+}
+
+.manifestHash {
+  overflow-wrap: anywhere;
+  color: #475569;
+  font-size: 0.8125rem;
+}
+
+.batchItems {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding-left: 24px;
+}
+
+.batchItems li {
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.batchItems span,
+.batchItems small,
+.batchItems code {
+  overflow-wrap: anywhere;
+  color: #64748b;
+  font-size: 0.75rem;
+}
+
 .headingRow,
 .statusRow,
 .actionRow {

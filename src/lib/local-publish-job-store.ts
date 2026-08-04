@@ -7,6 +7,7 @@ import type {
   LocalPublishJobStatus,
   LocalPublishJobSummary,
   LocalPublishSnapshot,
+  LocalPublishAuthorization,
   LocalPublishWorkLane,
 } from '@/types/local-publish-job';
 
@@ -33,6 +34,7 @@ interface LocalPublishJobRow extends QueryResultRow {
   created_at: Date | string;
   updated_at: Date | string;
   completed_at: Date | string | null;
+  batch_item_id?: string | null;
 }
 
 export interface StoredLocalPublishJob {
@@ -56,6 +58,7 @@ export interface StoredLocalPublishJob {
   verifiedAt?: string;
   reconciledAt?: string;
   completedAt?: string;
+  authorization?: LocalPublishAuthorization;
 }
 
 function timestamp(value: Date | string) {
@@ -124,6 +127,7 @@ function mapRow(row: LocalPublishJobRow): StoredLocalPublishJob {
     ...(optionalTimestamp(row.completed_at)
       ? { completedAt: optionalTimestamp(row.completed_at) }
       : {}),
+    authorization: { mode: 'legacy_per_job' },
   };
 }
 
@@ -150,6 +154,7 @@ export function jobSummary(job: StoredLocalPublishJob): LocalPublishJobSummary {
     ...(job.verifiedAt ? { verifiedAt: job.verifiedAt } : {}),
     ...(job.reconciledAt ? { reconciledAt: job.reconciledAt } : {}),
     ...(job.completedAt ? { completedAt: job.completedAt } : {}),
+    authorization: job.authorization ?? { mode: 'legacy_per_job' },
   };
 }
 
@@ -327,6 +332,50 @@ export async function claimNextStoredLocalPublishJob(
   const row = result.rows[0];
   if (!row?.claim_token || !row.claim_expires_at) return null;
   const job = mapRow(row);
+  if (row.batch_item_id) {
+    const authorization = await sql<{
+      batch_id: string;
+      batch_item_id: string;
+      manifest_hash: string;
+      item_hash: string;
+      approved_at: Date | string;
+      approved_by: string;
+    }>`
+      SELECT
+        batch.id AS batch_id,
+        item.id AS batch_item_id,
+        batch.manifest_hash,
+        item.item_hash,
+        batch.approved_at,
+        batch.approved_by
+      FROM rednote_publish_batch_items AS item
+      JOIN rednote_publish_batches AS batch ON batch.id = item.batch_id
+      WHERE item.id = ${row.batch_item_id}::uuid
+        AND item.state IN (
+          'queued', 'claimed', 'staged', 'submitted', 'scheduled',
+          'verification_pending', 'verified'
+        )
+        AND batch.approved_at IS NOT NULL
+      LIMIT 1
+    `;
+    const approved = authorization.rows[0];
+    if (!approved) {
+      throw new LocalPublishJobError(
+        'The bounded batch authorization is missing or invalid',
+        'INVALID_BATCH_AUTHORIZATION',
+        409,
+      );
+    }
+    job.authorization = {
+      mode: 'bounded_batch',
+      batchId: approved.batch_id,
+      batchItemId: approved.batch_item_id,
+      manifestHash: approved.manifest_hash,
+      itemHash: approved.item_hash,
+      approvedAt: timestamp(approved.approved_at),
+      approvedBy: approved.approved_by,
+    };
+  }
   const base = {
     id: job.id,
     status: job.status,
@@ -345,6 +394,7 @@ export async function claimNextStoredLocalPublishJob(
     ...(job.snapshot.publishAt ? { publishAt: job.snapshot.publishAt } : {}),
     claimToken: row.claim_token,
     claimExpiresAt: timestamp(row.claim_expires_at),
+    authorization: job.authorization ?? { mode: 'legacy_per_job' },
   };
   if (
     job.status === 'submitted' ||
@@ -506,9 +556,8 @@ export async function deferStoredLocalPublishVerification(
         verification_attempts = verification_attempts + 1,
         next_verification_at = CURRENT_TIMESTAMP + (
           CASE LEAST(verification_attempts, 3)
-            WHEN 0 THEN ${backoffSeconds[0]}
-            WHEN 1 THEN ${backoffSeconds[1]}
-            WHEN 2 THEN ${backoffSeconds[2]}
+            WHEN 0 THEN ${backoffSeconds[1]}
+            WHEN 1 THEN ${backoffSeconds[2]}
             ELSE ${backoffSeconds[3]}
           END * INTERVAL '1 second'
         ),
