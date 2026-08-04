@@ -2,7 +2,12 @@ import type { QueryResultRow } from 'pg';
 import { createHash } from 'crypto';
 import { isDeepStrictEqual } from 'util';
 import { getPool, sql } from '@/lib/db';
-import { RECOVERABLE_BOUNDED_BATCH_ERROR } from '@/lib/rednote-publish-job-recovery';
+import {
+  RECOVERABLE_AMBIGUOUS_CREATOR_ERROR,
+  RECOVERABLE_AMBIGUOUS_CREATOR_MESSAGE,
+  RECOVERABLE_BOUNDED_BATCH_ERROR,
+  type RecoverableRednotePublishJobError,
+} from '@/lib/rednote-publish-job-recovery';
 import type {
   LocalPublishSnapshot,
   PublishBatch,
@@ -50,6 +55,7 @@ interface ItemRow extends QueryResultRow {
   recovery_job_id?: string | null;
   recovery_job_status?: string | null;
   recovery_job_error_code?: string | null;
+  recovery_job_error_message?: string | null;
   recovery_job_snapshot?: LocalPublishSnapshot | null;
   recovery_claim_attempts?: number | null;
   recovery_claimed_at?: Date | string | null;
@@ -64,6 +70,11 @@ interface ItemRow extends QueryResultRow {
   recovery_reconciled_at?: Date | string | null;
   recovery_verification_attempts?: number | null;
   recovery_audit_id?: string | null;
+  recovery_audit_batch_id?: string | null;
+  recovery_audit_manifest_hash?: string | null;
+  recovery_audit_item_id?: string | null;
+  recovery_audit_item_hash?: string | null;
+  recovery_audit_snapshot_revision?: string | null;
   recovery_audit_claim_attempts?: number | null;
   recovery_audit_completed_at?: Date | string | null;
   recovery_audit_recovered_at?: Date | string | null;
@@ -101,17 +112,43 @@ function storedManifestHash(items: PublishBatchItem[]) {
 
 function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
   const firstRecovery = !row.recovery_audit_id;
-  const distinctRefailure = Boolean(
+  const matchingAuditEvidence = Boolean(
     row.recovery_audit_id &&
+    batch &&
+    row.recovery_audit_batch_id === batch.id &&
+    row.recovery_audit_manifest_hash === batch.manifest_hash &&
+    row.recovery_audit_item_id === row.id &&
+    row.recovery_audit_item_hash === row.item_hash &&
+    row.recovery_audit_snapshot_revision === row.snapshot.notionLastEditedTime
+  );
+  const laterClaimGeneration = Boolean(
     row.recovery_claim_attempts !== null &&
     row.recovery_claim_attempts !== undefined &&
     row.recovery_audit_claim_attempts !== null &&
     row.recovery_audit_claim_attempts !== undefined &&
-    row.recovery_claim_attempts > row.recovery_audit_claim_attempts &&
+    (
+      row.recovery_job_error_code === RECOVERABLE_AMBIGUOUS_CREATOR_ERROR
+        ? row.recovery_claim_attempts === row.recovery_audit_claim_attempts + 1
+        : row.recovery_claim_attempts > row.recovery_audit_claim_attempts
+    )
+  );
+  const distinctRefailure = Boolean(
+    matchingAuditEvidence &&
+    laterClaimGeneration &&
     isAfter(row.recovery_claimed_at, row.recovery_audit_completed_at) &&
     isAfter(row.recovery_claimed_at, row.recovery_audit_recovered_at) &&
     isAfter(row.recovery_completed_at, row.recovery_claimed_at)
   );
+  const recoverableError = (
+    row.recovery_job_error_code === RECOVERABLE_BOUNDED_BATCH_ERROR ||
+    (
+      !firstRecovery &&
+      row.recovery_job_error_code === RECOVERABLE_AMBIGUOUS_CREATOR_ERROR &&
+      row.recovery_job_error_message === RECOVERABLE_AMBIGUOUS_CREATOR_MESSAGE
+    )
+  )
+    ? row.recovery_job_error_code as RecoverableRednotePublishJobError
+    : null;
   const recoveryEligible = Boolean(
     batch?.status === 'approved' &&
     batch.approved_at &&
@@ -119,7 +156,7 @@ function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
     row.local_publish_job_id &&
     row.recovery_job_id === row.local_publish_job_id &&
     row.recovery_job_status === 'failed' &&
-    row.recovery_job_error_code === RECOVERABLE_BOUNDED_BATCH_ERROR &&
+    recoverableError &&
     row.recovery_job_snapshot &&
     row.recovery_completed_at &&
     isDeepStrictEqual(row.snapshot, row.recovery_job_snapshot) &&
@@ -156,7 +193,7 @@ function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
             jobId: row.recovery_job_id!,
             itemHash: row.item_hash,
             snapshotRevision: row.snapshot.notionLastEditedTime,
-            priorErrorCode: RECOVERABLE_BOUNDED_BATCH_ERROR,
+            priorErrorCode: recoverableError!,
             claimAttempts: row.recovery_claim_attempts!,
             ...(row.recovery_audit_claim_attempts !== null &&
                 row.recovery_audit_claim_attempts !== undefined
@@ -363,6 +400,7 @@ export async function listStoredPublishBatches(batchId?: string) {
         job.id AS recovery_job_id,
         job.status AS recovery_job_status,
         job.error_code AS recovery_job_error_code,
+        job.error_message AS recovery_job_error_message,
         job.snapshot AS recovery_job_snapshot,
         job.claim_attempts AS recovery_claim_attempts,
         job.claimed_at AS recovery_claimed_at,
@@ -377,6 +415,11 @@ export async function listStoredPublishBatches(batchId?: string) {
         job.reconciled_at AS recovery_reconciled_at,
         job.verification_attempts AS recovery_verification_attempts,
         recovery.id AS recovery_audit_id,
+        recovery.batch_id AS recovery_audit_batch_id,
+        recovery.manifest_hash AS recovery_audit_manifest_hash,
+        recovery.batch_item_id AS recovery_audit_item_id,
+        recovery.item_hash AS recovery_audit_item_hash,
+        recovery.snapshot_revision AS recovery_audit_snapshot_revision,
         recovery.prior_claim_attempts AS recovery_audit_claim_attempts,
         recovery.prior_completed_at AS recovery_audit_completed_at,
         recovery.recovered_at AS recovery_audit_recovered_at,

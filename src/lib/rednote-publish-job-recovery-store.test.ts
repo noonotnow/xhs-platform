@@ -150,6 +150,8 @@ describe('stored approved publish job recovery', () => {
     expect(update).toContain('AND claim_attempts = $3');
     expect(update).toContain('AND claimed_at = $4::timestamptz');
     expect(update).toContain('AND completed_at = $5::timestamptz');
+    expect(update).toContain('AND error_code = $6');
+    expect(update).toContain('AND error_message IS NOT DISTINCT FROM $7');
     const auditCall = mocks.query.mock.calls.find(([statement]) =>
       String(statement).includes('INSERT INTO rednote_publish_job_recoveries'));
     expect(auditCall?.[1]).toEqual([
@@ -174,6 +176,8 @@ describe('stored approved publish job recovery', () => {
       1,
       '2026-08-04 17:04:33.424+00',
       '2026-08-04 17:04:33.963+00',
+      'BOUNDED_BATCH_BYPASS_DISABLED',
+      'Worker bypass is disabled',
     ]);
     const ownership = statements.find((value) => value.includes('AS active_ownership'))!;
     expect(ownership).toContain('manual_reconciliation_requests');
@@ -280,6 +284,63 @@ describe('stored approved publish job recovery', () => {
     expect(statements.some((value) => value.startsWith('INSERT'))).toBe(false);
     expect(statements.some((value) => value.startsWith('UPDATE'))).toBe(false);
     expect(statements).toContain('COMMIT');
+  });
+
+  it('appends and requeues the exact generation-three image-mode hydration failure', async () => {
+    const generationThreeId = '99999999-9999-4999-8999-999999999999';
+    mocks.query.mockImplementation(async (statement: string) => {
+      if (statement.includes('FROM local_publish_jobs AS job')) {
+        return {
+          rows: [{
+            ...row(true, 3),
+            item_state: 'failed',
+            job_status: 'failed',
+            job_error_code: 'AMBIGUOUS_CREATOR_UI',
+            job_error_message: 'Could not uniquely identify the image upload mode',
+            claim_token: '88888888-8888-4888-8888-888888888888',
+            claimed_at: new Date('2026-08-04T19:16:27.900Z'),
+            claimed_at_raw: '2026-08-04 19:16:27.900123+00',
+            claim_expires_at: '2026-08-04T21:16:27.900Z',
+            completed_at: new Date('2026-08-04T19:16:28.333Z'),
+            completed_at_raw: '2026-08-04 19:16:28.333669+00',
+            recovery_prior_claim_attempts: 2,
+            recovery_prior_claimed_at: '2026-08-04 18:35:27.626710+00',
+            recovery_prior_completed_at: '2026-08-04 18:35:28.151762+00',
+            recovered_at: '2026-08-04T18:40:00.000Z',
+          }],
+        };
+      }
+      if (statement.includes('AS active_ownership')) {
+        return { rows: [{ active_ownership: false }] };
+      }
+      if (statement.includes('INSERT INTO rednote_publish_job_recoveries')) {
+        return {
+          rows: [{ id: generationThreeId, recovered_at: '2026-08-04T19:30:00.000Z' }],
+        };
+      }
+      if (statement.includes('UPDATE local_publish_jobs')) return { rows: [], rowCount: 1 };
+      if (statement.includes('FROM rednote_publish_batch_items')) {
+        return { rows: [{ state: 'queued', local_publish_job_id: input.jobId }] };
+      }
+      return { rows: [], rowCount: 1 };
+    });
+
+    await expect(recoverStoredApprovedPublishJob(input, actor)).resolves.toMatchObject({
+      id: generationThreeId,
+      priorClaimAttempts: 3,
+      alreadyRecovered: false,
+    });
+    const updateCall = mocks.query.mock.calls.find(([statement]) =>
+      String(statement).includes('UPDATE local_publish_jobs'));
+    expect(updateCall?.[1]).toEqual([
+      input.jobId,
+      input.itemId,
+      3,
+      '2026-08-04 19:16:27.900123+00',
+      '2026-08-04 19:16:28.333669+00',
+      'AMBIGUOUS_CREATOR_UI',
+      'Could not uniquely identify the image upload mode',
+    ]);
   });
 
   it('rolls back the audit when the exact timestamp compare-and-set fails', async () => {

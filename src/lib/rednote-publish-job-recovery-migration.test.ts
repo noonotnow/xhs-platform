@@ -25,4 +25,18 @@ describe('generation-aware recovery migration', () => {
     expect(original).toContain('BEFORE UPDATE OR DELETE');
     expect(original).toContain('prevent_rednote_publish_job_recovery_mutation');
   });
+
+  it('adds only the exact image-mode hydration error to the audit allowlist', () => {
+    const migration = readFileSync(
+      join(process.cwd(), 'migrations/012_recover_fixed_image_mode_hydration.sql'),
+      'utf8',
+    );
+    expect(migration).toContain(
+      'DROP CONSTRAINT rednote_publish_job_recoveries_prior_error_code_check',
+    );
+    expect(migration).toContain("'BOUNDED_BATCH_BYPASS_DISABLED'");
+    expect(migration).toContain("'AMBIGUOUS_CREATOR_UI'");
+    expect(migration).not.toMatch(/\bUPDATE\b|\bDELETE FROM\b|\bINSERT INTO\b/i);
+    expect(migration).not.toContain('prevent_rednote_publish_job_recovery_mutation');
+  });
 });

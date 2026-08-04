@@ -3,6 +3,13 @@ import { LocalPublishJobError } from '@/lib/local-publish-job-input';
 import type { LocalPublishSnapshot } from '@/types/local-publish-job';
 
 export const RECOVERABLE_BOUNDED_BATCH_ERROR = 'BOUNDED_BATCH_BYPASS_DISABLED';
+export const RECOVERABLE_AMBIGUOUS_CREATOR_ERROR = 'AMBIGUOUS_CREATOR_UI';
+export const RECOVERABLE_AMBIGUOUS_CREATOR_MESSAGE =
+  'Could not uniquely identify the image upload mode';
+
+export type RecoverableRednotePublishJobError =
+  | typeof RECOVERABLE_BOUNDED_BATCH_ERROR
+  | typeof RECOVERABLE_AMBIGUOUS_CREATOR_ERROR;
 
 export interface RednotePublishJobRecoveryInput {
   batchId: string;
@@ -44,6 +51,7 @@ export interface RecoveryCandidateState {
   jobStatus: string;
   jobSnapshot: LocalPublishSnapshot;
   jobErrorCode: string | null;
+  jobErrorMessage: string | null;
   jobClaimAttempts: number;
   jobClaimToken: string | null;
   jobClaimedAt: string | null;
@@ -227,13 +235,23 @@ export function validateRecoveryCandidate(
       }
       return 'already_recovered';
     }
+    const laterClaimGeneration =
+      state.jobErrorCode === RECOVERABLE_AMBIGUOUS_CREATOR_ERROR
+        ? state.jobClaimAttempts === state.audit.priorClaimAttempts + 1
+        : state.jobClaimAttempts > state.audit.priorClaimAttempts;
     if (
       state.itemState !== 'failed' ||
       state.jobStatus !== 'failed' ||
-      state.jobErrorCode !== RECOVERABLE_BOUNDED_BATCH_ERROR ||
+      (
+        state.jobErrorCode !== RECOVERABLE_BOUNDED_BATCH_ERROR &&
+        (
+          state.jobErrorCode !== RECOVERABLE_AMBIGUOUS_CREATOR_ERROR ||
+          state.jobErrorMessage !== RECOVERABLE_AMBIGUOUS_CREATOR_MESSAGE
+        )
+      ) ||
       !state.jobClaimedAt ||
       !state.jobCompletedAt ||
-      state.jobClaimAttempts <= state.audit.priorClaimAttempts ||
+      !laterClaimGeneration ||
       new Date(state.jobClaimedAt) <= new Date(state.audit.priorCompletedAt) ||
       new Date(state.jobClaimedAt) <= new Date(state.audit.recoveredAt) ||
       new Date(state.jobCompletedAt) <= new Date(state.jobClaimedAt)

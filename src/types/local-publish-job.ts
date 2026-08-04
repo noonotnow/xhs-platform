@@ -106,7 +106,7 @@ export interface RednotePublishJobRecoveryEvidence {
   jobId: string;
   itemHash: string;
   snapshotRevision: string;
-  priorErrorCode: 'BOUNDED_BATCH_BYPASS_DISABLED';
+  priorErrorCode: 'BOUNDED_BATCH_BYPASS_DISABLED' | 'AMBIGUOUS_CREATOR_UI';
   claimAttempts: number;
   latestAuditedClaimAttempts?: number;
 }

@@ -57,6 +57,7 @@ function candidate(
     jobStatus: 'failed',
     jobSnapshot: snapshot,
     jobErrorCode: 'BOUNDED_BATCH_BYPASS_DISABLED',
+    jobErrorMessage: 'Worker bypass is disabled',
     jobClaimAttempts: 1,
     jobClaimToken: '55555555-5555-4555-8555-555555555555',
     jobClaimedAt: '2026-08-04T17:04:33.424Z',
@@ -124,6 +125,68 @@ describe('bounded publish job recovery validation', () => {
       },
     });
     expect(validateRecoveryCandidate(refailed, input, actor)).toBe('recover');
+  });
+
+  it('preserves later-generation OFF-gate recovery after skipped lease claims', () => {
+    expect(validateRecoveryCandidate(candidate({
+      jobClaimAttempts: 4,
+      jobClaimedAt: '2026-08-04T17:30:08.000Z',
+      jobCompletedAt: '2026-08-04T17:30:08.500Z',
+      audit: {
+        id: '66666666-6666-4666-8666-666666666666',
+        ...input,
+        recoveredBy: actor,
+        recoveredAt: '2026-08-04T17:30:00.000Z',
+        priorClaimAttempts: 1,
+        priorClaimedAt: '2026-08-04T17:04:33.424Z',
+        priorCompletedAt: '2026-08-04T17:04:33.963Z',
+      },
+    }), input, actor)).toBe('recover');
+  });
+
+  it('accepts generation three after audited OFF-gate generations one and two', () => {
+    const fixedHydrationFailure = candidate({
+      jobErrorCode: 'AMBIGUOUS_CREATOR_UI',
+      jobErrorMessage: 'Could not uniquely identify the image upload mode',
+      jobClaimAttempts: 3,
+      jobClaimedAt: '2026-08-04T19:16:27.900Z',
+      jobCompletedAt: '2026-08-04T19:16:28.333669Z',
+      audit: {
+        id: '66666666-6666-4666-8666-666666666666',
+        ...input,
+        recoveredBy: actor,
+        recoveredAt: '2026-08-04T18:40:00.000Z',
+        priorClaimAttempts: 2,
+        priorClaimedAt: '2026-08-04T18:35:27.626710Z',
+        priorCompletedAt: '2026-08-04T18:35:28.151762Z',
+      },
+    });
+
+    expect(validateRecoveryCandidate(fixedHydrationFailure, input, actor)).toBe('recover');
+  });
+
+  it.each([
+    ['first generation', { jobClaimAttempts: 1, audit: null }],
+    ['different message', { jobErrorMessage: 'Could not identify upload mode' }],
+    ['skipped generation', { jobClaimAttempts: 4 }],
+  ])('rejects ambiguous Creator UI for %s', (_label, overrides) => {
+    expect(() => validateRecoveryCandidate(candidate({
+      jobErrorCode: 'AMBIGUOUS_CREATOR_UI',
+      jobErrorMessage: 'Could not uniquely identify the image upload mode',
+      jobClaimAttempts: 3,
+      jobClaimedAt: '2026-08-04T19:16:27.900Z',
+      jobCompletedAt: '2026-08-04T19:16:28.333669Z',
+      audit: {
+        id: '66666666-6666-4666-8666-666666666666',
+        ...input,
+        recoveredBy: actor,
+        recoveredAt: '2026-08-04T18:40:00.000Z',
+        priorClaimAttempts: 2,
+        priorClaimedAt: '2026-08-04T18:35:27.626710Z',
+        priorCompletedAt: '2026-08-04T18:35:28.151762Z',
+      },
+      ...overrides,
+    }), input, actor)).toThrow();
   });
 
   it.each([
