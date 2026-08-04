@@ -262,6 +262,69 @@ describe('local publish atomic claim storage', () => {
     expect(claimed).not.toHaveProperty('scheduledDate');
   });
 
+  it('serializes the exact legacy combined-tag shape as strict worker tags', async () => {
+    mocks.sql.mockResolvedValue({
+      rows: [{
+        ...claimedRow(),
+        id: '52b6bee8-cd9d-44da-8da0-0883f17862bb',
+        notion_page_id: 'f7d2a66f-6a77-41d5-9999-41894d7c6250',
+        snapshot: {
+          ...snapshot,
+          notionPageId: 'f7d2a66f-6a77-41d5-9999-41894d7c6250',
+          headline: 'Day 3｜回来吧回来吧回来吧',
+          title: 'Day 3｜回来吧回来吧回来吧',
+          tags: ['好视频扶持计划 ##念无双 ##刘学义 ##源仲 ##古装剧'],
+          publishAt: '2026-08-04T11:30:00.000Z',
+        },
+      }],
+      rowCount: 1,
+    });
+
+    await expect(claimNextStoredLocalPublishJob(7_200, 'dispatch')).resolves.toMatchObject({
+      id: '52b6bee8-cd9d-44da-8da0-0883f17862bb',
+      notionPageId: 'f7d2a66f-6a77-41d5-9999-41894d7c6250',
+      tags: ['好视频扶持计划', '念无双', '刘学义', '源仲', '古装剧'],
+      publishAt: '2026-08-04T11:30:00.000Z',
+    });
+  });
+
+  it('retains exact bounded batch tags and emits strict authorization', async () => {
+    const batchRow = {
+      ...claimedRow(),
+      batch_item_id: '55555555-5555-4555-8555-555555555555',
+      snapshot: {
+        ...snapshot,
+        tags: ['FrozenTag'],
+        publishAt: '2026-08-04T13:30:00.000Z',
+      },
+    };
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [batchRow], rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [{
+          batch_id: '66666666-6666-4666-8666-666666666666',
+          batch_item_id: batchRow.batch_item_id,
+          manifest_hash: 'a'.repeat(64),
+          item_hash: 'b'.repeat(64),
+          approved_at: '2026-08-04T12:00:00.000Z',
+          dispatch_mode: 'scheduled',
+        }],
+        rowCount: 1,
+      });
+
+    await expect(claimNextStoredLocalPublishJob(7_200, 'dispatch')).resolves.toMatchObject({
+      tags: ['FrozenTag'],
+      publishAt: '2026-08-04T13:30:00.000Z',
+      batchAuthorization: {
+        batchId: '66666666-6666-4666-8666-666666666666',
+        manifestHash: 'a'.repeat(64),
+        itemHash: 'b'.repeat(64),
+        approvedState: 'approved',
+        lateAction: 'schedule',
+      },
+    });
+  });
+
   it('returns the original job for an identical idempotency key', async () => {
     const reorderedSnapshot = {
       notionLastEditedTime: snapshot.notionLastEditedTime,

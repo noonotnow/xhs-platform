@@ -1,7 +1,10 @@
 import type { QueryResultRow } from 'pg';
 import { isDeepStrictEqual } from 'util';
 import { sql } from '@/lib/db';
-import { LocalPublishJobError } from '@/lib/local-publish-job-input';
+import {
+  LocalPublishJobError,
+  normalizeLocalPublishTags,
+} from '@/lib/local-publish-job-input';
 import { rednoteMediaIdentity } from '@/lib/rednote-publish-authorization';
 import type {
   ClaimedLocalPublishJob,
@@ -452,7 +455,9 @@ async function claimedResponse(row: LocalPublishJobRow): Promise<ClaimedLocalPub
     headline: job.snapshot.headline,
     title: job.snapshot.title,
     caption: job.snapshot.caption,
-    tags: job.snapshot.tags,
+    tags: row.batch_item_id
+      ? job.snapshot.tags
+      : normalizeLocalPublishTags(job.snapshot.tags),
     platform: job.snapshot.platform,
     mediaType: job.snapshot.mediaType,
     mediaUrl: job.snapshot.mediaUrl,
