@@ -9,6 +9,7 @@ vi.mock('@/lib/db', () => ({ sql: mocks.sql }));
 import {
   claimNextStoredLocalPublishJob,
   completeStoredLocalPublishReconciliation,
+  consumeStoredDispatchAuthorization,
   deferStoredLocalPublishVerification,
   failStoredLocalPublishJob,
   insertLocalPublishJob,
@@ -112,7 +113,8 @@ describe('local publish atomic claim storage', () => {
 
     expect(query).toContain("status = 'queued'");
     expect(query).toContain("status = 'claimed' AND claim_expires_at <= CURRENT_TIMESTAMP");
-    expect(query).toContain("status = 'staged' AND claim_expires_at <= CURRENT_TIMESTAMP");
+    expect(query).toContain("status = 'staged'");
+    expect(query).toContain('dispatch_authorized_at IS NULL');
     expect(query).toContain("status IN ('submitted', 'scheduled', 'verification_pending')");
     expect(query).toContain('claim_expires_at IS NULL');
     expect(query).toContain('FOR UPDATE SKIP LOCKED');
@@ -124,8 +126,30 @@ describe('local publish atomic claim storage', () => {
       claimToken: claimedRow().claim_token,
       claimExpiresAt: '2026-08-01T14:00:00.000Z',
       mediaUrl: snapshot.mediaUrl,
+      snapshotRevision: snapshot.notionLastEditedTime,
     });
     expect(claimed).not.toHaveProperty('notionLastEditedTime');
+  });
+
+  it('durably consumes a staged dispatch permit before the publish click', async () => {
+    mocks.sql.mockResolvedValue({
+      rows: [{
+        ...claimedRow(),
+        status: 'staged',
+        dispatch_authorized_at: '2026-08-01T12:06:00.000Z',
+      }],
+      rowCount: 1,
+    });
+
+    await expect(consumeStoredDispatchAuthorization(
+      claimedRow().id,
+      claimedRow().claim_token,
+    )).resolves.toMatchObject({ id: claimedRow().id, status: 'staged' });
+
+    const query = (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
+    expect(query).toContain('dispatch_authorized_at = COALESCE');
+    expect(query).toContain("status = 'staged'");
+    expect(query).toContain('claim_expires_at > CURRENT_TIMESTAMP');
   });
 
   it('preserves post-dispatch state and returns verification-only work', async () => {

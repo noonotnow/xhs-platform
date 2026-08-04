@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   queue: vi.fn(),
   list: vi.fn(),
   claim: vi.fn(),
+  authorize: vi.fn(),
   submit: vi.fn(),
 }));
 
@@ -20,6 +21,7 @@ vi.mock('@/lib/local-publish-jobs', async (importOriginal) => {
     queueLocalPublishJob: mocks.queue,
     getLocalPublishJobSummaries: mocks.list,
     claimNextLocalPublishJob: mocks.claim,
+    authorizeLocalPublishJob: mocks.authorize,
     submitLocalPublishJobResult: mocks.submit,
   };
 });
@@ -29,6 +31,7 @@ import {
   POST as queueJob,
 } from '@/app/admin/api/local-publish-jobs/route';
 import { GET as claimJob } from '@/app/api/local-publish-jobs/next/route';
+import { GET as authorizeJob } from '@/app/api/local-publish-jobs/[id]/authorization/route';
 import { POST as submitResult } from '@/app/api/local-publish-jobs/[id]/result/route';
 
 const workerToken = 'worker-token-that-is-at-least-32-characters';
@@ -142,6 +145,33 @@ describe('local publish job routes', () => {
     ));
     expect(response.status).toBe(204);
     expect(mocks.claim).toHaveBeenCalledWith('verification');
+  });
+
+  it('returns the current strict claim for worker reauthorization', async () => {
+    const job = {
+      id: jobId,
+      status: 'staged',
+      claimToken,
+      snapshotRevision: '2026-08-04T12:00:00.000Z',
+      batchAuthorization: {
+        approvedState: 'approved',
+        lateAction: 'schedule',
+      },
+    };
+    mocks.authorize.mockResolvedValue(job);
+    const response = await authorizeJob(
+      request(`/api/local-publish-jobs/${jobId}/authorization`, {
+        headers: {
+          Authorization: 'Bearer ' + workerToken,
+          'X-Local-Publish-Claim-Token': claimToken,
+        },
+      }),
+      { params: { id: jobId } },
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toContain('no-store');
+    expect(mocks.authorize).toHaveBeenCalledWith(jobId, claimToken);
+    await expect(response.json()).resolves.toEqual({ job });
   });
 
   it('rejects unknown worker lanes before claiming', async () => {

@@ -8,8 +8,10 @@ import {
   type QueueLocalPublishInput,
 } from '@/lib/local-publish-job-input';
 import {
+  authorizeStoredLocalPublishJob,
   claimNextStoredLocalPublishJob,
   completeStoredLocalPublishReconciliation,
+  consumeStoredDispatchAuthorization,
   deferStoredLocalPublishVerification,
   failStoredLocalPublishJob,
   findLocalPublishJobByIdempotencyKey,
@@ -259,49 +261,15 @@ export function verificationBackoffSeconds() {
 export async function claimNextLocalPublishJob(lane: LocalPublishWorkLane = 'all') {
   for (let attempt = 0; attempt < 10; attempt += 1) {
     const job = await claimNextStoredLocalPublishJob(leaseSeconds(), lane);
-    if (!job || job.authorization.mode !== 'bounded_batch') return job;
+    if (!job || !job.batchAuthorization) return job;
     if (
       job.status !== 'claimed' &&
       job.status !== 'staged'
     ) {
       return job;
     }
-    try {
-      const post = await getReadyXhsPost(job.notionPageId);
-      const current = buildBatchSnapshot(post);
-      const exactSnapshot = current && (
-        job.publishAt
-          ? current
-          : Object.fromEntries(
-              Object.entries(current).filter(([key]) => key !== 'publishAt'),
-            )
-      );
-      if (
-        current &&
-        manifestHash(current) === job.authorization.itemHash &&
-        isDeepStrictEqual(exactSnapshot, {
-          notionPageId: job.notionPageId,
-          headline: job.headline,
-          title: job.title,
-          caption: job.caption,
-          tags: job.tags,
-          platform: job.platform,
-          mediaType: job.mediaType,
-          mediaIndex: current.mediaIndex,
-          mediaUrl: job.mediaUrl,
-          ...(job.thumbnailUrl ? { thumbnailUrl: job.thumbnailUrl } : {}),
-          ...(job.publishAt ? { publishAt: job.publishAt } : {}),
-          notionLastEditedTime: current.notionLastEditedTime,
-        })
-      ) {
-        return job;
-      }
-    } catch (error) {
-      if (!(error instanceof NotionPostsError) || error.status >= 500) throw error;
-      // Authoritative Notion eligibility failures invalidate only this item.
-    }
+    if (await batchSourceMatches(job)) return job;
     await invalidateStoredBatchItem(
-      job.authorization.batchItemId!,
       job.id,
       job.claimToken,
       'The Notion source changed after batch approval. Refresh it into a new batch.',
@@ -312,6 +280,60 @@ export async function claimNextLocalPublishJob(lane: LocalPublishWorkLane = 'all
     'BATCH_CLAIM_RETRY_LIMIT',
     409,
   );
+}
+
+async function batchSourceMatches(job: Awaited<ReturnType<typeof authorizeStoredLocalPublishJob>>) {
+  if (!job.batchAuthorization) return true;
+  try {
+    const post = await getReadyXhsPost(job.notionPageId);
+    const current = buildBatchSnapshot(post);
+    return Boolean(
+      current &&
+        manifestHash(current) === job.batchAuthorization.itemHash &&
+        current.notionLastEditedTime === job.batchAuthorization.snapshotRevision &&
+        isDeepStrictEqual(current, {
+          notionPageId: job.notionPageId,
+          headline: job.headline,
+          title: job.title,
+          caption: job.caption,
+          tags: job.tags,
+          platform: job.platform,
+          mediaType: job.mediaType,
+          mediaIndex: current.mediaIndex,
+          mediaUrl: job.mediaUrl,
+          ...(job.thumbnailUrl ? { thumbnailUrl: job.thumbnailUrl } : {}),
+          publishAt: job.publishAt,
+          notionLastEditedTime: job.snapshotRevision,
+        }),
+    );
+  } catch (error) {
+    if (!(error instanceof NotionPostsError) || error.status >= 500) throw error;
+    return false;
+  }
+}
+
+export async function authorizeLocalPublishJob(id: string, claimToken: string) {
+  const job = await authorizeStoredLocalPublishJob(id, claimToken);
+  if (
+    job.batchAuthorization &&
+    (job.status === 'claimed' || job.status === 'staged') &&
+    !(await batchSourceMatches(job))
+  ) {
+    await invalidateStoredBatchItem(
+      job.id,
+      job.claimToken,
+      'The Notion source changed after batch approval. Refresh it into a new batch.',
+    );
+    throw new LocalPublishJobError(
+      'The bounded batch authorization is stale or revoked',
+      'INVALID_BATCH_AUTHORIZATION',
+      409,
+    );
+  }
+  if (job.status === 'staged') {
+    return consumeStoredDispatchAuthorization(job.id, job.claimToken);
+  }
+  return job;
 }
 
 export async function getLocalPublishJobSummaries() {

@@ -48,17 +48,22 @@ export interface LocalPublishJobSummary {
   verifiedAt?: string;
   reconciledAt?: string;
   completedAt?: string;
-  authorization?: LocalPublishAuthorization;
 }
 
-export interface LocalPublishAuthorization {
-  mode: 'legacy_per_job' | 'bounded_batch';
-  batchId?: string;
-  batchItemId?: string;
-  manifestHash?: string;
-  itemHash?: string;
-  approvedAt?: string;
-  approvedBy?: string;
+export interface BatchAuthorization {
+  batchId: string;
+  manifestHash: string;
+  itemHash: string;
+  snapshotRevision: string;
+  approvedState: 'approved';
+  approvedAt: string;
+  media: {
+    url: string;
+    type: LocalPublishMediaType;
+    identity: string;
+  };
+  publishAt: string;
+  lateAction: 'schedule' | 'post_now';
 }
 
 interface ClaimedLocalPublishJobBase
@@ -66,7 +71,8 @@ interface ClaimedLocalPublishJobBase
   id: string;
   claimToken: string;
   claimExpiresAt: string;
-  authorization: LocalPublishAuthorization;
+  snapshotRevision: string;
+  batchAuthorization?: BatchAuthorization;
 }
 
 export type PublishBatchKind = 'weekly' | 'catch_up' | 'bootstrap';

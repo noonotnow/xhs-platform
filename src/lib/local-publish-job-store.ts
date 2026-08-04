@@ -2,12 +2,13 @@ import type { QueryResultRow } from 'pg';
 import { isDeepStrictEqual } from 'util';
 import { sql } from '@/lib/db';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
+import { rednoteMediaIdentity } from '@/lib/rednote-publish-authorization';
 import type {
   ClaimedLocalPublishJob,
   LocalPublishJobStatus,
   LocalPublishJobSummary,
   LocalPublishSnapshot,
-  LocalPublishAuthorization,
+  BatchAuthorization,
   LocalPublishWorkLane,
 } from '@/types/local-publish-job';
 
@@ -35,6 +36,7 @@ interface LocalPublishJobRow extends QueryResultRow {
   updated_at: Date | string;
   completed_at: Date | string | null;
   batch_item_id?: string | null;
+  dispatch_authorized_at?: Date | string | null;
 }
 
 export interface StoredLocalPublishJob {
@@ -58,7 +60,7 @@ export interface StoredLocalPublishJob {
   verifiedAt?: string;
   reconciledAt?: string;
   completedAt?: string;
-  authorization?: LocalPublishAuthorization;
+  batchAuthorization?: BatchAuthorization;
 }
 
 function timestamp(value: Date | string) {
@@ -127,7 +129,6 @@ function mapRow(row: LocalPublishJobRow): StoredLocalPublishJob {
     ...(optionalTimestamp(row.completed_at)
       ? { completedAt: optionalTimestamp(row.completed_at) }
       : {}),
-    authorization: { mode: 'legacy_per_job' },
   };
 }
 
@@ -154,7 +155,6 @@ export function jobSummary(job: StoredLocalPublishJob): LocalPublishJobSummary {
     ...(job.verifiedAt ? { verifiedAt: job.verifiedAt } : {}),
     ...(job.reconciledAt ? { reconciledAt: job.reconciledAt } : {}),
     ...(job.completedAt ? { completedAt: job.completedAt } : {}),
-    authorization: job.authorization ?? { mode: 'legacy_per_job' },
   };
 }
 
@@ -280,7 +280,11 @@ export async function claimNextStoredLocalPublishJob(
         AND (
           status = 'queued'
           OR (status = 'claimed' AND claim_expires_at <= CURRENT_TIMESTAMP)
-          OR (status = 'staged' AND claim_expires_at <= CURRENT_TIMESTAMP)
+          OR (
+            status = 'staged'
+            AND dispatch_authorized_at IS NULL
+            AND claim_expires_at <= CURRENT_TIMESTAMP
+          )
         )
       )
         OR (
@@ -331,6 +335,17 @@ export async function claimNextStoredLocalPublishJob(
   `;
   const row = result.rows[0];
   if (!row?.claim_token || !row.claim_expires_at) return null;
+  return claimedResponse(row);
+}
+
+async function claimedResponse(row: LocalPublishJobRow): Promise<ClaimedLocalPublishJob> {
+  if (!row.claim_token || !row.claim_expires_at) {
+    throw new LocalPublishJobError(
+      'The local publish job does not have a current claim',
+      'STALE_CLAIM',
+      409,
+    );
+  }
   const job = mapRow(row);
   if (row.batch_item_id) {
     const authorization = await sql<{
@@ -339,7 +354,7 @@ export async function claimNextStoredLocalPublishJob(
       manifest_hash: string;
       item_hash: string;
       approved_at: Date | string;
-      approved_by: string;
+      dispatch_mode: 'scheduled' | 'post_now';
     }>`
       SELECT
         batch.id AS batch_id,
@@ -347,7 +362,7 @@ export async function claimNextStoredLocalPublishJob(
         batch.manifest_hash,
         item.item_hash,
         batch.approved_at,
-        batch.approved_by
+        item.dispatch_mode
       FROM rednote_publish_batch_items AS item
       JOIN rednote_publish_batches AS batch ON batch.id = item.batch_id
       WHERE item.id = ${row.batch_item_id}::uuid
@@ -366,14 +381,30 @@ export async function claimNextStoredLocalPublishJob(
         409,
       );
     }
-    job.authorization = {
-      mode: 'bounded_batch',
+    if (!job.snapshot.publishAt) {
+      throw new LocalPublishJobError(
+        'A bounded batch job is missing its frozen publish time',
+        'INVALID_BATCH_AUTHORIZATION',
+        409,
+      );
+    }
+    job.batchAuthorization = {
       batchId: approved.batch_id,
-      batchItemId: approved.batch_item_id,
       manifestHash: approved.manifest_hash,
       itemHash: approved.item_hash,
+      snapshotRevision: job.snapshot.notionLastEditedTime,
+      approvedState: 'approved',
       approvedAt: timestamp(approved.approved_at),
-      approvedBy: approved.approved_by,
+      media: {
+        url: job.snapshot.mediaUrl,
+        type: job.snapshot.mediaType,
+        identity: rednoteMediaIdentity({
+          type: job.snapshot.mediaType,
+          url: job.snapshot.mediaUrl,
+        }),
+      },
+      publishAt: job.snapshot.publishAt,
+      lateAction: approved.dispatch_mode === 'post_now' ? 'post_now' : 'schedule',
     };
   }
   const base = {
@@ -392,9 +423,10 @@ export async function claimNextStoredLocalPublishJob(
       : {}),
     ...(job.snapshot.thumbnailUrl ? { thumbnailUrl: job.snapshot.thumbnailUrl } : {}),
     ...(job.snapshot.publishAt ? { publishAt: job.snapshot.publishAt } : {}),
+    snapshotRevision: job.snapshot.notionLastEditedTime,
     claimToken: row.claim_token,
     claimExpiresAt: timestamp(row.claim_expires_at),
-    authorization: job.authorization ?? { mode: 'legacy_per_job' },
+    ...(job.batchAuthorization ? { batchAuthorization: job.batchAuthorization } : {}),
   };
   if (
     job.status === 'submitted' ||
@@ -434,6 +466,48 @@ export async function claimNextStoredLocalPublishJob(
     };
   }
   return { ...base, status: job.status as 'claimed' | 'staged' };
+}
+
+export async function authorizeStoredLocalPublishJob(id: string, claimToken: string) {
+  const result = await sql<LocalPublishJobRow>`
+    SELECT *
+    FROM local_publish_jobs
+    WHERE id = ${id}::uuid
+      AND claim_token = ${claimToken}::uuid
+      AND claim_expires_at > CURRENT_TIMESTAMP
+      AND status IN (
+        'claimed', 'staged', 'submitted', 'scheduled',
+        'verification_pending', 'verified'
+      )
+    LIMIT 1
+  `;
+  if (result.rows[0]) return claimedResponse(result.rows[0]);
+  await loadResultJob(id);
+  throw new LocalPublishJobError(
+    'The local publish claim is stale, expired, or revoked',
+    'STALE_CLAIM',
+    409,
+  );
+}
+
+export async function consumeStoredDispatchAuthorization(id: string, claimToken: string) {
+  const result = await sql<LocalPublishJobRow>`
+    UPDATE local_publish_jobs
+    SET dispatch_authorized_at = COALESCE(dispatch_authorized_at, CURRENT_TIMESTAMP),
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ${id}::uuid
+      AND claim_token = ${claimToken}::uuid
+      AND status = 'staged'
+      AND claim_expires_at > CURRENT_TIMESTAMP
+    RETURNING *
+  `;
+  if (result.rows[0]) return claimedResponse(result.rows[0]);
+  await loadResultJob(id);
+  throw new LocalPublishJobError(
+    'The staged dispatch authorization is stale, expired, or revoked',
+    'STALE_CLAIM',
+    409,
+  );
 }
 
 async function loadResultJob(id: string) {

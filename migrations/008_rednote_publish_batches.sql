@@ -41,6 +41,9 @@ ALTER TABLE local_publish_jobs
   ADD COLUMN IF NOT EXISTS batch_item_id UUID
     REFERENCES rednote_publish_batch_items(id) ON DELETE RESTRICT;
 
+ALTER TABLE local_publish_jobs
+  ADD COLUMN IF NOT EXISTS dispatch_authorized_at TIMESTAMP WITH TIME ZONE;
+
 CREATE UNIQUE INDEX IF NOT EXISTS local_publish_jobs_batch_item_idx
   ON local_publish_jobs (batch_item_id)
   WHERE batch_item_id IS NOT NULL;

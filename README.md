@@ -173,28 +173,36 @@ The local worker contract is:
    `Authorization: Bearer <LOCAL_PUBLISH_WORKER_TOKEN>`. HTTP 204 means the queue
    is empty. A claim returns `id`, `notionPageId`, `headline`, `title`, `caption`,
    `tags`, `platform`, `mediaType`, `mediaUrl`, optional `thumbnailUrl`, optional
-   canonical UTC `publishAt`, `claimToken`, `claimExpiresAt`, and `status`.
-   `publishAt` is present only for exact scheduled dispatch. Bounded batch items that
-   were at most 24 hours late when approved explicitly return `post_now` behavior
-   by omitting `publishAt`; unscheduled records can never enter a batch. An
+   canonical UTC `publishAt`, `snapshotRevision`, `claimToken`, `claimExpiresAt`,
+   and `status`. Unscheduled records can never enter a batch. An
    unverified MOV trial additionally
    returns `"compatibilityTrial":"unverified_mov"`; normal jobs omit this field.
-2. Every claim includes `authorization`. Batch-authorized work returns
-   `{"mode":"bounded_batch","batchId","batchItemId","manifestHash","itemHash",
-   "approvedAt","approvedBy"}`. The worker may schedule those exact frozen items
-   sequentially without `PUBLISH <jobId>`. `legacy_per_job` is not standing
-   authorization and retains the exact per-job approval requirement. The platform
-   re-reads the source revision before dispatch claims and invalidates only the
-   changed batch item; unchanged siblings remain authorized.
-3. A claim with `status` `claimed` or `staged` is dispatch work. Stage the asset
-   and reviewed copy at `https://creator.rednote.com`, report `staged`, wait for
-   explicit human approval, submit or schedule, and capture the exact stable note
-   ID and URL from authenticated Creator.
+2. Only batch-approved claims include `batchAuthorization`:
+   `{"batchId","manifestHash","itemHash","snapshotRevision",
+   "approvedState":"approved","approvedAt","media":{"url","type","identity"},
+   "publishAt","lateAction"}`. Hashes and `media.identity` are lowercase SHA-256;
+   the identity hashes canonical JSON `{type,url}`. `publishAt` always retains the
+   original exact canonical UTC minute. `lateAction:"post_now"` authorizes immediate
+   submission only when the approved preview recorded lateness of at most 24 hours;
+   `"schedule"` uses `publishAt`. Legacy claims omit `batchAuthorization` and retain
+   exact `PUBLISH <jobId>` approval.
+3. Before staging and immediately before clicking Publish, call
+   `GET /api/local-publish-jobs/<id>/authorization` with the worker bearer token and
+   `X-Local-Publish-Claim-Token`. It returns `{"job":<current strict claim>}` only
+   while the token, lease, source revision, hashes, approval, and frozen fields are
+   current. Treat 404 as unknown and 409 as stale, expired, revoked, drifted, or
+   unauthorized; do not publish. The check on a staged job durably consumes its
+   dispatch permit. If the worker exits after that point, the job is never
+   automatically dispatched again and must proceed through receipt recovery or
+   manual reconciliation.
+4. A claim with `status` `claimed` or `staged` is dispatch work. Stage the asset
+   and reviewed copy at `https://creator.rednote.com`, report `staged`, then submit
+   or schedule only after the required approval and second authorization check.
+   A valid bounded batch is that approval; a legacy claim still requires exact
+   `PUBLISH <jobId>`. Capture the stable note ID and URL from authenticated Creator.
    For `unverified_mov`, a Creator staging rejection must be reported as failed
-   without clicking Publish. If staging succeeds, the worker must still wait for
-   the existing exact `PUBLISH <jobId>` human approval before any Publish click;
-   it must never auto-publish.
-4. A claim with `status` `submitted`, `scheduled`, or `verification_pending`
+   without clicking Publish.
+5. A claim with `status` `submitted`, `scheduled`, or `verification_pending`
    is verification-only work and includes durable `noteId`, `shareUrl`,
    `verificationAttempts`, and `nextVerificationAt`. Never click Publish for
    these states. Query-free public error `300031`, processing, indexing delay, or
@@ -202,11 +210,11 @@ The local worker contract is:
    `verification_pending`, not failed. A scheduled job's first check is anchored
    after its frozen `publishAt`; an immediate submission's first check starts
    after the initial 15-minute delay.
-5. A claim with `status` `verified` is reconciliation-only work. It includes the
+6. A claim with `status` `verified` is reconciliation-only work. It includes the
    durable identifiers and must be re-reported as `verified` without dispatching
    or creating another post. This makes a Notion outage recoverable even after
    the original worker exits.
-6. `POST /api/local-publish-jobs/{id}/result` with the bearer token and
+7. `POST /api/local-publish-jobs/{id}/result` with the bearer token and
    `X-Local-Publish-Claim-Token: <claimToken>`. Accepted bodies are:
    - `{"status":"staged"}`
    - `{"status":"submitted","noteId":"...","shareUrl":"https://www.rednote.com/explore/..."}`
@@ -261,9 +269,10 @@ For the one-time bootstrap after the migration and application deploy:
    **Approve this exact manifest** once. Do not use the bootstrap action again for
    the same ready set.
 
-Deploy order: worker support for the `authorization` object (without enabling
-batch bypass), migration 008, this platform release plus `CRON_SECRET`, then enable
-the worker's bounded-batch bypass. Finally perform the bootstrap steps above.
+Deploy order: migration 008, this platform release plus `CRON_SECRET`, then worker
+support for strict `batchAuthorization` and reauthorization (without enabling
+bypass). Enable bounded-batch bypass only after both reauthorization checks succeed
+against production. Finally perform the bootstrap steps above.
 
 ### Already-published manual reconciliation
 

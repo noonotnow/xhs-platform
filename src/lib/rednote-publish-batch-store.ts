@@ -204,10 +204,7 @@ export async function approveStoredPublishBatch(
         )
         SELECT
           notion_page_id,
-          CASE
-            WHEN dispatch_mode = 'post_now' THEN snapshot - 'publishAt'
-            ELSE snapshot
-          END,
+          snapshot,
           gen_random_uuid(),
           id
         FROM approved_item
@@ -252,7 +249,6 @@ export async function approveStoredPublishBatch(
 }
 
 export async function invalidateStoredBatchItem(
-  batchItemId: string,
   jobId: string,
   claimToken: string,
   reason: string,
@@ -263,7 +259,7 @@ export async function invalidateStoredBatchItem(
       FROM local_publish_jobs
       WHERE id = ${jobId}::uuid
         AND claim_token = ${claimToken}::uuid
-        AND batch_item_id = ${batchItemId}::uuid
+        AND batch_item_id IS NOT NULL
         AND status IN ('claimed', 'staged')
     ), invalidated AS (
       UPDATE rednote_publish_batch_items

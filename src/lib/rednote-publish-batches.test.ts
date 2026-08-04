@@ -7,6 +7,7 @@ import {
   weeklyWindow,
 } from '@/lib/rednote-publish-batches';
 import type { ReadyXhsPost } from '@/types/ready-post';
+import { rednoteMediaIdentity } from '@/lib/rednote-publish-authorization';
 
 function post(publishAt?: string): ReadyXhsPost {
   return {
@@ -37,9 +38,21 @@ describe('bounded RedNote publish batches', () => {
       .toBe(manifestHash({ a: { c: 3, d: 4 }, b: 2 }));
   });
 
+  it('hashes the canonical media type and URL identity', () => {
+    expect(rednoteMediaIdentity({
+      type: 'video',
+      url: 'https://media.example/post.mp4',
+    })).toBe('6ca2ae08e649315bda395c0f4bed4dcc7051b9619a7b3803e6b290e4c664f520');
+  });
+
   it('requires an exact publish time and makes <=24h late conversion explicit', () => {
     const now = new Date('2026-08-04T13:00:00.000Z');
     expect(buildBatchItems([post()], 'bootstrap', now)).toEqual([]);
+    expect(buildBatchItems(
+      [post('2026-08-04T12:00:01.000Z')],
+      'bootstrap',
+      now,
+    )).toEqual([]);
     expect(buildBatchItems(
       [post('2026-08-04T12:00:00.000Z')],
       'bootstrap',

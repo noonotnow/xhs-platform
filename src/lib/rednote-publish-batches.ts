@@ -57,9 +57,17 @@ export function buildBatchSnapshot(post: ReadyXhsPost): LocalPublishSnapshot | n
   ) {
     return null;
   }
+  const publishAt = new Date(post.publishAt);
+  if (
+    Number.isNaN(publishAt.getTime()) ||
+    publishAt.getUTCSeconds() !== 0 ||
+    publishAt.getUTCMilliseconds() !== 0
+  ) {
+    return null;
+  }
   const media = primaryMedia(post);
   if (!media) return null;
-  return buildLocalPublishSnapshot(post, {
+  const snapshot = buildLocalPublishSnapshot(post, {
     notionPageId: post.id,
     lastEditedTime: post.lastEditedTime,
     confirmed: true,
@@ -69,6 +77,7 @@ export function buildBatchSnapshot(post: ReadyXhsPost): LocalPublishSnapshot | n
     tags: post.tags,
     media,
   });
+  return { ...snapshot, publishAt: publishAt.toISOString() };
 }
 
 function zonedParts(date: Date) {
