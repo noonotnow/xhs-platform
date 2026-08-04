@@ -77,6 +77,7 @@ in Vercel:
 | `LOCAL_PUBLISH_VERIFICATION_BACKOFF_SECONDS` | Optional four-value retry schedule; defaults to `900,3600,21600,86400` seconds (15m, 1h, 6h, 24h) |
 | `MANUAL_RECONCILIATION_LEASE_SECONDS` | Optional existing-post verification lease; defaults to 1800 seconds and is clamped to 60–7200 |
 | `MANUAL_RECONCILIATION_BACKOFF_SECONDS` | Optional four-value existing-post retry schedule; defaults to `900,3600,21600,86400` |
+| `CRON_SECRET` | Bearer secret used by the RedNote sweep endpoint and matching GitHub Actions repository secret |
 
 Database connections are selected in the order `XHS_DATABASE_URL`,
 `XHS_DATABASE_POSTGRES_URL`, `DATABASE_URL`, then `POSTGRES_URL`. The managed
@@ -172,19 +173,36 @@ The local worker contract is:
    `Authorization: Bearer <LOCAL_PUBLISH_WORKER_TOKEN>`. HTTP 204 means the queue
    is empty. A claim returns `id`, `notionPageId`, `headline`, `title`, `caption`,
    `tags`, `platform`, `mediaType`, `mediaUrl`, optional `thumbnailUrl`, optional
-   canonical UTC `publishAt`, `claimToken`, `claimExpiresAt`, and `status`.
-   `publishAt` is present exactly when Notion has `ScheduledDate`; its absence
-   means immediate mode after human approval. An unverified MOV trial additionally
+   canonical UTC `publishAt`, `claimToken`, `claimExpiresAt`,
+   and `status`. Unscheduled records can never enter a batch. An
+   unverified MOV trial additionally
    returns `"compatibilityTrial":"unverified_mov"`; normal jobs omit this field.
-2. A claim with `status` `claimed` or `staged` is dispatch work. Stage the asset
-   and reviewed copy at `https://creator.rednote.com`, report `staged`, wait for
-   explicit human approval, submit or schedule, and capture the exact stable note
-   ID and URL from authenticated Creator.
+2. Only batch-approved claims include `batchAuthorization`:
+   `{"batchId","manifestHash","itemHash","snapshotRevision",
+   "approvedState":"approved","approvedAt","media":{"url","type","identity"},
+   "publishAt","lateAction"}`. Hashes and `media.identity` are lowercase SHA-256;
+   the identity hashes canonical JSON `{type,url}`. `publishAt` always retains the
+   original exact canonical UTC minute. `lateAction:"post_now"` authorizes immediate
+   submission only when the approved preview recorded lateness of at most 24 hours;
+   `"schedule"` uses `publishAt`. Legacy claims omit `batchAuthorization` and retain
+   exact `PUBLISH <jobId>` approval.
+3. Before staging and immediately before clicking Publish, call
+   `GET /api/local-publish-jobs/<id>/authorization` with the worker bearer token and
+   `X-Local-Publish-Claim-Token`. It returns `{"job":<current strict claim>}` only
+   while the token, lease, source revision, hashes, approval, and frozen fields are
+   current. Treat 404 as unknown and 409 as stale, expired, revoked, drifted, or
+   unauthorized; do not publish. The check on a staged job durably consumes its
+   dispatch permit. If the worker exits after that point, the job is never
+   automatically dispatched again and must proceed through receipt recovery or
+   manual reconciliation.
+4. A claim with `status` `claimed` or `staged` is dispatch work. Stage the asset
+   and reviewed copy at `https://creator.rednote.com`, report `staged`, then submit
+   or schedule only after the required approval and second authorization check.
+   A valid bounded batch is that approval; a legacy claim still requires exact
+   `PUBLISH <jobId>`. Capture the stable note ID and URL from authenticated Creator.
    For `unverified_mov`, a Creator staging rejection must be reported as failed
-   without clicking Publish. If staging succeeds, the worker must still wait for
-   the existing exact `PUBLISH <jobId>` human approval before any Publish click;
-   it must never auto-publish.
-3. A claim with `status` `submitted`, `scheduled`, or `verification_pending`
+   without clicking Publish.
+5. A claim with `status` `submitted`, `scheduled`, or `verification_pending`
    is verification-only work and includes durable `noteId`, `shareUrl`,
    `verificationAttempts`, and `nextVerificationAt`. Never click Publish for
    these states. Query-free public error `300031`, processing, indexing delay, or
@@ -192,11 +210,11 @@ The local worker contract is:
    `verification_pending`, not failed. A scheduled job's first check is anchored
    after its frozen `publishAt`; an immediate submission's first check starts
    after the initial 15-minute delay.
-4. A claim with `status` `verified` is reconciliation-only work. It includes the
+6. A claim with `status` `verified` is reconciliation-only work. It includes the
    durable identifiers and must be re-reported as `verified` without dispatching
    or creating another post. This makes a Notion outage recoverable even after
    the original worker exits.
-5. `POST /api/local-publish-jobs/{id}/result` with the bearer token and
+7. `POST /api/local-publish-jobs/{id}/result` with the bearer token and
    `X-Local-Publish-Claim-Token: <claimToken>`. Accepted bodies are:
    - `{"status":"staged"}`
    - `{"status":"submitted","noteId":"...","shareUrl":"https://www.rednote.com/explore/..."}`
@@ -218,6 +236,49 @@ backfill advances the job to `reconciled`. If backfill fails, the row remains
 body `status:"succeeded"` remains accepted as a `verified` alias during rollout.
 `metrics_available` is a later sync concern and is not a publication-verification
 state.
+
+### Bounded batch approval and sweeps
+
+Apply `migrations/008_rednote_publish_batches.sql` before deploying code that
+serves batch APIs or worker claims. It creates immutable batch/item audit tables,
+links batch items to existing jobs, persists blocked-candidate accounting, and adds
+the durable sweep ledger. It does not touch Notion and must not be run automatically
+by the application.
+
+The admin batch preview shows every frozen title, caption, tags, canonical media
+URL/type, exact ScheduledDate instant, source revision, item hash, dispatch mode,
+and aggregate manifest hash. Approval stores the Cloudflare Access actor and
+timestamp. A source change invalidates only that item. Active unpublished records
+remain visible as `Needs publish time`, `Needs batch approval`, or their job state;
+an absent or date-only ScheduledDate is never interpreted as immediate publish.
+
+The hourly `.github/workflows/rednote-sweep.yml` workflow calls
+`/api/cron/rednote-sweep` using the `XHS_PLATFORM_URL` and `CRON_SECRET`
+repository secrets. The application uses
+`America/New_York`, not a fixed UTC offset, to run the daily 08:00 operational
+sweep and Sunday 18:00 weekly candidate for the following Monday-Sunday window.
+Sweeps never approve. Daily runs recover known receipts into verification,
+continue post-dispatch jobs through the existing verification lane, and create
+one catch-up candidate. Verification remains 15m, 1h, 6h, and 24h; RedNote
+`300031` stays `verification_pending` and is never dispatchable.
+
+For the one-time bootstrap after the migration and application deploy:
+
+1. Open `/admin`, refresh posts, and select **Build bootstrap batch**.
+2. Review every item and confirm each explicit `Post now — Nh late` conversion.
+   Items over 24 hours late, records without an exact time, and uncertified MOV
+   records remain visible in the preview as blocked and are not part of the
+   authorized manifest.
+3. Copy the displayed manifest hash into the change record, then select
+   **Approve this exact manifest** once. Do not use the bootstrap action again for
+   the same ready set.
+
+Deploy order: migration 008, this platform release plus `CRON_SECRET`, configure
+the workflow's `XHS_PLATFORM_URL` and matching `CRON_SECRET` repository secrets,
+then deploy worker support for strict `batchAuthorization` and reauthorization
+with bounded-batch bypass still disabled. Enable bypass only after both
+reauthorization checks succeed against production. Finally perform the bootstrap
+steps above.
 
 ### Already-published manual reconciliation
 

@@ -9,6 +9,7 @@ vi.mock('@/lib/db', () => ({ sql: mocks.sql }));
 import {
   claimNextStoredLocalPublishJob,
   completeStoredLocalPublishReconciliation,
+  consumeStoredDispatchAuthorization,
   deferStoredLocalPublishVerification,
   failStoredLocalPublishJob,
   insertLocalPublishJob,
@@ -112,7 +113,8 @@ describe('local publish atomic claim storage', () => {
 
     expect(query).toContain("status = 'queued'");
     expect(query).toContain("status = 'claimed' AND claim_expires_at <= CURRENT_TIMESTAMP");
-    expect(query).toContain("status = 'staged' AND claim_expires_at <= CURRENT_TIMESTAMP");
+    expect(query).toContain("status = 'staged'");
+    expect(query).toContain('dispatch_authorized_at IS NULL');
     expect(query).toContain("status IN ('submitted', 'scheduled', 'verification_pending')");
     expect(query).toContain('claim_expires_at IS NULL');
     expect(query).toContain('FOR UPDATE SKIP LOCKED');
@@ -126,6 +128,28 @@ describe('local publish atomic claim storage', () => {
       mediaUrl: snapshot.mediaUrl,
     });
     expect(claimed).not.toHaveProperty('notionLastEditedTime');
+    expect(claimed).not.toHaveProperty('snapshotRevision');
+  });
+
+  it('durably consumes a staged dispatch permit before the publish click', async () => {
+    mocks.sql.mockResolvedValue({
+      rows: [{
+        ...claimedRow(),
+        status: 'staged',
+        dispatch_authorized_at: '2026-08-01T12:06:00.000Z',
+      }],
+      rowCount: 1,
+    });
+
+    await expect(consumeStoredDispatchAuthorization(
+      claimedRow().id,
+      claimedRow().claim_token,
+    )).resolves.toMatchObject({ id: claimedRow().id, status: 'staged' });
+
+    const query = (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
+    expect(query).toContain('dispatch_authorized_at = COALESCE');
+    expect(query).toContain("status = 'staged'");
+    expect(query).toContain('claim_expires_at > CURRENT_TIMESTAMP');
   });
 
   it('preserves post-dispatch state and returns verification-only work', async () => {
@@ -316,7 +340,6 @@ describe('local publish atomic claim storage', () => {
     expect(query).toContain('next_verification_at <= claimed_at');
     expect(query).toContain('claim_expires_at = CURRENT_TIMESTAMP');
     expect(mocks.sql.mock.calls[0]).toEqual(expect.arrayContaining([
-      900,
       3_600,
       21_600,
       86_400,

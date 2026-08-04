@@ -7,6 +7,7 @@ import type {
   LocalPublishJobSummary,
   LocalPublishMediaType,
   ManualReconciliationSummary,
+  PublishBatch,
 } from '@/types/local-publish-job';
 import type { ReadyXhsPost, ReadyXhsPostsResponse } from '@/types/ready-post';
 import styles from './ReadyPostsPanel.module.css';
@@ -32,8 +33,28 @@ interface ApiError {
   code?: string;
 }
 
+interface PublishBatchesResponse extends ApiError {
+  batches: PublishBatch[];
+  batch?: PublishBatch | null;
+}
+
 interface LocalJobsResponse extends ApiError {
   jobs: LocalPublishJobSummary[];
+}
+
+function manualPublicPostError(value: string) {
+  const candidate = value.trim();
+  if (!candidate) return '';
+  if (/[?#]/.test(candidate) || /xsec_token|creator|manager/i.test(candidate)) {
+    return 'Remove all query, xsec_token, creator-manager, and fragment parameters. Use https://www.rednote.com/explore/NOTE_ID.';
+  }
+  if (
+    candidate.startsWith('http') &&
+    !/^https:\/\/www\.rednote\.com\/explore\/[A-Za-z0-9_-]+$/.test(candidate)
+  ) {
+    return 'Use the clean public URL format https://www.rednote.com/explore/NOTE_ID.';
+  }
+  return '';
 }
 
 interface LocalJobResponse extends ApiError {
@@ -82,8 +103,8 @@ function publishTiming(post: ReadyXhsPost) {
   }
   if (!post.publishAt) {
     return {
-      label: 'Immediate after approval',
-      detail: 'ScheduledDate is absent in Notion.',
+      label: 'Needs publish time',
+      detail: 'Set an exact ScheduledDate instant with timezone before batch approval.',
     };
   }
   return {
@@ -109,6 +130,7 @@ function jobStatusCopy(job: LocalPublishJobSummary | undefined) {
         : 'Waiting for the local browser worker. This post is not published.',
     };
   }
+
   if (job.status === 'claimed') {
     return {
       tone: movTrial ? 'warning' : 'pending',
@@ -177,6 +199,16 @@ function jobStatusCopy(job: LocalPublishJobSummary | undefined) {
   };
 }
 
+function dashboardState(job: LocalPublishJobSummary | undefined) {
+  if (!job) return undefined;
+  if (job.status === 'queued') return 'Queued';
+  if (job.status === 'claimed' || job.status === 'staged') return 'Scheduling';
+  if (job.status === 'submitted' || job.status === 'scheduled') return 'Scheduled/Submitted';
+  if (job.status === 'verification_pending' || job.status === 'verified') return 'Verifying';
+  if (job.status === 'reconciled') return 'Reconciled';
+  return 'Failed';
+}
+
 function manualReconciliationStatusCopy(
   reconciliation: ManualReconciliationSummary | undefined,
 ) {
@@ -222,6 +254,8 @@ function manualReconciliationStatusCopy(
 export default function ReadyPostsPanel() {
   const [posts, setPosts] = useState<ReadyXhsPost[]>([]);
   const [jobs, setJobs] = useState<LocalPublishJobSummary[]>([]);
+  const [batches, setBatches] = useState<PublishBatch[]>([]);
+  const [batchBusy, setBatchBusy] = useState(false);
   const [reconciliations, setReconciliations] = useState<ExternalReconciliationSummary[]>([]);
   const [reconciliationError, setReconciliationError] = useState('');
   const [manualReconciliations, setManualReconciliations] = useState<
@@ -251,6 +285,12 @@ export default function ReadyPostsPanel() {
     () => posts.find((post) => post.id === selectedId) ?? posts[0],
     [posts, selectedId],
   );
+  const activeUnpublishedPosts = useMemo(
+    () => posts.filter((post) => post.candidateKind === 'active_unpublished'),
+    [posts],
+  );
+  const pendingBatch = batches.find((batch) => batch.status === 'pending_approval');
+  const manualUrlError = manualPublicPostError(manualPublicPost);
   const packetReadyPosts = useMemo(
     () => posts.filter((post) => post.candidateKind === 'packet_ready'),
     [posts],
@@ -335,6 +375,18 @@ export default function ReadyPostsPanel() {
     }
   }, []);
 
+  const loadBatches = useCallback(async () => {
+    try {
+      const path = '/admin/api/publish-batches';
+      const response = await fetch(path, { cache: 'no-store' });
+      const data = await responseJson<PublishBatchesResponse>(response, `GET ${path}`);
+      if (!response.ok) throw new Error(data.error || 'Failed to load publish batches');
+      setBatches(data.batches);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Failed to load publish batches');
+    }
+  }, []);
+
   const loadJobs = useCallback(async (showError = false) => {
     try {
       const path = '/admin/api/local-publish-jobs';
@@ -402,16 +454,18 @@ export default function ReadyPostsPanel() {
     void loadJobs(true);
     void loadReconciliations();
     void loadManualReconciliations(true);
-  }, [loadJobs, loadManualReconciliations, loadPosts, loadReconciliations]);
+    void loadBatches();
+  }, [loadBatches, loadJobs, loadManualReconciliations, loadPosts, loadReconciliations]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
       void loadJobs();
       void loadReconciliations();
       void loadManualReconciliations();
+      void loadBatches();
     }, 10_000);
     return () => window.clearInterval(timer);
-  }, [loadJobs, loadManualReconciliations, loadReconciliations]);
+  }, [loadBatches, loadJobs, loadManualReconciliations, loadReconciliations]);
 
   useEffect(() => {
     setFinalTitle(selected?.headline ?? '');
@@ -432,7 +486,7 @@ export default function ReadyPostsPanel() {
   }, [selected]);
 
   async function queueSelected() {
-    if (!selected || !selectedMedia) return;
+    if (!selected || selected.candidateKind !== 'packet_ready' || !selectedMedia) return;
     const confirmed = window.confirm(
       isMovCompatibilityTrial
         ? `Queue "${finalTitle.trim()}" as an UNVERIFIED MOV COMPATIBILITY STAGING TRIAL?\n\n` +
@@ -482,6 +536,33 @@ export default function ReadyPostsPanel() {
       void loadJobs();
     } finally {
       setQueueing(false);
+    }
+  }
+
+  async function updateBatch(action: 'create' | 'approve') {
+      setBatchBusy(true);
+      setError('');
+      try {
+        const path = '/admin/api/publish-batches';
+        const response = await fetch(path, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(action === 'create'
+            ? { action, kind: 'bootstrap' }
+            : {
+                action,
+                batchId: pendingBatch?.id,
+                manifestHash: pendingBatch?.manifestHash,
+                confirmed: true,
+              }),
+        });
+        const data = await responseJson<PublishBatchesResponse>(response, `POST ${path}`);
+        if (!response.ok) throw new Error(data.error || 'Failed to update publish batch');
+        await Promise.all([loadBatches(), loadJobs()]);
+      } catch (batchError) {
+        setError(batchError instanceof Error ? batchError.message : 'Failed to update batch');
+      } finally {
+        setBatchBusy(false);
     }
   }
 
@@ -581,6 +662,8 @@ export default function ReadyPostsPanel() {
   function postButton(post: ReadyXhsPost) {
     const job = jobs.find((candidate) => candidate.notionPageId === post.id);
     const isTrialOnly = post.candidateKind === 'mov_compatibility_trial';
+    const batchItem = batches.flatMap((batch) => batch.items)
+      .find((item) => item.notionPageId === post.id);
     const trustedAssetCount = post.videoUrls.length +
       (post.compatibilityTrialVideoUrls?.length ?? 0) +
       post.imageUrls.length;
@@ -598,7 +681,17 @@ export default function ReadyPostsPanel() {
       >
         <span className={styles.postTitle}>{post.headline || 'Untitled post'}</span>
         <span className={isTrialOnly ? styles.trialRowLabel : styles.readyRowLabel}>
-          {isTrialOnly ? 'MOV staging trial only' : 'Packet ready'}
+          {isTrialOnly
+            ? 'MOV staging trial only'
+            : job
+              ? dashboardState(job)
+              : batchItem?.state === 'approved'
+                ? 'Approved'
+                : post.publishAt
+                  ? post.candidateKind === 'packet_ready'
+                    ? 'Needs batch approval'
+                    : 'Not ready'
+                  : 'Needs publish time'}
         </span>
         <span className={styles.postMeta}>
           {job ? `Local job: ${job.status}` : post.status || 'No status'} ·{' '}
@@ -632,6 +725,92 @@ export default function ReadyPostsPanel() {
         <p className={styles.muted}>Schema notices: {warnings.join(' · ')}</p>
       )}
 
+      <section className={styles.batchApproval} aria-labelledby="batch-approval-heading">
+        <div className={styles.queueHeading}>
+          <div>
+            <h3 id="batch-approval-heading">Bounded batch approval</h3>
+            <p>
+              One approval authorizes only the exact frozen items and manifest hash shown here.
+              Changed items are invalidated individually.
+            </p>
+          </div>
+          <button
+            className={styles.secondaryButton}
+            type="button"
+            disabled={batchBusy || Boolean(pendingBatch)}
+            onClick={() => void updateBatch('create')}
+          >
+            {batchBusy ? 'Working…' : 'Build bootstrap batch'}
+          </button>
+        </div>
+        {pendingBatch ? (
+          <>
+            <p className={styles.manifestHash}>
+              Manifest <code>{pendingBatch.manifestHash}</code>
+            </p>
+            <p className={styles.muted}>
+              {pendingBatch.items.length} approvable · {pendingBatch.blockedCandidates.length} blocked
+            </p>
+            <ol className={styles.batchItems}>
+              {pendingBatch.items.map((item) => (
+                <li key={item.id}>
+                  <strong>{item.snapshot.title}</strong>
+                  <span>
+                    {item.dispatchMode === 'post_now'
+                      ? `Post now — ${Math.ceil(item.lateBySeconds / 3600)}h late`
+                      : new Date(item.snapshot.publishAt!).toLocaleString()}
+                    {' · '}{item.snapshot.mediaType}
+                  </span>
+                  <small>{item.snapshot.caption}</small>
+                  <small>Tags: {item.snapshot.tags.join(', ') || 'None'}</small>
+                  <small>Media: {item.snapshot.mediaUrl}</small>
+                  <small>Source revision: {item.snapshot.notionLastEditedTime}</small>
+                  <code>{item.itemHash}</code>
+                </li>
+              ))}
+            </ol>
+            {pendingBatch.blockedCandidates.length > 0 && (
+              <>
+                <h4 className={styles.blockedBatchHeading}>
+                  Blocked candidates (not authorized by this manifest)
+                </h4>
+                <ol className={`${styles.batchItems} ${styles.blockedBatchItems}`}>
+                  {pendingBatch.blockedCandidates.map((candidate) => (
+                    <li key={candidate.notionPageId}>
+                      <strong>{candidate.headline}</strong>
+                      <span>
+                        {candidate.publishAt
+                          ? new Date(candidate.publishAt).toLocaleString()
+                          : 'Needs publish time'}
+                      </span>
+                      <small>{candidate.reason}</small>
+                    </li>
+                  ))}
+                </ol>
+              </>
+            )}
+            <button
+              className={styles.queueButton}
+              type="button"
+              disabled={batchBusy}
+              onClick={() => {
+                if (window.confirm(
+                  `Approve exactly ${pendingBatch.items.length} frozen item(s)?\n\nManifest ${pendingBatch.manifestHash}`,
+                )) {
+                  void updateBatch('approve');
+                }
+              }}
+            >
+              Approve this exact manifest
+            </button>
+          </>
+        ) : (
+          <p className={styles.muted}>
+            No batch is awaiting approval. Posts without exact times stay visible but are excluded.
+          </p>
+        )}
+      </section>
+
       {loading && posts.length === 0 ? (
         <p className={styles.empty}>Loading publish-ready posts…</p>
       ) : posts.length === 0 ? (
@@ -653,6 +832,13 @@ export default function ReadyPostsPanel() {
                 <h3 id="mov-trial-group">MOV staging trials</h3>
                 <p>Unverified, media-blocked records for Creator staging only.</p>
                 {movTrialPosts.map(postButton)}
+              </section>
+            )}
+            {activeUnpublishedPosts.length > 0 && (
+              <section className={styles.candidateGroup} aria-labelledby="active-unpublished-group">
+                <h3 id="active-unpublished-group">Active unpublished</h3>
+                <p>Visible for repair; incomplete records cannot enter a batch.</p>
+                {activeUnpublishedPosts.map(postButton)}
               </section>
             )}
           </div>
@@ -810,6 +996,11 @@ export default function ReadyPostsPanel() {
                             Use the exact query-free public URL or bare note ID. The worker verifies
                             it against the canonical title, caption, and media type.
                           </small>
+                          {manualUrlError && (
+                            <small className={styles.inlineError} role="alert">
+                              {manualUrlError}
+                            </small>
+                          )}
                         </label>
                         <label className={styles.confirmation}>
                           <input
@@ -830,7 +1021,8 @@ export default function ReadyPostsPanel() {
                           disabled={
                             manualSubmitting ||
                             !manualConfirmed ||
-                            !manualPublicPost.trim()
+                            !manualPublicPost.trim() ||
+                            Boolean(manualUrlError)
                           }
                         >
                           {manualSubmitting
@@ -932,7 +1124,9 @@ export default function ReadyPostsPanel() {
                     hasActiveManualReconciliation ||
                     (isMovCompatibilityTrial
                       ? !movTrialIsEligible
-                      : selected.publishBlockers.length > 0) ||
+                      : selected.candidateKind !== 'packet_ready' ||
+                        selected.publishBlockers.length > 0 ||
+                        !selected.publishAt) ||
                     !selectedMedia ||
                     !finalTitle.trim() ||
                     !finalCaption.trim()
@@ -952,9 +1146,9 @@ export default function ReadyPostsPanel() {
                   </p>
                 )}
                 <p className={styles.queueNotice}>
-                  Queueing and browser staging are not publication. The worker must wait for
-                  explicit human approval, verify the exact live post, and report its note ID
-                  before this record can become Published.
+                  Bounded-batch jobs carry their approved manifest and may be scheduled
+                  sequentially without per-job approval. Legacy and MOV trial jobs still require
+                  exact per-job approval.
                 </p>
               </section>
 

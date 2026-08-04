@@ -83,12 +83,12 @@ describe('local publish job input', () => {
     expect(snapshot.tags).toEqual(['Legacy', '旧标签']);
   });
 
-  it('omits publishAt only when ScheduledDate is absent', () => {
+  it('rejects normal queueing when ScheduledDate is absent', () => {
     const parsed = parseQueueLocalPublishInput(input());
-    expect(buildLocalPublishSnapshot(
+    expect(() => buildLocalPublishSnapshot(
       readyPost({ publishAt: undefined }),
       parsed,
-    )).not.toHaveProperty('publishAt');
+    )).toThrow('exact time and timezone');
     expect(buildLocalPublishSnapshot(readyPost(), parsed).publishAt)
       .toBe('2026-08-04T13:30:00.000Z');
   });

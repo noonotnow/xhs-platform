@@ -1,0 +1,26 @@
+name: RedNote sweep
+
+on:
+  schedule:
+    - cron: '7 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: rednote-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Run due RedNote sweeps
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          XHS_PLATFORM_URL: ${{ secrets.XHS_PLATFORM_URL }}
+        run: |
+          test -n "$CRON_SECRET"
+          test -n "$XHS_PLATFORM_URL"
+          curl --fail-with-body --retry 2 --retry-all-errors --max-time 60 \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            "${XHS_PLATFORM_URL%/}/api/cron/rednote-sweep"

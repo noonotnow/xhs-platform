@@ -2,11 +2,13 @@ import type { QueryResultRow } from 'pg';
 import { isDeepStrictEqual } from 'util';
 import { sql } from '@/lib/db';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
+import { rednoteMediaIdentity } from '@/lib/rednote-publish-authorization';
 import type {
   ClaimedLocalPublishJob,
   LocalPublishJobStatus,
   LocalPublishJobSummary,
   LocalPublishSnapshot,
+  BatchAuthorization,
   LocalPublishWorkLane,
 } from '@/types/local-publish-job';
 
@@ -33,6 +35,8 @@ interface LocalPublishJobRow extends QueryResultRow {
   created_at: Date | string;
   updated_at: Date | string;
   completed_at: Date | string | null;
+  batch_item_id?: string | null;
+  dispatch_authorized_at?: Date | string | null;
 }
 
 export interface StoredLocalPublishJob {
@@ -56,6 +60,7 @@ export interface StoredLocalPublishJob {
   verifiedAt?: string;
   reconciledAt?: string;
   completedAt?: string;
+  batchAuthorization?: BatchAuthorization;
 }
 
 function timestamp(value: Date | string) {
@@ -275,7 +280,11 @@ export async function claimNextStoredLocalPublishJob(
         AND (
           status = 'queued'
           OR (status = 'claimed' AND claim_expires_at <= CURRENT_TIMESTAMP)
-          OR (status = 'staged' AND claim_expires_at <= CURRENT_TIMESTAMP)
+          OR (
+            status = 'staged'
+            AND dispatch_authorized_at IS NULL
+            AND claim_expires_at <= CURRENT_TIMESTAMP
+          )
         )
       )
         OR (
@@ -326,7 +335,78 @@ export async function claimNextStoredLocalPublishJob(
   `;
   const row = result.rows[0];
   if (!row?.claim_token || !row.claim_expires_at) return null;
+  return claimedResponse(row);
+}
+
+async function claimedResponse(row: LocalPublishJobRow): Promise<ClaimedLocalPublishJob> {
+  if (!row.claim_token || !row.claim_expires_at) {
+    throw new LocalPublishJobError(
+      'The local publish job does not have a current claim',
+      'STALE_CLAIM',
+      409,
+    );
+  }
   const job = mapRow(row);
+  if (row.batch_item_id) {
+    const authorization = await sql<{
+      batch_id: string;
+      batch_item_id: string;
+      manifest_hash: string;
+      item_hash: string;
+      approved_at: Date | string;
+      dispatch_mode: 'scheduled' | 'post_now';
+    }>`
+      SELECT
+        batch.id AS batch_id,
+        item.id AS batch_item_id,
+        batch.manifest_hash,
+        item.item_hash,
+        batch.approved_at,
+        item.dispatch_mode
+      FROM rednote_publish_batch_items AS item
+      JOIN rednote_publish_batches AS batch ON batch.id = item.batch_id
+      WHERE item.id = ${row.batch_item_id}::uuid
+        AND item.state IN (
+          'queued', 'claimed', 'staged', 'submitted', 'scheduled',
+          'verification_pending', 'verified'
+        )
+        AND batch.approved_at IS NOT NULL
+      LIMIT 1
+    `;
+    const approved = authorization.rows[0];
+    if (!approved) {
+      throw new LocalPublishJobError(
+        'The bounded batch authorization is missing or invalid',
+        'INVALID_BATCH_AUTHORIZATION',
+        409,
+      );
+    }
+    if (!job.snapshot.publishAt) {
+      throw new LocalPublishJobError(
+        'A bounded batch job is missing its frozen publish time',
+        'INVALID_BATCH_AUTHORIZATION',
+        409,
+      );
+    }
+    job.batchAuthorization = {
+      batchId: approved.batch_id,
+      manifestHash: approved.manifest_hash,
+      itemHash: approved.item_hash,
+      snapshotRevision: job.snapshot.notionLastEditedTime,
+      approvedState: 'approved',
+      approvedAt: timestamp(approved.approved_at),
+      media: {
+        url: job.snapshot.mediaUrl,
+        type: job.snapshot.mediaType,
+        identity: rednoteMediaIdentity({
+          type: job.snapshot.mediaType,
+          url: job.snapshot.mediaUrl,
+        }),
+      },
+      publishAt: job.snapshot.publishAt,
+      lateAction: approved.dispatch_mode === 'post_now' ? 'post_now' : 'schedule',
+    };
+  }
   const base = {
     id: job.id,
     status: job.status,
@@ -345,6 +425,7 @@ export async function claimNextStoredLocalPublishJob(
     ...(job.snapshot.publishAt ? { publishAt: job.snapshot.publishAt } : {}),
     claimToken: row.claim_token,
     claimExpiresAt: timestamp(row.claim_expires_at),
+    ...(job.batchAuthorization ? { batchAuthorization: job.batchAuthorization } : {}),
   };
   if (
     job.status === 'submitted' ||
@@ -384,6 +465,48 @@ export async function claimNextStoredLocalPublishJob(
     };
   }
   return { ...base, status: job.status as 'claimed' | 'staged' };
+}
+
+export async function authorizeStoredLocalPublishJob(id: string, claimToken: string) {
+  const result = await sql<LocalPublishJobRow>`
+    SELECT *
+    FROM local_publish_jobs
+    WHERE id = ${id}::uuid
+      AND claim_token = ${claimToken}::uuid
+      AND claim_expires_at > CURRENT_TIMESTAMP
+      AND status IN (
+        'claimed', 'staged', 'submitted', 'scheduled',
+        'verification_pending', 'verified'
+      )
+    LIMIT 1
+  `;
+  if (result.rows[0]) return claimedResponse(result.rows[0]);
+  await loadResultJob(id);
+  throw new LocalPublishJobError(
+    'The local publish claim is stale, expired, or revoked',
+    'STALE_CLAIM',
+    409,
+  );
+}
+
+export async function consumeStoredDispatchAuthorization(id: string, claimToken: string) {
+  const result = await sql<LocalPublishJobRow>`
+    UPDATE local_publish_jobs
+    SET dispatch_authorized_at = COALESCE(dispatch_authorized_at, CURRENT_TIMESTAMP),
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ${id}::uuid
+      AND claim_token = ${claimToken}::uuid
+      AND status = 'staged'
+      AND claim_expires_at > CURRENT_TIMESTAMP
+    RETURNING *
+  `;
+  if (result.rows[0]) return claimedResponse(result.rows[0]);
+  await loadResultJob(id);
+  throw new LocalPublishJobError(
+    'The staged dispatch authorization is stale, expired, or revoked',
+    'STALE_CLAIM',
+    409,
+  );
 }
 
 async function loadResultJob(id: string) {
@@ -506,9 +629,8 @@ export async function deferStoredLocalPublishVerification(
         verification_attempts = verification_attempts + 1,
         next_verification_at = CURRENT_TIMESTAMP + (
           CASE LEAST(verification_attempts, 3)
-            WHEN 0 THEN ${backoffSeconds[0]}
-            WHEN 1 THEN ${backoffSeconds[1]}
-            WHEN 2 THEN ${backoffSeconds[2]}
+            WHEN 0 THEN ${backoffSeconds[1]}
+            WHEN 1 THEN ${backoffSeconds[2]}
             ELSE ${backoffSeconds[3]}
           END * INTERVAL '1 second'
         ),

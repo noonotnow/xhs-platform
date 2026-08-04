@@ -50,11 +50,69 @@ export interface LocalPublishJobSummary {
   completedAt?: string;
 }
 
+export interface BatchAuthorization {
+  batchId: string;
+  manifestHash: string;
+  itemHash: string;
+  snapshotRevision: string;
+  approvedState: 'approved';
+  approvedAt: string;
+  media: {
+    url: string;
+    type: LocalPublishMediaType;
+    identity: string;
+  };
+  publishAt: string;
+  lateAction: 'schedule' | 'post_now';
+}
+
 interface ClaimedLocalPublishJobBase
   extends Omit<LocalPublishSnapshot, 'mediaIndex' | 'notionLastEditedTime'> {
   id: string;
   claimToken: string;
   claimExpiresAt: string;
+  batchAuthorization?: BatchAuthorization;
+}
+
+export type PublishBatchKind = 'weekly' | 'catch_up' | 'bootstrap';
+export type PublishBatchStatus = 'pending_approval' | 'approved' | 'partially_approved';
+export type PublishBatchItemState =
+  | 'needs_approval'
+  | 'approved'
+  | 'invalidated'
+  | LocalPublishJobStatus;
+
+export interface PublishBatchItem {
+  id: string;
+  notionPageId: string;
+  snapshot: LocalPublishSnapshot;
+  itemHash: string;
+  state: PublishBatchItemState;
+  dispatchMode: 'scheduled' | 'post_now';
+  lateBySeconds: number;
+  invalidationReason?: string;
+  localPublishJobId?: string;
+}
+
+export interface PublishBatchBlockedCandidate {
+  notionPageId: string;
+  headline: string;
+  publishAt?: string;
+  reason: string;
+}
+
+export interface PublishBatch {
+  id: string;
+  kind: PublishBatchKind;
+  status: PublishBatchStatus;
+  manifestHash: string;
+  windowStart?: string;
+  windowEnd?: string;
+  createdAt: string;
+  approvedAt?: string;
+  approvedBy?: string;
+  items: PublishBatchItem[];
+  blockedCandidates: PublishBatchBlockedCandidate[];
 }
 
 export type ClaimedLocalPublishJob =

@@ -148,6 +148,13 @@ export function buildLocalPublishSnapshot(
     );
   }
   const compatibilityTrial = input.compatibilityTrialConfirmed;
+  if (!compatibilityTrial && !post.publishAt) {
+    throw new LocalPublishJobError(
+      'Post cannot be queued until ScheduledDate contains an exact time and timezone',
+      'PUBLISH_TIME_REQUIRED',
+      422,
+    );
+  }
   if (!compatibilityTrial && post.publishBlockers.length > 0) {
     throw new LocalPublishJobError(
       `Post cannot be queued: ${post.publishBlockers.join('; ')}`,

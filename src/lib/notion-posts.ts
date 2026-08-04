@@ -377,10 +377,10 @@ function isUnpublishedRednotePost(page: PageObjectResponse, schema: ResolvedSche
   return isRednote && normalized(plainText(property(page, schema, 'status'))) !== 'published';
 }
 
-export function classifyReadyPostCandidate(post: XhsPost): ReadyPostCandidateKind | null {
+export function classifyReadyPostCandidate(post: XhsPost): ReadyPostCandidateKind {
   if (post.publishPacketReady) return 'packet_ready';
   if (isMovCompatibilityTrialEligible(post)) return 'mov_compatibility_trial';
-  return null;
+  return 'active_unpublished';
 }
 
 export function toReadyPostCandidate(
@@ -397,7 +397,7 @@ export function toReadyPostCandidate(
   ) {
     return null;
   }
-  return candidateKind ? { ...post, candidateKind } : null;
+  return { ...post, candidateKind };
 }
 
 function assertPageId(pageId: string) {
@@ -462,14 +462,12 @@ export async function queryReadyCandidatePages(
   properties: PropertyMap,
   databaseId = getDatabaseId(),
 ) {
-  const filter = buildReadyPostCandidatesQueryFilter(
-    schema.publishPacketReady,
-    schema.publishPacketReady
-      ? properties[schema.publishPacketReady]?.type
-      : undefined,
-    schema.mediaUrls,
-    schema.mediaUrls ? properties[schema.mediaUrls]?.type : undefined,
-  );
+  const statusType = schema.status ? properties[schema.status]?.type : undefined;
+  const filter: DatabaseFilter | undefined = schema.status && statusType === 'status'
+    ? { property: schema.status, status: { does_not_equal: 'Published' } }
+    : schema.status && statusType === 'select'
+      ? { property: schema.status, select: { does_not_equal: 'Published' } }
+      : undefined;
   const response: QueryDatabaseResponse = await client.databases.query({
     database_id: databaseId,
     page_size: 100,
@@ -478,10 +476,7 @@ export async function queryReadyCandidatePages(
   });
   if (response.has_more) {
     throw new NotionPostsError(
-      filter
-        ? 'More than 100 ready or MOV trial candidates were found; reduce the queue before retrying'
-        : 'The Posts schema requires a bounded candidate scan, but more than 100 records matched; ' +
-          'restore checkbox/rich-text query fields or reduce the database before retrying',
+      'More than 100 active Posts records were found; reduce or archive the database before retrying',
       'READY_POSTS_LIMIT_EXCEEDED',
       503,
     );
