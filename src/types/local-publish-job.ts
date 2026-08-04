@@ -96,6 +96,26 @@ export interface PublishBatchItem {
   lateBySeconds: number;
   invalidationReason?: string;
   localPublishJobId?: string;
+  recoveryEvidence?: RednotePublishJobRecoveryEvidence;
+}
+
+export interface RednotePublishJobRecoveryEvidence {
+  batchId: string;
+  manifestHash: string;
+  itemId: string;
+  jobId: string;
+  itemHash: string;
+  snapshotRevision: string;
+  priorErrorCode: 'BOUNDED_BATCH_BYPASS_DISABLED';
+}
+
+export interface RednotePublishJobRecovery
+  extends Omit<RednotePublishJobRecoveryEvidence, 'priorErrorCode'> {
+  id: string;
+  approvedAt: string;
+  recoveredBy: string;
+  recoveredAt: string;
+  alreadyRecovered: boolean;
 }
 
 export interface PublishBatchBlockedCandidate {

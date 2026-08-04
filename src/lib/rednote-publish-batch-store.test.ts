@@ -20,6 +20,7 @@ vi.mock('@/lib/db', () => ({
 import {
   approveStoredPublishBatch,
   createStoredPublishBatch,
+  listStoredPublishBatches,
 } from '@/lib/rednote-publish-batch-store';
 import type {
   LocalPublishSnapshot,
@@ -53,8 +54,8 @@ function batchRow(
     candidate_report: [],
     window_start: null,
     window_end: null,
-    approved_at: null,
-    approved_by: null,
+    approved_at: status === 'approved' ? '2026-08-04T17:03:59.881Z' : null,
+    approved_by: status === 'approved' ? 'operator@example.com' : null,
     superseded_at: status === 'superseded'
       ? '2026-08-04T16:00:00.000Z'
       : null,
@@ -222,5 +223,74 @@ describe('stored RedNote bootstrap replacement', () => {
     });
     expect(mocks.query.mock.calls.map(([statement]) => String(statement)))
       .toContain('COMMIT');
+  });
+
+  it('exposes recovery evidence only for the exact safe bypass-disabled failure', async () => {
+    const batchId = '22222222-2222-4222-8222-222222222222';
+    const itemId = '44444444-4444-4444-8444-444444444444';
+    const jobId = '55555555-5555-4555-8555-555555555555';
+    const hash = 'a'.repeat(64);
+    const item = {
+      id: itemId,
+      batch_id: batchId,
+      notion_page_id: snapshot.notionPageId,
+      snapshot,
+      item_hash: hash,
+      state: 'failed',
+      dispatch_mode: 'scheduled',
+      late_by_seconds: 0,
+      invalidation_reason: null,
+      local_publish_job_id: jobId,
+      recovery_job_id: jobId,
+      recovery_job_status: 'failed',
+      recovery_job_error_code: 'BOUNDED_BATCH_BYPASS_DISABLED',
+      recovery_job_snapshot: snapshot,
+      recovery_staged_at: null,
+      recovery_dispatch_authorized_at: null,
+      recovery_dispatched_at: null,
+      recovery_note_id: null,
+      recovery_share_url: null,
+      recovery_next_verification_at: null,
+      recovery_verified_at: null,
+      recovery_reconciled_at: null,
+      recovery_verification_attempts: 0,
+      recovery_audit_id: null,
+      recovery_no_active_ownership: true,
+    };
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [batchRow(batchId, 'approved', hash)] })
+      .mockResolvedValueOnce({ rows: [item] });
+    await expect(listStoredPublishBatches(batchId)).resolves.toMatchObject([{
+      items: [{
+        recoveryEvidence: {
+          batchId,
+          itemId,
+          jobId,
+          manifestHash: hash,
+          itemHash: hash,
+          snapshotRevision: snapshot.notionLastEditedTime,
+          priorErrorCode: 'BOUNDED_BATCH_BYPASS_DISABLED',
+        },
+      }],
+    }]);
+
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [batchRow(batchId, 'approved', hash)] })
+      .mockResolvedValueOnce({
+        rows: [{ ...item, recovery_job_error_code: 'STAGING_FAILED' }],
+      });
+    const unsafe = await listStoredPublishBatches(batchId);
+    expect(unsafe[0].items[0].recoveryEvidence).toBeUndefined();
+
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [batchRow(batchId, 'approved', hash)] })
+      .mockResolvedValueOnce({
+        rows: [{
+          ...item,
+          recovery_audit_id: '66666666-6666-4666-8666-666666666666',
+        }],
+      });
+    const alreadyAudited = await listStoredPublishBatches(batchId);
+    expect(alreadyAudited[0].items[0].recoveryEvidence).toBeUndefined();
   });
 });

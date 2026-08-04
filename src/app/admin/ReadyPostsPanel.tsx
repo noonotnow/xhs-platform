@@ -8,6 +8,8 @@ import type {
   LocalPublishMediaType,
   ManualReconciliationSummary,
   PublishBatch,
+  RednotePublishJobRecovery,
+  RednotePublishJobRecoveryEvidence,
 } from '@/types/local-publish-job';
 import type { ReadyXhsPost, ReadyXhsPostsResponse } from '@/types/ready-post';
 import styles from './ReadyPostsPanel.module.css';
@@ -40,6 +42,10 @@ interface PublishBatchesResponse extends ApiError {
 
 interface LocalJobsResponse extends ApiError {
   jobs: LocalPublishJobSummary[];
+}
+
+interface PublishJobRecoveryResponse extends ApiError {
+  recovery: RednotePublishJobRecovery;
 }
 
 function manualPublicPostError(value: string) {
@@ -256,6 +262,7 @@ export default function ReadyPostsPanel() {
   const [jobs, setJobs] = useState<LocalPublishJobSummary[]>([]);
   const [batches, setBatches] = useState<PublishBatch[]>([]);
   const [batchBusy, setBatchBusy] = useState(false);
+  const [recoveryBusyJobId, setRecoveryBusyJobId] = useState('');
   const [reconciliations, setReconciliations] = useState<ExternalReconciliationSummary[]>([]);
   const [reconciliationError, setReconciliationError] = useState('');
   const [manualReconciliations, setManualReconciliations] = useState<
@@ -294,6 +301,8 @@ export default function ReadyPostsPanel() {
   const supersededBatches = batches
     .filter((batch) => batch.kind === 'bootstrap' && batch.status === 'superseded')
     .slice(0, 3);
+  const recoverableBatches = batches.filter((batch) =>
+    batch.items.some((item) => item.recoveryEvidence));
   const manualUrlError = manualPublicPostError(manualPublicPost);
   const packetReadyPosts = useMemo(
     () => posts.filter((post) => post.candidateKind === 'packet_ready'),
@@ -570,6 +579,59 @@ export default function ReadyPostsPanel() {
     }
   }
 
+  async function recoverApprovedJob(
+    evidence: RednotePublishJobRecoveryEvidence,
+    title: string,
+  ) {
+    const confirmed = window.confirm(
+      `Requeue the exact already-approved job for "${title}"?\n\n` +
+      `Job ${evidence.jobId}\n` +
+      `Batch ${evidence.batchId}\n` +
+      `Item ${evidence.itemId}\n` +
+      `Manifest ${evidence.manifestHash}\n` +
+      `Item hash ${evidence.itemHash}\n` +
+      `Source revision ${evidence.snapshotRevision}\n\n` +
+      'This preserves the same job, frozen snapshot, hashes, publish time, and original approval. ' +
+      'It does not approve again or create a replacement job.',
+    );
+    if (!confirmed) return;
+    setRecoveryBusyJobId(evidence.jobId);
+    setError('');
+    try {
+      const path = '/admin/api/publish-job-recoveries';
+      const exactEvidence = {
+        batchId: evidence.batchId,
+        manifestHash: evidence.manifestHash,
+        itemId: evidence.itemId,
+        jobId: evidence.jobId,
+        itemHash: evidence.itemHash,
+        snapshotRevision: evidence.snapshotRevision,
+      };
+      const response = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...exactEvidence, confirmed: true }),
+      });
+      const data = await responseJson<PublishJobRecoveryResponse>(
+        response,
+        `POST ${path}`,
+      );
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to recover approved publish job');
+      }
+      await Promise.all([loadBatches(), loadJobs()]);
+    } catch (recoveryError) {
+      setError(
+        recoveryError instanceof Error
+          ? recoveryError.message
+          : 'Failed to recover approved publish job',
+      );
+      await Promise.all([loadBatches(), loadJobs()]);
+    } finally {
+      setRecoveryBusyJobId('');
+    }
+  }
+
   async function reconcileSelected() {
       if (!selected || !manualConfirmed || !manualPublicPost.trim()) return;
       const idempotencyKey =
@@ -829,6 +891,50 @@ export default function ReadyPostsPanel() {
                 ? ' The replacement manifest is shown above.'
                 : ' Refresh to load its replacement manifest.'}
             </p>
+          </div>
+        ))}
+        {recoverableBatches.map((batch) => (
+          <div key={`recovery-${batch.id}`} className={styles.recoveryBatch}>
+            <strong>Eligible pre-dispatch recovery</strong>
+            <p>
+              These exact jobs failed only because bounded-batch bypass was disabled.
+              Recovery requeues the existing approved row without another approval.
+            </p>
+            <small>
+              Original approval: {batch.approvedAt
+                ? new Date(batch.approvedAt).toLocaleString()
+                : 'Missing'} by {batch.approvedBy || 'unknown'}
+            </small>
+            <ol className={styles.batchItems}>
+              {batch.items.flatMap((item) => item.recoveryEvidence ? [(
+                <li key={item.id}>
+                  <strong>{item.snapshot.title}</strong>
+                  <small>Job: <code>{item.recoveryEvidence.jobId}</code></small>
+                  <small>Batch item: <code>{item.id}</code></small>
+                  <small>Manifest: <code>{batch.manifestHash}</code></small>
+                  <small>Item hash: <code>{item.itemHash}</code></small>
+                  <small>
+                    Source revision: <code>{item.snapshot.notionLastEditedTime}</code>
+                  </small>
+                  <small>
+                    Original publish time: <code>{item.snapshot.publishAt}</code>
+                  </small>
+                  <button
+                    className={styles.recoveryButton}
+                    type="button"
+                    disabled={Boolean(recoveryBusyJobId)}
+                    onClick={() => void recoverApprovedJob(
+                      item.recoveryEvidence!,
+                      item.snapshot.title,
+                    )}
+                  >
+                    {recoveryBusyJobId === item.recoveryEvidence.jobId
+                      ? 'Requeueing exact job…'
+                      : 'Confirm exact-job recovery'}
+                  </button>
+                </li>
+              )] : [])}
+            </ol>
           </div>
         ))}
       </section>

@@ -287,6 +287,65 @@ with bounded-batch bypass still disabled. Enable bypass only after both
 reauthorization checks succeed against production. Finally perform the bootstrap
 steps above.
 
+#### Recovering a bypass-disabled approved job
+
+`migrations/010_rednote_publish_job_recoveries.sql` adds an append-only recovery
+audit. It is the only supported recovery for a bounded job that terminal-failed
+with exact error `BOUNDED_BATCH_BYPASS_DISABLED` before staging or dispatch. It
+updates the original `local_publish_jobs` row back to `queued`; it does not create
+a job, replace an item, rebuild or approve a manifest, change the frozen snapshot
+or publish time, or change the original batch approval.
+
+Use this deployment and operator sequence exactly:
+
+1. Leave the worker's bounded-batch bypass disabled and stop before any recovery
+   action.
+2. Apply the additive migration to the application database with the unpooled
+   migration connection:
+
+   ```bash
+   psql "$XHS_DATABASE_POSTGRES_URL_NON_POOLING" -v ON_ERROR_STOP=1 \
+     -f migrations/010_rednote_publish_job_recoveries.sql
+   ```
+
+3. Deploy the platform release containing the recovery API and UI. Do not rebuild,
+   supersede, or approve a batch and do not create a replacement job.
+4. In `/admin`, refresh **Bounded batch approval**. **Eligible pre-dispatch
+   recovery** appears only when the approved batch, two-way item/job linkage,
+   immutable snapshots, manifest/item hashes, source revision, exact error,
+   pre-dispatch null evidence, and absence of alternate ownership still match.
+5. Compare every displayed job, batch, item, manifest hash, item hash, source
+   revision, and original publish time with the approved change record. Select
+   **Confirm exact-job recovery** once for each intended item and accept the
+   confirmation that no second approval or replacement job is created.
+6. A created response writes one immutable audit row and moves the same job and
+   item to `queued`. An exact repeated request is idempotent only while that job is
+   still safely queued; a changed request or a job already claimed by a worker
+   fails closed.
+
+The authenticated action is
+`POST /admin/api/publish-job-recoveries` with exactly:
+
+```json
+{
+  "batchId": "uuid",
+  "manifestHash": "64-character lowercase SHA-256",
+  "itemId": "uuid",
+  "jobId": "uuid",
+  "itemHash": "64-character lowercase SHA-256",
+  "snapshotRevision": "canonical UTC timestamp",
+  "confirmed": true
+}
+```
+
+The action accepts only an allowlisted Cloudflare Access operator. It records that
+operator and the recovery time in `rednote_publish_job_recoveries`. Never call it
+for a different error, after staging/authorization/dispatch/publication evidence,
+for an unapproved or superseded batch, or while another publish or reconciliation
+lifecycle owns the post. Because an in-flight external reconciliation has no
+canonical page ID until it succeeds, any `processing` external reconciliation
+conservatively blocks recovery until it finishes.
+
 ### Already-published manual reconciliation
 
 XHS Admin owns reconciliation for a post that an operator published manually.

@@ -77,6 +77,21 @@
   border-radius: 8px;
 }
 
+.recoveryBatch {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  color: #7c2d12;
+  background: #fff7ed;
+  border: 1px solid #fb923c;
+  border-radius: 8px;
+}
+
+.recoveryBatch p {
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
 .headingRow,
 .statusRow,
 .actionRow {
@@ -123,7 +138,8 @@
 
 .reconcileButton,
 .retryButton,
-.reconcileSubmit {
+.reconcileSubmit,
+.recoveryButton {
   min-height: 40px;
   border-radius: 8px;
   font: inherit;
@@ -152,9 +168,24 @@
 .reconcileButton:focus-visible,
 .retryButton:focus-visible,
 .reconcileSubmit:focus-visible,
+.recoveryButton:focus-visible,
 .experimental summary:focus-visible {
   outline: 3px solid rgba(124, 58, 237, 0.28);
   outline-offset: 2px;
+}
+
+.recoveryButton {
+  justify-self: start;
+  margin-top: 6px;
+  padding: 8px 12px;
+  color: #fff;
+  background: #c2410c;
+  border: 1px solid #9a3412;
+}
+
+.recoveryButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
 }
 
 .workspace {

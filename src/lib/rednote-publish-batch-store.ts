@@ -1,6 +1,8 @@
 import type { QueryResultRow } from 'pg';
 import { createHash } from 'crypto';
+import { isDeepStrictEqual } from 'util';
 import { getPool, sql } from '@/lib/db';
+import { RECOVERABLE_BOUNDED_BATCH_ERROR } from '@/lib/rednote-publish-job-recovery';
 import type {
   LocalPublishSnapshot,
   PublishBatch,
@@ -45,6 +47,21 @@ interface ItemRow extends QueryResultRow {
   late_by_seconds: number;
   invalidation_reason: string | null;
   local_publish_job_id: string | null;
+  recovery_job_id?: string | null;
+  recovery_job_status?: string | null;
+  recovery_job_error_code?: string | null;
+  recovery_job_snapshot?: LocalPublishSnapshot | null;
+  recovery_staged_at?: Date | string | null;
+  recovery_dispatch_authorized_at?: Date | string | null;
+  recovery_dispatched_at?: Date | string | null;
+  recovery_note_id?: string | null;
+  recovery_share_url?: string | null;
+  recovery_next_verification_at?: Date | string | null;
+  recovery_verified_at?: Date | string | null;
+  recovery_reconciled_at?: Date | string | null;
+  recovery_verification_attempts?: number | null;
+  recovery_audit_id?: string | null;
+  recovery_no_active_ownership?: boolean;
 }
 
 interface OwningJobRow extends QueryResultRow {
@@ -72,7 +89,31 @@ function storedManifestHash(items: PublishBatchItem[]) {
   return createHash('sha256').update(JSON.stringify(manifest)).digest('hex');
 }
 
-function mapItem(row: ItemRow): PublishBatchItem {
+function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
+  const recoveryEligible = Boolean(
+    batch?.status === 'approved' &&
+    batch.approved_at &&
+    row.state === 'failed' &&
+    row.local_publish_job_id &&
+    row.recovery_job_id === row.local_publish_job_id &&
+    row.recovery_job_status === 'failed' &&
+    row.recovery_job_error_code === RECOVERABLE_BOUNDED_BATCH_ERROR &&
+    row.recovery_job_snapshot &&
+    isDeepStrictEqual(row.snapshot, row.recovery_job_snapshot) &&
+    row.snapshot.notionLastEditedTime ===
+      row.recovery_job_snapshot.notionLastEditedTime &&
+    !row.recovery_staged_at &&
+    !row.recovery_dispatch_authorized_at &&
+    !row.recovery_dispatched_at &&
+    !row.recovery_note_id &&
+    !row.recovery_share_url &&
+    !row.recovery_next_verification_at &&
+    !row.recovery_verified_at &&
+    !row.recovery_reconciled_at &&
+    row.recovery_verification_attempts === 0 &&
+    !row.recovery_audit_id &&
+    row.recovery_no_active_ownership === true
+  );
   return {
     id: row.id,
     notionPageId: row.notion_page_id,
@@ -83,6 +124,19 @@ function mapItem(row: ItemRow): PublishBatchItem {
     lateBySeconds: row.late_by_seconds,
     ...(row.invalidation_reason ? { invalidationReason: row.invalidation_reason } : {}),
     ...(row.local_publish_job_id ? { localPublishJobId: row.local_publish_job_id } : {}),
+    ...(recoveryEligible
+      ? {
+          recoveryEvidence: {
+            batchId: batch!.id,
+            manifestHash: batch!.manifest_hash,
+            itemId: row.id,
+            jobId: row.recovery_job_id!,
+            itemHash: row.item_hash,
+            snapshotRevision: row.snapshot.notionLastEditedTime,
+            priorErrorCode: RECOVERABLE_BOUNDED_BATCH_ERROR,
+          },
+        }
+      : {}),
   };
 }
 
@@ -276,12 +330,67 @@ export async function listStoredPublishBatches(batchId?: string) {
   const output: PublishBatch[] = [];
   for (const batch of batches.rows) {
     const items = await sql<ItemRow>`
-      SELECT *
-      FROM rednote_publish_batch_items
-      WHERE batch_id = ${batch.id}::uuid
-      ORDER BY snapshot->>'publishAt' NULLS FIRST, created_at
+      SELECT
+        item.*,
+        job.id AS recovery_job_id,
+        job.status AS recovery_job_status,
+        job.error_code AS recovery_job_error_code,
+        job.snapshot AS recovery_job_snapshot,
+        job.staged_at AS recovery_staged_at,
+        job.dispatch_authorized_at AS recovery_dispatch_authorized_at,
+        job.dispatched_at AS recovery_dispatched_at,
+        job.note_id AS recovery_note_id,
+        job.share_url AS recovery_share_url,
+        job.next_verification_at AS recovery_next_verification_at,
+        job.verified_at AS recovery_verified_at,
+        job.reconciled_at AS recovery_reconciled_at,
+        job.verification_attempts AS recovery_verification_attempts,
+        recovery.id AS recovery_audit_id,
+        NOT (
+          EXISTS (
+            SELECT 1
+            FROM local_publish_jobs AS other_job
+            WHERE other_job.notion_page_id = item.notion_page_id
+              AND other_job.id <> job.id
+              AND (
+                other_job.batch_item_id IS NOT NULL
+                OR other_job.status NOT IN ('reconciled', 'failed')
+                OR other_job.dispatch_authorized_at IS NOT NULL
+                OR other_job.dispatched_at IS NOT NULL
+                OR other_job.note_id IS NOT NULL
+                OR other_job.share_url IS NOT NULL
+              )
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM rednote_publish_batch_items AS other_item
+            WHERE other_item.notion_page_id = item.notion_page_id
+              AND other_item.id <> item.id
+              AND (
+                other_item.local_publish_job_id IS NOT NULL
+                OR other_item.state NOT IN ('invalidated', 'reconciled', 'failed')
+              )
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM manual_reconciliation_requests
+            WHERE notion_page_id = item.notion_page_id
+              AND status IN ('queued', 'verifying')
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM external_post_reconciliations
+            WHERE status = 'processing'
+          )
+        ) AS recovery_no_active_ownership
+      FROM rednote_publish_batch_items AS item
+      LEFT JOIN local_publish_jobs AS job ON job.id = item.local_publish_job_id
+      LEFT JOIN rednote_publish_job_recoveries AS recovery
+        ON recovery.local_publish_job_id = job.id
+      WHERE item.batch_id = ${batch.id}::uuid
+      ORDER BY item.snapshot->>'publishAt' NULLS FIRST, item.created_at
     `;
-    output.push(mapBatch(batch, items.rows.map(mapItem)));
+    output.push(mapBatch(batch, items.rows.map((item) => mapItem(item, batch))));
   }
   return output;
 }
