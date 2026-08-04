@@ -33,8 +33,10 @@ interface RecoveryRow extends QueryResultRow {
   claim_token: string | null;
   claim_attempts: number;
   claimed_at: Date | string | null;
+  claimed_at_raw: string | null;
   claim_expires_at: Date | string | null;
   completed_at: Date | string | null;
+  completed_at_raw: string | null;
   staged_at: Date | string | null;
   dispatch_authorized_at: Date | string | null;
   dispatched_at: Date | string | null;
@@ -194,8 +196,10 @@ export async function recoverStoredApprovedPublishJob(
          job.claim_token,
          job.claim_attempts,
          job.claimed_at,
+         job.claimed_at::text AS claimed_at_raw,
          job.claim_expires_at,
          job.completed_at,
+         job.completed_at::text AS completed_at_raw,
          job.staged_at,
          job.dispatch_authorized_at,
          job.dispatched_at,
@@ -300,6 +304,13 @@ export async function recoverStoredApprovedPublishJob(
       await client.query('COMMIT');
       return result(existingAudit, row.approved_at, true);
     }
+    if (!row.claimed_at_raw || !row.completed_at_raw) {
+      throw new LocalPublishJobError(
+        'The failed publish job is missing exact terminal timestamps.',
+        'RECOVERY_PRECONDITION_FAILED',
+        409,
+      );
+    }
     const inserted = await client.query<{
       id: string;
       recovered_at: Date | string;
@@ -332,8 +343,8 @@ export async function recoverStoredApprovedPublishJob(
         row.job_error_code,
         row.job_error_message,
         row.claim_attempts,
-        row.claimed_at,
-        row.completed_at,
+        row.claimed_at_raw,
+        row.completed_at_raw,
         recoveredBy,
       ],
     );
@@ -354,7 +365,13 @@ export async function recoverStoredApprovedPublishJob(
          AND claim_attempts = $3
          AND claimed_at = $4::timestamptz
          AND completed_at = $5::timestamptz`,
-      [row.job_id, row.item_id, row.claim_attempts, row.claimed_at, row.completed_at],
+      [
+        row.job_id,
+        row.item_id,
+        row.claim_attempts,
+        row.claimed_at_raw,
+        row.completed_at_raw,
+      ],
     );
     if (updated.rowCount !== 1 || !inserted.rows[0]) {
       throw new LocalPublishJobError(
@@ -390,8 +407,8 @@ export async function recoverStoredApprovedPublishJob(
       recoveredBy,
       recoveredAt: timestamp(inserted.rows[0].recovered_at),
       priorClaimAttempts: row.claim_attempts,
-      priorClaimedAt: optionalTimestamp(row.claimed_at),
-      priorCompletedAt: timestamp(row.completed_at!),
+      priorClaimedAt: row.claimed_at_raw,
+      priorCompletedAt: row.completed_at_raw,
     };
     await client.query('COMMIT');
     return result(record, row.approved_at, false);
