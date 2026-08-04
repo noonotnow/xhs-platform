@@ -583,8 +583,13 @@ export default function ReadyPostsPanel() {
     evidence: RednotePublishJobRecoveryEvidence,
     title: string,
   ) {
+    const fixedHydrationFailure =
+      evidence.priorErrorCode === 'AMBIGUOUS_CREATOR_UI';
     const confirmed = window.confirm(
       `Requeue the exact already-approved job for "${title}"?\n\n` +
+      (fixedHydrationFailure
+        ? 'Fixed failure: image-mode pre-staging hydration could not uniquely identify the upload mode.\n'
+        : '') +
       `Job ${evidence.jobId}\n` +
       `Batch ${evidence.batchId}\n` +
       `Item ${evidence.itemId}\n` +
@@ -901,10 +906,11 @@ export default function ReadyPostsPanel() {
           <div key={`recovery-${batch.id}`} className={styles.recoveryBatch}>
             <strong>Eligible pre-dispatch recovery</strong>
             <p>
-              These exact jobs failed only because bounded-batch bypass was disabled.
-              Recovery requeues the existing approved row without another approval or
-              replacement job. A previously recovered row appears again only for a proven,
-              later terminal claim generation.
+              These exact jobs failed before staging because bounded-batch bypass was disabled
+              or a now-fixed image-mode hydration check could not uniquely identify upload mode.
+              Recovery requeues the existing approved row with no second approval and no
+              replacement job. The fixed hydration failure is eligible only as a proven,
+              immediately later terminal claim generation.
             </p>
             <small>
               Original approval: {batch.approvedAt
@@ -924,6 +930,12 @@ export default function ReadyPostsPanel() {
                   </small>
                   <small>
                     Original publish time: <code>{item.snapshot.publishAt}</code>
+                  </small>
+                  <small>
+                    Recovery reason: {item.recoveryEvidence.priorErrorCode ===
+                    'AMBIGUOUS_CREATOR_UI'
+                      ? 'Fixed image-mode pre-staging hydration failure'
+                      : 'Bounded-batch bypass disabled'}
                   </small>
                   <small>
                     Terminal failure generation: <code>

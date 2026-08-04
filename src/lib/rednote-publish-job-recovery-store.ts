@@ -124,6 +124,7 @@ function candidate(row: RecoveryRow, activeOwnership: boolean): RecoveryCandidat
     jobStatus: row.job_status,
     jobSnapshot: row.job_snapshot,
     jobErrorCode: row.job_error_code,
+    jobErrorMessage: row.job_error_message,
     jobClaimAttempts: row.claim_attempts,
     jobClaimToken: row.claim_token,
     jobClaimedAt: optionalTimestamp(row.claimed_at),
@@ -361,7 +362,8 @@ export async function recoverStoredApprovedPublishJob(
        WHERE id = $1::uuid
          AND batch_item_id = $2::uuid
          AND status = 'failed'
-         AND error_code = 'BOUNDED_BATCH_BYPASS_DISABLED'
+         AND error_code = $6
+         AND error_message IS NOT DISTINCT FROM $7
          AND claim_attempts = $3
          AND claimed_at = $4::timestamptz
          AND completed_at = $5::timestamptz`,
@@ -371,6 +373,8 @@ export async function recoverStoredApprovedPublishJob(
         row.claim_attempts,
         row.claimed_at_raw,
         row.completed_at_raw,
+        row.job_error_code,
+        row.job_error_message,
       ],
     );
     if (updated.rowCount !== 1 || !inserted.rows[0]) {

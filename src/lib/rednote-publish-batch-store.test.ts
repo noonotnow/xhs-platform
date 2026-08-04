@@ -244,6 +244,7 @@ describe('stored RedNote bootstrap replacement', () => {
       recovery_job_id: jobId,
       recovery_job_status: 'failed',
       recovery_job_error_code: 'BOUNDED_BATCH_BYPASS_DISABLED',
+      recovery_job_error_message: 'Worker bypass is disabled',
       recovery_job_snapshot: snapshot,
       recovery_claim_attempts: 1,
       recovery_claimed_at: '2026-08-04T17:04:33.424Z',
@@ -258,6 +259,11 @@ describe('stored RedNote bootstrap replacement', () => {
       recovery_reconciled_at: null,
       recovery_verification_attempts: 0,
       recovery_audit_id: null,
+      recovery_audit_batch_id: null,
+      recovery_audit_manifest_hash: null,
+      recovery_audit_item_id: null,
+      recovery_audit_item_hash: null,
+      recovery_audit_snapshot_revision: null,
       recovery_audit_claim_attempts: null,
       recovery_audit_completed_at: null,
       recovery_audit_recovered_at: null,
@@ -284,6 +290,37 @@ describe('stored RedNote bootstrap replacement', () => {
     mocks.sql
       .mockResolvedValueOnce({ rows: [batchRow(batchId, 'approved', hash)] })
       .mockResolvedValueOnce({
+        rows: [{
+          ...item,
+          recovery_job_error_code: 'AMBIGUOUS_CREATOR_UI',
+          recovery_job_error_message: 'Could not uniquely identify the image upload mode',
+          recovery_claim_attempts: 3,
+          recovery_claimed_at: '2026-08-04T19:16:27.900Z',
+          recovery_completed_at: '2026-08-04T19:16:28.333669Z',
+          recovery_audit_id: '66666666-6666-4666-8666-666666666666',
+          recovery_audit_batch_id: batchId,
+          recovery_audit_manifest_hash: hash,
+          recovery_audit_item_id: itemId,
+          recovery_audit_item_hash: hash,
+          recovery_audit_snapshot_revision: snapshot.notionLastEditedTime,
+          recovery_audit_claim_attempts: 2,
+          recovery_audit_completed_at: '2026-08-04T18:35:28.151762Z',
+          recovery_audit_recovered_at: '2026-08-04T18:40:00.000Z',
+        }],
+      });
+    await expect(listStoredPublishBatches(batchId)).resolves.toMatchObject([{
+      items: [{
+        recoveryEvidence: {
+          priorErrorCode: 'AMBIGUOUS_CREATOR_UI',
+          claimAttempts: 3,
+          latestAuditedClaimAttempts: 2,
+        },
+      }],
+    }]);
+
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [batchRow(batchId, 'approved', hash)] })
+      .mockResolvedValueOnce({
         rows: [{ ...item, recovery_job_error_code: 'STAGING_FAILED' }],
       });
     const unsafe = await listStoredPublishBatches(batchId);
@@ -295,6 +332,11 @@ describe('stored RedNote bootstrap replacement', () => {
         rows: [{
           ...item,
           recovery_audit_id: '66666666-6666-4666-8666-666666666666',
+          recovery_audit_batch_id: batchId,
+          recovery_audit_manifest_hash: hash,
+          recovery_audit_item_id: itemId,
+          recovery_audit_item_hash: hash,
+          recovery_audit_snapshot_revision: snapshot.notionLastEditedTime,
         }],
       });
     const alreadyAudited = await listStoredPublishBatches(batchId);
@@ -309,6 +351,11 @@ describe('stored RedNote bootstrap replacement', () => {
           recovery_claimed_at: '2026-08-04T17:30:08.000Z',
           recovery_completed_at: '2026-08-04T17:30:08.500Z',
           recovery_audit_id: '66666666-6666-4666-8666-666666666666',
+          recovery_audit_batch_id: batchId,
+          recovery_audit_manifest_hash: hash,
+          recovery_audit_item_id: itemId,
+          recovery_audit_item_hash: hash,
+          recovery_audit_snapshot_revision: snapshot.notionLastEditedTime,
           recovery_audit_claim_attempts: 1,
           recovery_audit_completed_at: '2026-08-04T17:04:33.963Z',
           recovery_audit_recovered_at: '2026-08-04T17:30:00.000Z',
@@ -323,10 +370,35 @@ describe('stored RedNote bootstrap replacement', () => {
       }],
     }]);
 
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [batchRow(batchId, 'approved', hash)] })
+      .mockResolvedValueOnce({
+        rows: [{
+          ...item,
+          recovery_job_error_code: 'AMBIGUOUS_CREATOR_UI',
+          recovery_job_error_message: 'Could not uniquely identify the image upload mode',
+          recovery_claim_attempts: 3,
+          recovery_claimed_at: '2026-08-04T19:16:27.900Z',
+          recovery_completed_at: '2026-08-04T19:16:28.333669Z',
+          recovery_audit_id: '66666666-6666-4666-8666-666666666666',
+          recovery_audit_batch_id: batchId,
+          recovery_audit_manifest_hash: 'c'.repeat(64),
+          recovery_audit_item_id: itemId,
+          recovery_audit_item_hash: hash,
+          recovery_audit_snapshot_revision: snapshot.notionLastEditedTime,
+          recovery_audit_claim_attempts: 2,
+          recovery_audit_completed_at: '2026-08-04T18:35:28.151762Z',
+          recovery_audit_recovered_at: '2026-08-04T18:40:00.000Z',
+        }],
+      });
+    const changedAudit = await listStoredPublishBatches(batchId);
+    expect(changedAudit[0].items[0].recoveryEvidence).toBeUndefined();
+
     const itemQuery = mocks.sql.mock.calls
       .map(([strings]) => Array.isArray(strings) ? strings.join('') : String(strings))
       .find((statement) => statement.includes('FROM rednote_publish_batch_items AS item'));
     expect(itemQuery).toContain('LEFT JOIN LATERAL');
     expect(itemQuery).toContain('ORDER BY prior_claim_attempts DESC, recovered_at DESC');
+    expect(itemQuery).toContain('job.error_message AS recovery_job_error_message');
   });
 });
