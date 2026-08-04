@@ -245,6 +245,9 @@ describe('stored RedNote bootstrap replacement', () => {
       recovery_job_status: 'failed',
       recovery_job_error_code: 'BOUNDED_BATCH_BYPASS_DISABLED',
       recovery_job_snapshot: snapshot,
+      recovery_claim_attempts: 1,
+      recovery_claimed_at: '2026-08-04T17:04:33.424Z',
+      recovery_completed_at: '2026-08-04T17:04:33.963Z',
       recovery_staged_at: null,
       recovery_dispatch_authorized_at: null,
       recovery_dispatched_at: null,
@@ -255,6 +258,9 @@ describe('stored RedNote bootstrap replacement', () => {
       recovery_reconciled_at: null,
       recovery_verification_attempts: 0,
       recovery_audit_id: null,
+      recovery_audit_claim_attempts: null,
+      recovery_audit_completed_at: null,
+      recovery_audit_recovered_at: null,
       recovery_no_active_ownership: true,
     };
     mocks.sql
@@ -270,6 +276,7 @@ describe('stored RedNote bootstrap replacement', () => {
           itemHash: hash,
           snapshotRevision: snapshot.notionLastEditedTime,
           priorErrorCode: 'BOUNDED_BATCH_BYPASS_DISABLED',
+          claimAttempts: 1,
         },
       }],
     }]);
@@ -292,5 +299,34 @@ describe('stored RedNote bootstrap replacement', () => {
       });
     const alreadyAudited = await listStoredPublishBatches(batchId);
     expect(alreadyAudited[0].items[0].recoveryEvidence).toBeUndefined();
+
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [batchRow(batchId, 'approved', hash)] })
+      .mockResolvedValueOnce({
+        rows: [{
+          ...item,
+          recovery_claim_attempts: 2,
+          recovery_claimed_at: '2026-08-04T17:30:08.000Z',
+          recovery_completed_at: '2026-08-04T17:30:08.500Z',
+          recovery_audit_id: '66666666-6666-4666-8666-666666666666',
+          recovery_audit_claim_attempts: 1,
+          recovery_audit_completed_at: '2026-08-04T17:04:33.963Z',
+          recovery_audit_recovered_at: '2026-08-04T17:30:00.000Z',
+        }],
+      });
+    await expect(listStoredPublishBatches(batchId)).resolves.toMatchObject([{
+      items: [{
+        recoveryEvidence: {
+          claimAttempts: 2,
+          latestAuditedClaimAttempts: 1,
+        },
+      }],
+    }]);
+
+    const itemQuery = mocks.sql.mock.calls
+      .map(([strings]) => Array.isArray(strings) ? strings.join('') : String(strings))
+      .find((statement) => statement.includes('FROM rednote_publish_batch_items AS item'));
+    expect(itemQuery).toContain('LEFT JOIN LATERAL');
+    expect(itemQuery).toContain('ORDER BY prior_claim_attempts DESC, recovered_at DESC');
   });
 });

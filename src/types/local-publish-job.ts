@@ -107,14 +107,20 @@ export interface RednotePublishJobRecoveryEvidence {
   itemHash: string;
   snapshotRevision: string;
   priorErrorCode: 'BOUNDED_BATCH_BYPASS_DISABLED';
+  claimAttempts: number;
+  latestAuditedClaimAttempts?: number;
 }
 
 export interface RednotePublishJobRecovery
-  extends Omit<RednotePublishJobRecoveryEvidence, 'priorErrorCode'> {
+  extends Omit<
+    RednotePublishJobRecoveryEvidence,
+    'priorErrorCode' | 'claimAttempts' | 'latestAuditedClaimAttempts'
+  > {
   id: string;
   approvedAt: string;
   recoveredBy: string;
   recoveredAt: string;
+  priorClaimAttempts: number;
   alreadyRecovered: boolean;
 }
 

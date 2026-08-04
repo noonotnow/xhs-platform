@@ -52,6 +52,9 @@ interface RecoveryRow extends QueryResultRow {
   recovery_item_id: string | null;
   recovery_item_hash: string | null;
   recovery_snapshot_revision: string | null;
+  recovery_prior_claim_attempts: number | null;
+  recovery_prior_claimed_at: Date | string | null;
+  recovery_prior_completed_at: Date | string | null;
 }
 
 interface OwnershipRow extends QueryResultRow {
@@ -80,7 +83,9 @@ function audit(row: RecoveryRow): ExistingRecoveryAudit | null {
     !row.recovery_manifest_hash ||
     !row.recovery_item_id ||
     !row.recovery_item_hash ||
-    !row.recovery_snapshot_revision
+    !row.recovery_snapshot_revision ||
+    row.recovery_prior_claim_attempts === null ||
+    !row.recovery_prior_completed_at
   ) {
     return null;
   }
@@ -94,6 +99,9 @@ function audit(row: RecoveryRow): ExistingRecoveryAudit | null {
     snapshotRevision: row.recovery_snapshot_revision,
     recoveredBy: row.recovered_by,
     recoveredAt: timestamp(row.recovered_at),
+    priorClaimAttempts: row.recovery_prior_claim_attempts,
+    priorClaimedAt: optionalTimestamp(row.recovery_prior_claimed_at),
+    priorCompletedAt: timestamp(row.recovery_prior_completed_at),
   };
 }
 
@@ -114,6 +122,7 @@ function candidate(row: RecoveryRow, activeOwnership: boolean): RecoveryCandidat
     jobStatus: row.job_status,
     jobSnapshot: row.job_snapshot,
     jobErrorCode: row.job_error_code,
+    jobClaimAttempts: row.claim_attempts,
     jobClaimToken: row.claim_token,
     jobClaimedAt: optionalTimestamp(row.claimed_at),
     jobClaimExpiresAt: optionalTimestamp(row.claim_expires_at),
@@ -148,6 +157,7 @@ function result(
     approvedAt: timestamp(approvedAt),
     recoveredBy: record.recoveredBy,
     recoveredAt: record.recoveredAt,
+    priorClaimAttempts: record.priorClaimAttempts,
     alreadyRecovered,
   };
 }
@@ -202,12 +212,20 @@ export async function recoverStoredApprovedPublishJob(
          recovery.manifest_hash AS recovery_manifest_hash,
          recovery.batch_item_id AS recovery_item_id,
          recovery.item_hash AS recovery_item_hash,
-         recovery.snapshot_revision AS recovery_snapshot_revision
+         recovery.snapshot_revision AS recovery_snapshot_revision,
+         recovery.prior_claim_attempts AS recovery_prior_claim_attempts,
+         recovery.prior_claimed_at AS recovery_prior_claimed_at,
+         recovery.prior_completed_at AS recovery_prior_completed_at
        FROM local_publish_jobs AS job
        JOIN rednote_publish_batch_items AS item ON item.id = job.batch_item_id
        JOIN rednote_publish_batches AS batch ON batch.id = item.batch_id
-       LEFT JOIN rednote_publish_job_recoveries AS recovery
-         ON recovery.local_publish_job_id = job.id
+       LEFT JOIN LATERAL (
+         SELECT *
+         FROM rednote_publish_job_recoveries
+         WHERE local_publish_job_id = job.id
+         ORDER BY prior_claim_attempts DESC, recovered_at DESC
+         LIMIT 1
+       ) AS recovery ON TRUE
        WHERE job.id = $1::uuid
        FOR UPDATE OF batch, item, job`,
       [input.jobId],
@@ -332,8 +350,11 @@ export async function recoverStoredApprovedPublishJob(
        WHERE id = $1::uuid
          AND batch_item_id = $2::uuid
          AND status = 'failed'
-         AND error_code = 'BOUNDED_BATCH_BYPASS_DISABLED'`,
-      [row.job_id, row.item_id],
+         AND error_code = 'BOUNDED_BATCH_BYPASS_DISABLED'
+         AND claim_attempts = $3
+         AND claimed_at = $4::timestamptz
+         AND completed_at = $5::timestamptz`,
+      [row.job_id, row.item_id, row.claim_attempts, row.claimed_at, row.completed_at],
     );
     if (updated.rowCount !== 1 || !inserted.rows[0]) {
       throw new LocalPublishJobError(
@@ -368,6 +389,9 @@ export async function recoverStoredApprovedPublishJob(
       snapshotRevision: input.snapshotRevision,
       recoveredBy,
       recoveredAt: timestamp(inserted.rows[0].recovered_at),
+      priorClaimAttempts: row.claim_attempts,
+      priorClaimedAt: optionalTimestamp(row.claimed_at),
+      priorCompletedAt: timestamp(row.completed_at!),
     };
     await client.query('COMMIT');
     return result(record, row.approved_at, false);

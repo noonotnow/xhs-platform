@@ -591,6 +591,10 @@ export default function ReadyPostsPanel() {
       `Manifest ${evidence.manifestHash}\n` +
       `Item hash ${evidence.itemHash}\n` +
       `Source revision ${evidence.snapshotRevision}\n\n` +
+      `Terminal claim generation ${evidence.claimAttempts}\n` +
+      (evidence.latestAuditedClaimAttempts !== undefined
+        ? `Latest audited generation ${evidence.latestAuditedClaimAttempts}\n\n`
+        : '\n') +
       'This preserves the same job, frozen snapshot, hashes, publish time, and original approval. ' +
       'It does not approve again or create a replacement job.',
     );
@@ -898,7 +902,9 @@ export default function ReadyPostsPanel() {
             <strong>Eligible pre-dispatch recovery</strong>
             <p>
               These exact jobs failed only because bounded-batch bypass was disabled.
-              Recovery requeues the existing approved row without another approval.
+              Recovery requeues the existing approved row without another approval or
+              replacement job. A previously recovered row appears again only for a proven,
+              later terminal claim generation.
             </p>
             <small>
               Original approval: {batch.approvedAt
@@ -918,6 +924,16 @@ export default function ReadyPostsPanel() {
                   </small>
                   <small>
                     Original publish time: <code>{item.snapshot.publishAt}</code>
+                  </small>
+                  <small>
+                    Terminal failure generation: <code>
+                      {item.recoveryEvidence.claimAttempts}
+                    </code>
+                    {item.recoveryEvidence.latestAuditedClaimAttempts !== undefined
+                      ? <> (latest audited: <code>
+                          {item.recoveryEvidence.latestAuditedClaimAttempts}
+                        </code>)</>
+                      : ' (not previously audited)'}
                   </small>
                   <button
                     className={styles.recoveryButton}

@@ -51,6 +51,9 @@ interface ItemRow extends QueryResultRow {
   recovery_job_status?: string | null;
   recovery_job_error_code?: string | null;
   recovery_job_snapshot?: LocalPublishSnapshot | null;
+  recovery_claim_attempts?: number | null;
+  recovery_claimed_at?: Date | string | null;
+  recovery_completed_at?: Date | string | null;
   recovery_staged_at?: Date | string | null;
   recovery_dispatch_authorized_at?: Date | string | null;
   recovery_dispatched_at?: Date | string | null;
@@ -61,6 +64,9 @@ interface ItemRow extends QueryResultRow {
   recovery_reconciled_at?: Date | string | null;
   recovery_verification_attempts?: number | null;
   recovery_audit_id?: string | null;
+  recovery_audit_claim_attempts?: number | null;
+  recovery_audit_completed_at?: Date | string | null;
+  recovery_audit_recovered_at?: Date | string | null;
   recovery_no_active_ownership?: boolean;
 }
 
@@ -79,6 +85,10 @@ function timestamp(value: Date | string) {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }
 
+function isAfter(value: Date | string | null | undefined, earlier: Date | string | null | undefined) {
+  return Boolean(value && earlier && new Date(value).getTime() > new Date(earlier).getTime());
+}
+
 function storedManifestHash(items: PublishBatchItem[]) {
   const manifest = items.map((item) => ({
     notionPageId: item.notionPageId,
@@ -90,6 +100,18 @@ function storedManifestHash(items: PublishBatchItem[]) {
 }
 
 function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
+  const firstRecovery = !row.recovery_audit_id;
+  const distinctRefailure = Boolean(
+    row.recovery_audit_id &&
+    row.recovery_claim_attempts !== null &&
+    row.recovery_claim_attempts !== undefined &&
+    row.recovery_audit_claim_attempts !== null &&
+    row.recovery_audit_claim_attempts !== undefined &&
+    row.recovery_claim_attempts > row.recovery_audit_claim_attempts &&
+    isAfter(row.recovery_claimed_at, row.recovery_audit_completed_at) &&
+    isAfter(row.recovery_claimed_at, row.recovery_audit_recovered_at) &&
+    isAfter(row.recovery_completed_at, row.recovery_claimed_at)
+  );
   const recoveryEligible = Boolean(
     batch?.status === 'approved' &&
     batch.approved_at &&
@@ -99,6 +121,7 @@ function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
     row.recovery_job_status === 'failed' &&
     row.recovery_job_error_code === RECOVERABLE_BOUNDED_BATCH_ERROR &&
     row.recovery_job_snapshot &&
+    row.recovery_completed_at &&
     isDeepStrictEqual(row.snapshot, row.recovery_job_snapshot) &&
     row.snapshot.notionLastEditedTime ===
       row.recovery_job_snapshot.notionLastEditedTime &&
@@ -111,7 +134,7 @@ function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
     !row.recovery_verified_at &&
     !row.recovery_reconciled_at &&
     row.recovery_verification_attempts === 0 &&
-    !row.recovery_audit_id &&
+    (firstRecovery || distinctRefailure) &&
     row.recovery_no_active_ownership === true
   );
   return {
@@ -134,6 +157,11 @@ function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
             itemHash: row.item_hash,
             snapshotRevision: row.snapshot.notionLastEditedTime,
             priorErrorCode: RECOVERABLE_BOUNDED_BATCH_ERROR,
+            claimAttempts: row.recovery_claim_attempts!,
+            ...(row.recovery_audit_claim_attempts !== null &&
+                row.recovery_audit_claim_attempts !== undefined
+              ? { latestAuditedClaimAttempts: row.recovery_audit_claim_attempts }
+              : {}),
           },
         }
       : {}),
@@ -336,6 +364,9 @@ export async function listStoredPublishBatches(batchId?: string) {
         job.status AS recovery_job_status,
         job.error_code AS recovery_job_error_code,
         job.snapshot AS recovery_job_snapshot,
+        job.claim_attempts AS recovery_claim_attempts,
+        job.claimed_at AS recovery_claimed_at,
+        job.completed_at AS recovery_completed_at,
         job.staged_at AS recovery_staged_at,
         job.dispatch_authorized_at AS recovery_dispatch_authorized_at,
         job.dispatched_at AS recovery_dispatched_at,
@@ -346,6 +377,9 @@ export async function listStoredPublishBatches(batchId?: string) {
         job.reconciled_at AS recovery_reconciled_at,
         job.verification_attempts AS recovery_verification_attempts,
         recovery.id AS recovery_audit_id,
+        recovery.prior_claim_attempts AS recovery_audit_claim_attempts,
+        recovery.prior_completed_at AS recovery_audit_completed_at,
+        recovery.recovered_at AS recovery_audit_recovered_at,
         NOT (
           EXISTS (
             SELECT 1
@@ -385,8 +419,13 @@ export async function listStoredPublishBatches(batchId?: string) {
         ) AS recovery_no_active_ownership
       FROM rednote_publish_batch_items AS item
       LEFT JOIN local_publish_jobs AS job ON job.id = item.local_publish_job_id
-      LEFT JOIN rednote_publish_job_recoveries AS recovery
-        ON recovery.local_publish_job_id = job.id
+      LEFT JOIN LATERAL (
+        SELECT *
+        FROM rednote_publish_job_recoveries
+        WHERE local_publish_job_id = job.id
+        ORDER BY prior_claim_attempts DESC, recovered_at DESC
+        LIMIT 1
+      ) AS recovery ON TRUE
       WHERE item.batch_id = ${batch.id}::uuid
       ORDER BY item.snapshot->>'publishAt' NULLS FIRST, item.created_at
     `;

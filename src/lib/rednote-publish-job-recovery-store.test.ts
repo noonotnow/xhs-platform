@@ -41,7 +41,7 @@ const snapshot = {
   notionLastEditedTime: input.snapshotRevision,
 };
 
-function row(recovered = false) {
+function row(recovered = false, generation = 1) {
   return {
     batch_id: input.batchId,
     batch_status: 'approved',
@@ -61,7 +61,7 @@ function row(recovered = false) {
     job_error_code: recovered ? null : 'BOUNDED_BATCH_BYPASS_DISABLED',
     job_error_message: recovered ? null : 'Worker bypass is disabled',
     claim_token: recovered ? null : '66666666-6666-4666-8666-666666666666',
-    claim_attempts: 1,
+    claim_attempts: generation,
     claimed_at: recovered ? null : '2026-08-04T17:04:33.424Z',
     claim_expires_at: recovered ? null : '2026-08-04T19:04:33.424Z',
     completed_at: recovered ? null : '2026-08-04T17:04:33.963Z',
@@ -82,6 +82,9 @@ function row(recovered = false) {
     recovery_item_id: recovered ? input.itemId : null,
     recovery_item_hash: recovered ? input.itemHash : null,
     recovery_snapshot_revision: recovered ? input.snapshotRevision : null,
+    recovery_prior_claim_attempts: recovered ? 1 : null,
+    recovery_prior_claimed_at: recovered ? '2026-08-04T17:04:33.424Z' : null,
+    recovery_prior_completed_at: recovered ? '2026-08-04T17:04:33.963Z' : null,
   };
 }
 
@@ -123,6 +126,7 @@ describe('stored approved publish job recovery', () => {
       id: recoveryId,
       ...input,
       recoveredBy: actor,
+      priorClaimAttempts: 1,
       alreadyRecovered: false,
     });
 
@@ -139,8 +143,11 @@ describe('stored approved publish job recovery', () => {
       value.includes('UPDATE rednote_publish_batches'))).toBe(false);
     const update = statements.find((value) => value.includes('UPDATE local_publish_jobs'))!;
     expect(update).toContain("SET status = 'queued'");
-    expect(update).not.toContain('claim_attempts =');
+    expect(update.split('WHERE')[0]).not.toContain('claim_attempts');
     expect(update).not.toContain('snapshot =');
+    expect(update).toContain('AND claim_attempts = $3');
+    expect(update).toContain('AND claimed_at = $4::timestamptz');
+    expect(update).toContain('AND completed_at = $5::timestamptz');
     const auditCall = mocks.query.mock.calls.find(([statement]) =>
       String(statement).includes('INSERT INTO rednote_publish_job_recoveries'));
     expect(auditCall?.[1]).toEqual([
@@ -163,6 +170,60 @@ describe('stored approved publish job recovery', () => {
     expect(ownership).toContain('other_job');
     expect(ownership).toContain('other_item');
     expect(statements).toContain('COMMIT');
+  });
+
+  it('selects the latest audit and appends generation two after the active-drain race', async () => {
+    const generationTwoId = '77777777-7777-4777-8777-777777777777';
+    mocks.query.mockImplementation(async (statement: string) => {
+      if (statement.includes('FROM local_publish_jobs AS job')) {
+        return {
+          rows: [{
+            ...row(true, 2),
+            item_state: 'failed',
+            job_status: 'failed',
+            job_error_code: 'BOUNDED_BATCH_BYPASS_DISABLED',
+            job_error_message: 'Worker bypass is disabled',
+            claim_token: '88888888-8888-4888-8888-888888888888',
+            claimed_at: '2026-08-04T17:30:08.000Z',
+            claim_expires_at: '2026-08-04T19:30:08.000Z',
+            completed_at: '2026-08-04T17:30:08.500Z',
+          }],
+        };
+      }
+      if (statement.includes('AS active_ownership')) {
+        return { rows: [{ active_ownership: false }] };
+      }
+      if (statement.includes('INSERT INTO rednote_publish_job_recoveries')) {
+        return {
+          rows: [{
+            id: generationTwoId,
+            recovered_at: '2026-08-04T17:31:00.000Z',
+          }],
+        };
+      }
+      if (statement.includes('UPDATE local_publish_jobs')) return { rows: [], rowCount: 1 };
+      if (statement.includes('FROM rednote_publish_batch_items')) {
+        return { rows: [{ state: 'queued', local_publish_job_id: input.jobId }] };
+      }
+      return { rows: [], rowCount: 1 };
+    });
+
+    await expect(recoverStoredApprovedPublishJob(input, actor)).resolves.toMatchObject({
+      id: generationTwoId,
+      priorClaimAttempts: 2,
+      alreadyRecovered: false,
+    });
+    const statements = mocks.query.mock.calls.map(([statement]) => String(statement));
+    const candidateQuery = statements.find((value) =>
+      value.includes('FROM local_publish_jobs AS job'))!;
+    expect(candidateQuery).toContain('LEFT JOIN LATERAL');
+    expect(candidateQuery).toContain('ORDER BY prior_claim_attempts DESC, recovered_at DESC');
+    const insertCall = mocks.query.mock.calls.find(([statement]) =>
+      String(statement).includes('INSERT INTO rednote_publish_job_recoveries'));
+    expect(insertCall?.[1]?.[8]).toBe(2);
+    expect(statements.indexOf(
+      "SELECT pg_advisory_xact_lock(hashtextextended('rednote-bootstrap-batch', 0))",
+    )).toBeLessThan(statements.indexOf(candidateQuery));
   });
 
   it('returns the same audit for an exact queued retry without another write', async () => {
