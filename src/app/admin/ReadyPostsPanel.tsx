@@ -748,6 +748,9 @@ export default function ReadyPostsPanel() {
             <p className={styles.manifestHash}>
               Manifest <code>{pendingBatch.manifestHash}</code>
             </p>
+            <p className={styles.muted}>
+              {pendingBatch.items.length} approvable · {pendingBatch.blockedCandidates.length} blocked
+            </p>
             <ol className={styles.batchItems}>
               {pendingBatch.items.map((item) => (
                 <li key={item.id}>
@@ -759,10 +762,33 @@ export default function ReadyPostsPanel() {
                     {' · '}{item.snapshot.mediaType}
                   </span>
                   <small>{item.snapshot.caption}</small>
+                  <small>Tags: {item.snapshot.tags.join(', ') || 'None'}</small>
+                  <small>Media: {item.snapshot.mediaUrl}</small>
+                  <small>Source revision: {item.snapshot.notionLastEditedTime}</small>
                   <code>{item.itemHash}</code>
                 </li>
               ))}
             </ol>
+            {pendingBatch.blockedCandidates.length > 0 && (
+              <>
+                <h4 className={styles.blockedBatchHeading}>
+                  Blocked candidates (not authorized by this manifest)
+                </h4>
+                <ol className={`${styles.batchItems} ${styles.blockedBatchItems}`}>
+                  {pendingBatch.blockedCandidates.map((candidate) => (
+                    <li key={candidate.notionPageId}>
+                      <strong>{candidate.headline}</strong>
+                      <span>
+                        {candidate.publishAt
+                          ? new Date(candidate.publishAt).toLocaleString()
+                          : 'Needs publish time'}
+                      </span>
+                      <small>{candidate.reason}</small>
+                    </li>
+                  ))}
+                </ol>
+              </>
+            )}
             <button
               className={styles.queueButton}
               type="button"

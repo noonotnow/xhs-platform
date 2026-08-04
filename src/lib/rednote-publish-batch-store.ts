@@ -4,6 +4,7 @@ import { getPool, sql } from '@/lib/db';
 import type {
   LocalPublishSnapshot,
   PublishBatch,
+  PublishBatchBlockedCandidate,
   PublishBatchItem,
   PublishBatchItemState,
   PublishBatchKind,
@@ -23,6 +24,7 @@ interface BatchRow extends QueryResultRow {
   kind: PublishBatchKind;
   status: PublishBatchStatus;
   manifest_hash: string;
+  candidate_report: PublishBatchBlockedCandidate[];
   window_start: Date | string | null;
   window_end: Date | string | null;
   approved_at: Date | string | null;
@@ -83,6 +85,7 @@ function mapBatch(row: BatchRow, items: PublishBatchItem[]): PublishBatch {
     ...(row.approved_at ? { approvedAt: timestamp(row.approved_at) } : {}),
     ...(row.approved_by ? { approvedBy: row.approved_by } : {}),
     items,
+    blockedCandidates: row.candidate_report ?? [],
   };
 }
 
@@ -92,6 +95,7 @@ export async function createStoredPublishBatch(input: {
   windowStart?: string;
   windowEnd?: string;
   items: NewPublishBatchItem[];
+  blockedCandidates: PublishBatchBlockedCandidate[];
 }) {
   if (input.items.length === 0) return null;
   const client = await getPool().connect();
@@ -99,10 +103,16 @@ export async function createStoredPublishBatch(input: {
     await client.query('BEGIN');
     const batch = await client.query<BatchRow>(
       `INSERT INTO rednote_publish_batches (
-         kind, manifest_hash, window_start, window_end
-       ) VALUES ($1, $2, $3::timestamptz, $4::timestamptz)
+        kind, manifest_hash, candidate_report, window_start, window_end
+      ) VALUES ($1, $2, $3::jsonb, $4::timestamptz, $5::timestamptz)
        RETURNING *`,
-      [input.kind, input.manifestHash, input.windowStart ?? null, input.windowEnd ?? null],
+      [
+       input.kind,
+       input.manifestHash,
+       JSON.stringify(input.blockedCandidates),
+       input.windowStart ?? null,
+       input.windowEnd ?? null,
+      ],
     );
     let row = batch.rows[0];
     const storedItems: PublishBatchItem[] = [];

@@ -14,6 +14,7 @@ import {
 } from '@/lib/rednote-publish-batch-store';
 import type {
   LocalPublishSnapshot,
+  PublishBatchBlockedCandidate,
   PublishBatchKind,
 } from '@/types/local-publish-job';
 import type { ReadyXhsPost } from '@/types/ready-post';
@@ -171,9 +172,61 @@ export function buildBatchItems(
   });
 }
 
+export function buildBatchCandidateAccounting(
+  posts: ReadyXhsPost[],
+  kind: PublishBatchKind,
+  now: Date,
+) {
+  const weekly = weeklyWindow(now);
+  const items = buildBatchItems(posts, kind, now);
+  const included = new Set(items.map((item) => item.notionPageId));
+  const blockedCandidates = posts.flatMap((post): PublishBatchBlockedCandidate[] => {
+    if (included.has(post.id)) return [];
+    const publishAt = post.publishAt ? new Date(post.publishAt) : null;
+    if (
+      kind === 'weekly' &&
+      publishAt &&
+      !Number.isNaN(publishAt.getTime()) &&
+      (publishAt < weekly.start || publishAt >= weekly.end)
+    ) {
+      return [];
+    }
+
+    let reason: string;
+    if (!publishAt) {
+      reason = 'Needs publish time: set an exact ScheduledDate instant with timezone.';
+    } else if (
+      Number.isNaN(publishAt.getTime()) ||
+      publishAt.getUTCSeconds() !== 0 ||
+      publishAt.getUTCMilliseconds() !== 0
+    ) {
+      reason = 'ScheduledDate must be an exact canonical UTC minute.';
+    } else if ((now.getTime() - publishAt.getTime()) / 1000 > MAX_LATE_SECONDS) {
+      reason = 'ScheduledDate is more than 24 hours late and fails closed.';
+    } else if (
+      (post.compatibilityTrialVideoUrls?.length ?? 0) > 0 &&
+      post.videoUrls.length === 0
+    ) {
+      reason =
+        'Canonical MOV media is present, but no authoritative RedNote-compatible verdict is available. Blocked pending compatibility certification; no batch bypass is allowed.';
+    } else if (post.publishBlockers.length > 0) {
+      reason = post.publishBlockers.join(' · ');
+    } else {
+      reason = 'The post is not currently eligible for an immutable publish snapshot.';
+    }
+    return [{
+      notionPageId: post.id,
+      headline: post.headline,
+      ...(post.publishAt ? { publishAt: post.publishAt } : {}),
+      reason,
+    }];
+  });
+  return { items, blockedCandidates };
+}
+
 export async function createPublishBatch(kind: PublishBatchKind, now = new Date()) {
   const { posts } = await listReadyXhsPosts();
-  const items = buildBatchItems(posts, kind, now);
+  const { items, blockedCandidates } = buildBatchCandidateAccounting(posts, kind, now);
   const window = kind === 'weekly' ? weeklyWindow(now) : undefined;
   return createStoredPublishBatch({
     kind,
@@ -184,6 +237,7 @@ export async function createPublishBatch(kind: PublishBatchKind, now = new Date(
       lateBySeconds: item.lateBySeconds,
     }))),
     items,
+    blockedCandidates,
     ...(window ? { windowStart: window.start.toISOString(), windowEnd: window.end.toISOString() } : {}),
   });
 }
@@ -205,14 +259,7 @@ export async function approvePublishBatch(
       return {
         itemId: item.id,
         approved: currentHash === item.itemHash &&
-          isDeepStrictEqual(
-            item.dispatchMode === 'post_now'
-              ? { ...current, publishAt: undefined }
-              : current,
-            item.dispatchMode === 'post_now'
-              ? { ...item.snapshot, publishAt: undefined }
-              : item.snapshot,
-          ),
+          isDeepStrictEqual(current, item.snapshot),
         reason: currentHash === item.itemHash
           ? undefined
           : 'The Notion source revision or frozen publishing fields changed.',

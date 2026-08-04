@@ -95,6 +95,13 @@ export interface PublishBatchItem {
   localPublishJobId?: string;
 }
 
+export interface PublishBatchBlockedCandidate {
+  notionPageId: string;
+  headline: string;
+  publishAt?: string;
+  reason: string;
+}
+
 export interface PublishBatch {
   id: string;
   kind: PublishBatchKind;
@@ -106,6 +113,7 @@ export interface PublishBatch {
   approvedAt?: string;
   approvedBy?: string;
   items: PublishBatchItem[];
+  blockedCandidates: PublishBatchBlockedCandidate[];
 }
 
 export type ClaimedLocalPublishJob =

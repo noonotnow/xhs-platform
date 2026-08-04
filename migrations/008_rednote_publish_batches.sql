@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS rednote_publish_batches (
   status TEXT NOT NULL DEFAULT 'pending_approval'
     CHECK (status IN ('pending_approval', 'approved', 'partially_approved')),
   manifest_hash TEXT NOT NULL CHECK (manifest_hash ~ '^[a-f0-9]{64}$'),
+  candidate_report JSONB NOT NULL DEFAULT '[]'::jsonb,
   window_start TIMESTAMP WITH TIME ZONE,
   window_end TIMESTAMP WITH TIME ZONE,
   approved_at TIMESTAMP WITH TIME ZONE,

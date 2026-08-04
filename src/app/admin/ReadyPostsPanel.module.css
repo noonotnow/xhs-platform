@@ -52,6 +52,21 @@
   font-size: 0.75rem;
 }
 
+.blockedBatchHeading {
+  margin: 4px 0 0;
+  color: #713f12;
+  font-size: 0.875rem;
+}
+
+.blockedBatchItems li {
+  background: #fffbeb;
+  border-color: #f59e0b;
+}
+
+.blockedBatchItems small {
+  color: #713f12;
+}
+
 .headingRow,
 .statusRow,
 .actionRow {

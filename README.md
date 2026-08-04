@@ -241,8 +241,9 @@ state.
 
 Apply `migrations/008_rednote_publish_batches.sql` before deploying code that
 serves batch APIs or worker claims. It creates immutable batch/item audit tables,
-links batch items to existing jobs, and adds the durable sweep ledger. It does not
-touch Notion and must not be run automatically by the application.
+links batch items to existing jobs, persists blocked-candidate accounting, and adds
+the durable sweep ledger. It does not touch Notion and must not be run automatically
+by the application.
 
 The admin batch preview shows every frozen title, caption, tags, canonical media
 URL/type, exact ScheduledDate instant, source revision, item hash, dispatch mode,
@@ -263,8 +264,9 @@ For the one-time bootstrap after the migration and application deploy:
 
 1. Open `/admin`, refresh posts, and select **Build bootstrap batch**.
 2. Review every item and confirm each explicit `Post now — Nh late` conversion.
-   Items over 24 hours late and records without an exact time are excluded and
-   remain visible for repair.
+   Items over 24 hours late, records without an exact time, and uncertified MOV
+   records remain visible in the preview as blocked and are not part of the
+   authorized manifest.
 3. Copy the displayed manifest hash into the change record, then select
    **Approve this exact manifest** once. Do not use the bootstrap action again for
    the same ready set.

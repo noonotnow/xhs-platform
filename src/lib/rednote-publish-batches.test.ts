@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildBatchCandidateAccounting,
   buildBatchItems,
   dueSweepKinds,
   manifestHash,
@@ -9,7 +10,10 @@ import {
 import type { ReadyXhsPost } from '@/types/ready-post';
 import { rednoteMediaIdentity } from '@/lib/rednote-publish-authorization';
 
-function post(publishAt?: string): ReadyXhsPost {
+function post(
+  publishAt?: string,
+  overrides: Partial<ReadyXhsPost> = {},
+): ReadyXhsPost {
   return {
     id: '11111111-1111-4111-8111-111111111111',
     pageUrl: 'https://notion.so/post',
@@ -29,6 +33,7 @@ function post(publishAt?: string): ReadyXhsPost {
     ...(publishAt ? { publishAt } : {}),
     lastEditedTime: '2026-08-04T12:00:00.000Z',
     publishBlockers: [],
+    ...overrides,
   };
 }
 
@@ -62,11 +67,42 @@ describe('bounded RedNote publish batches', () => {
       lateBySeconds: 3_600,
       snapshot: { title: 'Frozen title' },
     });
+
     expect(buildBatchItems(
       [post(new Date(now.getTime() - (MAX_LATE_SECONDS + 1) * 1000).toISOString())],
       'bootstrap',
       now,
     )).toEqual([]);
+  });
+
+  it('accounts for a late bootstrap item and visibly blocks a trial-only MOV sibling', () => {
+    const now = new Date('2026-08-04T14:04:00.000Z');
+    const day3 = post('2026-08-04T13:30:00.000Z', {
+      id: '33333333-3333-4333-8333-333333333333',
+      headline: 'Day 3',
+    });
+    const movUrl = 'https://images.xhs.justlikekatie.com/videos/assets/day-4.mov';
+    const day4 = post('2026-08-06T02:30:00.000Z', {
+      id: '44444444-4444-4444-8444-444444444444',
+      headline: 'Day 4',
+      mediaUrls: [movUrl],
+      videoUrls: [],
+      compatibilityTrialVideoUrls: [movUrl],
+      candidateKind: 'packet_ready',
+    });
+
+    const accounting = buildBatchCandidateAccounting([day3, day4], 'bootstrap', now);
+    expect(accounting.items).toHaveLength(1);
+    expect(accounting.items[0]).toMatchObject({
+      notionPageId: day3.id,
+      dispatchMode: 'post_now',
+    });
+    expect(accounting.blockedCandidates).toEqual([expect.objectContaining({
+      notionPageId: day4.id,
+      headline: 'Day 4',
+      publishAt: '2026-08-06T02:30:00.000Z',
+      reason: expect.stringContaining('no authoritative RedNote-compatible verdict'),
+    })]);
   });
 
   it('computes the next Monday-Sunday window across New York DST', () => {
