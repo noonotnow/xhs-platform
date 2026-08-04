@@ -387,8 +387,21 @@ export function toReadyPostCandidate(
   page: PageObjectResponse,
   schema: ResolvedSchema,
   duplicates: Partial<Record<CanonicalProperty, string[]>>,
+  includePublished = false,
 ): ReadyXhsPost | null {
-  if (!isUnpublishedRednotePost(page, schema)) return null;
+  const isPublished = normalized(plainText(property(page, schema, 'status'))) === 'published';
+  if (
+    !isUnpublishedRednotePost(page, schema) &&
+    !(includePublished && isPublished && values(property(page, schema, 'platform'))
+      .map(normalized)
+      .some((platform) =>
+        platform === 'xhs' ||
+        platform.includes('rednote') ||
+        platform.includes('xiaohongshu') ||
+        platform.includes('小红书')))
+  ) {
+    return null;
+  }
   const post = mapReadyXhsPost(page, schema, duplicates);
   const candidateKind = classifyReadyPostCandidate(post);
   if (
@@ -461,13 +474,83 @@ export async function queryReadyCandidatePages(
   schema: ResolvedSchema,
   properties: PropertyMap,
   databaseId = getDatabaseId(),
+  includePublishedCandidates = false,
 ) {
   const statusType = schema.status ? properties[schema.status]?.type : undefined;
-  const filter: DatabaseFilter | undefined = schema.status && statusType === 'status'
+  const unpublishedFilter: DatabaseFilter | undefined = schema.status && statusType === 'status'
     ? { property: schema.status, status: { does_not_equal: 'Published' } }
     : schema.status && statusType === 'select'
       ? { property: schema.status, select: { does_not_equal: 'Published' } }
       : undefined;
+  const supportsServerCandidateFilter =
+    schema.publishPacketReady &&
+    properties[schema.publishPacketReady]?.type === 'checkbox' &&
+    schema.mediaUrls &&
+    properties[schema.mediaUrls]?.type === 'rich_text';
+  const filter: DatabaseFilter | undefined =
+    includePublishedCandidates &&
+      schema.status &&
+      statusType === 'status' &&
+      supportsServerCandidateFilter
+      ? {
+          or: [
+            {
+              property: schema.status,
+              status: { does_not_equal: 'Published' },
+            },
+            {
+              and: [
+                { property: schema.status, status: { equals: 'Published' } },
+                {
+                  property: schema.publishPacketReady!,
+                  checkbox: { equals: true },
+                },
+              ],
+            },
+            {
+              and: [
+                { property: schema.status, status: { equals: 'Published' } },
+                {
+                  property: schema.mediaUrls!,
+                  rich_text: { contains: '.mov' },
+                },
+              ],
+            },
+          ],
+        }
+      : includePublishedCandidates &&
+          schema.status &&
+          statusType === 'select' &&
+          supportsServerCandidateFilter
+        ? {
+            or: [
+              {
+                property: schema.status,
+                select: { does_not_equal: 'Published' },
+              },
+              {
+                and: [
+                  { property: schema.status, select: { equals: 'Published' } },
+                  {
+                    property: schema.publishPacketReady!,
+                    checkbox: { equals: true },
+                  },
+                ],
+              },
+              {
+                and: [
+                  { property: schema.status, select: { equals: 'Published' } },
+                  {
+                    property: schema.mediaUrls!,
+                    rich_text: { contains: '.mov' },
+                  },
+                ],
+              },
+            ],
+          }
+        : includePublishedCandidates
+          ? undefined
+          : unpublishedFilter;
   const response: QueryDatabaseResponse = await client.databases.query({
     database_id: databaseId,
     page_size: 100,
@@ -511,15 +594,32 @@ async function notionBoundary<T>(
 }
 
 export async function listReadyXhsPosts(
-  { requestId = crypto.randomUUID() }: { requestId?: string } = {},
+  {
+    requestId = crypto.randomUUID(),
+    includePublishedCandidates = false,
+  }: {
+    requestId?: string;
+    includePublishedCandidates?: boolean;
+  } = {},
 ) {
   const client = getClient();
   const schema = await notionBoundary('schema', requestId, () => loadSchema(client));
   const { resolved, duplicateAliases, warnings, properties } = schema;
   const pages = await notionBoundary('query', requestId, () =>
-    queryReadyCandidatePages(client, resolved, properties));
+    queryReadyCandidatePages(
+      client,
+      resolved,
+      properties,
+      getDatabaseId(),
+      includePublishedCandidates,
+    ));
   const posts = pages.flatMap((page) => {
-    const post = toReadyPostCandidate(page, resolved, duplicateAliases);
+    const post = toReadyPostCandidate(
+      page,
+      resolved,
+      duplicateAliases,
+      includePublishedCandidates,
+    );
     return post ? [post] : [];
   });
   return { posts, warnings };

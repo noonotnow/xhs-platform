@@ -186,6 +186,18 @@ export async function insertLocalPublishJob(
       WHERE notion_page_id = ${snapshot.notionPageId}
         AND status IN ('queued', 'verifying')
     )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM local_publish_jobs existing
+        WHERE existing.notion_page_id = ${snapshot.notionPageId}
+          AND (
+            existing.status NOT IN ('reconciled', 'succeeded', 'failed')
+            OR existing.dispatch_authorized_at IS NOT NULL
+            OR existing.dispatched_at IS NOT NULL
+            OR existing.note_id IS NOT NULL
+            OR existing.share_url IS NOT NULL
+          )
+      )
     ON CONFLICT DO NOTHING
     RETURNING *
   `;
@@ -215,7 +227,13 @@ export async function insertLocalPublishJob(
     SELECT *
     FROM local_publish_jobs
     WHERE notion_page_id = ${snapshot.notionPageId}
-      AND status NOT IN ('reconciled', 'succeeded', 'failed')
+      AND (
+        status NOT IN ('reconciled', 'succeeded', 'failed')
+        OR dispatch_authorized_at IS NOT NULL
+        OR dispatched_at IS NOT NULL
+        OR note_id IS NOT NULL
+        OR share_url IS NOT NULL
+      )
     ORDER BY created_at DESC
     LIMIT 1
   `;
@@ -265,6 +283,26 @@ export async function listLocalPublishJobs() {
     LIMIT 100
   `;
   return result.rows.map(mapRow);
+}
+
+export async function listPublishOwningLocalJobs(notionPageIds: string[]) {
+  if (notionPageIds.length === 0) return [];
+  const result = await sql<LocalPublishJobRow>`
+    SELECT *
+    FROM local_publish_jobs
+    WHERE notion_page_id = ANY(${notionPageIds}::text[])
+    ORDER BY created_at DESC
+  `;
+  return result.rows
+    .filter((row) =>
+      canonicalStatus(row.status) !== 'failed' ||
+      Boolean(
+        row.dispatch_authorized_at ||
+        row.dispatched_at ||
+        row.note_id ||
+        row.share_url,
+      ))
+    .map(mapRow);
 }
 
 export async function claimNextStoredLocalPublishJob(

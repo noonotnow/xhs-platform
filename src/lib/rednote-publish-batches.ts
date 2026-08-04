@@ -7,6 +7,10 @@ import {
   NotionPostsError,
 } from '@/lib/notion-posts';
 import {
+  jobSummary,
+  listPublishOwningLocalJobs,
+} from '@/lib/local-publish-job-store';
+import {
   approveStoredPublishBatch,
   createStoredPublishBatch,
   listStoredPublishBatches,
@@ -14,6 +18,7 @@ import {
 } from '@/lib/rednote-publish-batch-store';
 import type {
   LocalPublishSnapshot,
+  LocalPublishJobSummary,
   PublishBatchBlockedCandidate,
   PublishBatchKind,
 } from '@/types/local-publish-job';
@@ -52,6 +57,7 @@ function primaryMedia(post: ReadyXhsPost) {
 
 export function buildBatchSnapshot(post: ReadyXhsPost): LocalPublishSnapshot | null {
   if (
+    post.status.trim().toLowerCase() === 'published' ||
     post.candidateKind !== 'packet_ready' ||
     post.publishBlockers.length > 0 ||
     !post.publishAt
@@ -176,9 +182,15 @@ export function buildBatchCandidateAccounting(
   posts: ReadyXhsPost[],
   kind: PublishBatchKind,
   now: Date,
+  localJobs: LocalPublishJobSummary[] = [],
 ) {
   const weekly = weeklyWindow(now);
-  const items = buildBatchItems(posts, kind, now);
+  const owningJobs = new Map<string, LocalPublishJobSummary>();
+  for (const job of localJobs) {
+    if (!owningJobs.has(job.notionPageId)) owningJobs.set(job.notionPageId, job);
+  }
+  const items = buildBatchItems(posts, kind, now)
+    .filter((item) => !owningJobs.has(item.notionPageId));
   const included = new Set(items.map((item) => item.notionPageId));
   const blockedCandidates = posts.flatMap((post): PublishBatchBlockedCandidate[] => {
     if (included.has(post.id)) return [];
@@ -193,7 +205,15 @@ export function buildBatchCandidateAccounting(
     }
 
     let reason: string;
-    if (!publishAt) {
+    const owningJob = owningJobs.get(post.id);
+    if (post.status.trim().toLowerCase() === 'published') {
+      reason =
+        'Canonical Notion Status is Published. This record is already post-dispatch and is not authorized for another batch.';
+    } else if (owningJob) {
+      reason =
+        `Local publish job ${owningJob.id} is ${owningJob.status}. ` +
+        'An existing active or post-dispatch lifecycle owns this record; do not publish it again.';
+    } else if (!publishAt) {
       reason = 'Needs publish time: set an exact ScheduledDate instant with timezone.';
     } else if (
       Number.isNaN(publishAt.getTime()) ||
@@ -208,7 +228,7 @@ export function buildBatchCandidateAccounting(
       post.videoUrls.length === 0
     ) {
       reason =
-        'Canonical MOV media is present, but no authoritative RedNote-compatible verdict is available. Blocked pending compatibility certification; no batch bypass is allowed.';
+        'Canonical MOV media is present, but no authoritative RedNote-compatible verdict is available. Attach canonical MP4 media or obtain authoritative RedNote compatibility certification; extension or container alone is not evidence, and no batch bypass is allowed.';
     } else if (post.publishBlockers.length > 0) {
       reason = post.publishBlockers.join(' · ');
     } else {
@@ -225,8 +245,14 @@ export function buildBatchCandidateAccounting(
 }
 
 export async function createPublishBatch(kind: PublishBatchKind, now = new Date()) {
-  const { posts } = await listReadyXhsPosts();
-  const { items, blockedCandidates } = buildBatchCandidateAccounting(posts, kind, now);
+  const { posts } = await listReadyXhsPosts({ includePublishedCandidates: true });
+  const jobs = await listPublishOwningLocalJobs(posts.map((post) => post.id));
+  const { items, blockedCandidates } = buildBatchCandidateAccounting(
+    posts,
+    kind,
+    now,
+    jobs.map(jobSummary),
+  );
   const window = kind === 'weekly' ? weeklyWindow(now) : undefined;
   return createStoredPublishBatch({
     kind,

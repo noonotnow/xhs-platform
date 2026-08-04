@@ -534,6 +534,52 @@ describe('Notion Posts mapping', () => {
       expect(update).not.toHaveBeenCalled();
     });
 
+    it('includes only candidate-shaped Published rows for batch reporting', async () => {
+      const query = vi.fn().mockResolvedValue({ results: [], has_more: false });
+      const client = { databases: { query } } as unknown as Client;
+
+      await queryReadyCandidatePages(client, schema, {
+        'Publish packet ready': { type: 'checkbox' },
+        'Image URLs': { type: 'rich_text' },
+        Status: { type: 'status' },
+      }, 'database', true);
+
+      expect(query.mock.calls[0][0]).toMatchObject({
+        filter: {
+          or: [
+            {
+              property: 'Status',
+              status: { does_not_equal: 'Published' },
+            },
+            {
+              and: [
+                {
+                  property: 'Status',
+                  status: { equals: 'Published' },
+                },
+                {
+                  property: 'Publish packet ready',
+                  checkbox: { equals: true },
+                },
+              ],
+            },
+            {
+              and: [
+                {
+                  property: 'Status',
+                  status: { equals: 'Published' },
+                },
+                {
+                  property: 'Image URLs',
+                  rich_text: { contains: '.mov' },
+                },
+              ],
+            },
+          ],
+        },
+      });
+    });
+
     it('fails explicitly when a fallback scan exceeds its safe cap', async () => {
       const query = vi.fn().mockResolvedValue({ results: [], has_more: true });
       const client = { databases: { query } } as unknown as Client;
