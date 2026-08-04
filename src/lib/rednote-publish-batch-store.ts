@@ -29,6 +29,8 @@ interface BatchRow extends QueryResultRow {
   window_end: Date | string | null;
   approved_at: Date | string | null;
   approved_by: string | null;
+  superseded_at: Date | string | null;
+  superseded_by_batch_id: string | null;
   created_at: Date | string;
 }
 
@@ -95,6 +97,10 @@ function mapBatch(row: BatchRow, items: PublishBatchItem[]): PublishBatch {
     createdAt: timestamp(row.created_at),
     ...(row.approved_at ? { approvedAt: timestamp(row.approved_at) } : {}),
     ...(row.approved_by ? { approvedBy: row.approved_by } : {}),
+    ...(row.superseded_at ? { supersededAt: timestamp(row.superseded_at) } : {}),
+    ...(row.superseded_by_batch_id
+      ? { supersededByBatchId: row.superseded_by_batch_id }
+      : {}),
     items,
     blockedCandidates: row.candidate_report ?? [],
   };
@@ -108,10 +114,15 @@ export async function createStoredPublishBatch(input: {
   items: NewPublishBatchItem[];
   blockedCandidates: PublishBatchBlockedCandidate[];
 }) {
-  if (input.items.length === 0) return null;
+  if (input.items.length === 0 && input.kind !== 'bootstrap') return null;
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
+    if (input.kind === 'bootstrap') {
+      await client.query(
+        "SELECT pg_advisory_xact_lock(hashtextextended('rednote-bootstrap-batch', 0))",
+      );
+    }
     const pageIds = Array.from(
       new Set(input.items.map((item) => item.notionPageId)),
     ).sort();
@@ -155,9 +166,37 @@ export async function createStoredPublishBatch(input: {
           : [];
       }),
     ];
-    if (items.length === 0) {
+    if (items.length === 0 && input.kind !== 'bootstrap') {
       await client.query('ROLLBACK');
       return null;
+    }
+    const superseded = input.kind === 'bootstrap'
+      ? await client.query<BatchRow>(
+          `UPDATE rednote_publish_batches
+           SET status = 'superseded',
+               superseded_at = CURRENT_TIMESTAMP
+           WHERE kind = 'bootstrap'
+             AND status = 'pending_approval'
+             AND NOT EXISTS (
+               SELECT 1
+               FROM rednote_publish_batch_items item
+               WHERE item.batch_id = rednote_publish_batches.id
+                 AND item.state NOT IN ('needs_approval', 'invalidated')
+             )
+           RETURNING *`,
+        )
+      : { rows: [] as BatchRow[] };
+    if (superseded.rows.length > 0) {
+      await client.query(
+        `UPDATE rednote_publish_batch_items
+         SET state = 'invalidated',
+             invalidation_reason =
+               'Batch superseded before approval by a newly computed bootstrap manifest.',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE batch_id = ANY($1::uuid[])
+           AND state = 'needs_approval'`,
+        [superseded.rows.map((batch) => batch.id)],
+      );
     }
     const batch = await client.query<BatchRow>(
       `INSERT INTO rednote_publish_batches (
@@ -192,7 +231,7 @@ export async function createStoredPublishBatch(input: {
       );
       if (inserted.rows[0]) storedItems.push(mapItem(inserted.rows[0]));
     }
-    if (storedItems.length === 0) {
+    if (storedItems.length === 0 && input.kind !== 'bootstrap') {
       await client.query('ROLLBACK');
       return null;
     }
@@ -206,6 +245,15 @@ export async function createStoredPublishBatch(input: {
         [actualHash, row.id],
       );
       row = updated.rows[0];
+    }
+    if (superseded.rows.length > 0) {
+      await client.query(
+        `UPDATE rednote_publish_batches
+         SET superseded_by_batch_id = $1::uuid
+         WHERE id = ANY($2::uuid[])
+           AND status = 'superseded'`,
+        [row.id, superseded.rows.map((batch) => batch.id)],
+      );
     }
     await client.query('COMMIT');
     return mapBatch(row, storedItems);
@@ -244,26 +292,56 @@ export async function approveStoredPublishBatch(
   approvedBy: string,
   decisions: Array<{ itemId: string; approved: boolean; reason?: string }>,
 ) {
-  for (const decision of decisions) {
-    if (!decision.approved) {
-      await sql`
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      "SELECT pg_advisory_xact_lock(hashtextextended('rednote-bootstrap-batch', 0))",
+    );
+    const locked = await client.query<BatchRow>(
+      `SELECT *
+       FROM rednote_publish_batches
+       WHERE id = $1::uuid
+         AND manifest_hash = $2
+       FOR UPDATE`,
+      [batchId, manifestHash],
+    );
+    const current = locked.rows[0];
+    if (!current || current.status !== 'pending_approval') {
+      throw new Error(
+        current?.status === 'superseded'
+          ? 'This batch was superseded and can never be approved. Refresh to review its replacement manifest.'
+          : 'The batch is no longer pending approval; refresh before approving.',
+      );
+    }
+    for (const decision of decisions) {
+      if (!decision.approved) {
+        await client.query(
+          `
         UPDATE rednote_publish_batch_items
         SET state = 'invalidated',
-            invalidation_reason = ${decision.reason ?? 'Source changed before approval'},
+            invalidation_reason = $1,
             updated_at = CURRENT_TIMESTAMP
-        WHERE id = ${decision.itemId}::uuid
-          AND batch_id = ${batchId}::uuid
+        WHERE id = $2::uuid
+          AND batch_id = $3::uuid
           AND state = 'needs_approval'
-      `;
-      continue;
-    }
-    await sql`
+          `,
+          [
+            decision.reason ?? 'Source changed before approval',
+            decision.itemId,
+            batchId,
+          ],
+        );
+        continue;
+      }
+      await client.query(
+        `
       WITH approved_item AS (
         UPDATE rednote_publish_batch_items
         SET state = 'approved',
             updated_at = CURRENT_TIMESTAMP
-        WHERE id = ${decision.itemId}::uuid
-          AND batch_id = ${batchId}::uuid
+        WHERE id = $1::uuid
+          AND batch_id = $2::uuid
           AND state = 'needs_approval'
         RETURNING *
       ), page_lock AS (
@@ -307,20 +385,26 @@ export async function approveStoredPublishBatch(
           updated_at = CURRENT_TIMESTAMP
       FROM inserted_job
       WHERE item.id = inserted_job.batch_item_id
-    `;
-    await sql`
+        `,
+        [decision.itemId, batchId],
+      );
+      await client.query(
+        `
       UPDATE rednote_publish_batch_items
       SET state = 'invalidated',
           invalidation_reason =
             'An existing publish or reconciliation lifecycle already owns this post.',
           updated_at = CURRENT_TIMESTAMP
-      WHERE id = ${decision.itemId}::uuid
-        AND batch_id = ${batchId}::uuid
+      WHERE id = $1::uuid
+        AND batch_id = $2::uuid
         AND state = 'approved'
         AND local_publish_job_id IS NULL
-    `;
-  }
-  await sql`
+        `,
+        [decision.itemId, batchId],
+      );
+    }
+    const approved = await client.query<BatchRow>(
+      `
     UPDATE rednote_publish_batches AS batch
     SET status = CASE
           WHEN EXISTS (
@@ -330,11 +414,24 @@ export async function approveStoredPublishBatch(
           ELSE 'approved'
         END,
         approved_at = CURRENT_TIMESTAMP,
-        approved_by = ${approvedBy}
-    WHERE id = ${batchId}::uuid
-      AND manifest_hash = ${manifestHash}
+        approved_by = $1
+    WHERE id = $2::uuid
+      AND manifest_hash = $3
       AND status = 'pending_approval'
-  `;
+    RETURNING *
+      `,
+      [approvedBy, batchId, manifestHash],
+    );
+    if (!approved.rows[0]) {
+      throw new Error('The batch could not be approved because it is no longer pending.');
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
   return (await listStoredPublishBatches(batchId))[0];
 }
 

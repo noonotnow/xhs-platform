@@ -75,7 +75,11 @@ interface ClaimedLocalPublishJobBase
 }
 
 export type PublishBatchKind = 'weekly' | 'catch_up' | 'bootstrap';
-export type PublishBatchStatus = 'pending_approval' | 'approved' | 'partially_approved';
+export type PublishBatchStatus =
+  | 'pending_approval'
+  | 'approved'
+  | 'partially_approved'
+  | 'superseded';
 export type PublishBatchItemState =
   | 'needs_approval'
   | 'approved'
@@ -111,6 +115,8 @@ export interface PublishBatch {
   createdAt: string;
   approvedAt?: string;
   approvedBy?: string;
+  supersededAt?: string;
+  supersededByBatchId?: string;
   items: PublishBatchItem[];
   blockedCandidates: PublishBatchBlockedCandidate[];
 }

@@ -240,10 +240,12 @@ state.
 ### Bounded batch approval and sweeps
 
 Apply `migrations/008_rednote_publish_batches.sql` before deploying code that
-serves batch APIs or worker claims. It creates immutable batch/item audit tables,
-links batch items to existing jobs, persists blocked-candidate accounting, and adds
-the durable sweep ledger. It does not touch Notion and must not be run automatically
-by the application.
+serves batch APIs or worker claims. Apply the additive, idempotent
+`migrations/009_superseded_rednote_publish_batches.sql` before deploying support
+for safely rebuilding a pending bootstrap. These create immutable batch/item audit
+tables, link batch items to existing jobs, persist blocked-candidate accounting,
+add the durable sweep ledger, and record explicit supersession. They do not touch
+Notion and must not be run automatically by the application.
 
 The admin batch preview shows every frozen title, caption, tags, canonical media
 URL/type, exact ScheduledDate instant, source revision, item hash, dispatch mode,
@@ -270,10 +272,15 @@ For the one-time bootstrap after the migration and application deploy:
    records remain visible in the preview as blocked and are not part of the
    authorized manifest.
 3. Copy the displayed manifest hash into the change record, then select
-   **Approve this exact manifest** once. Do not use the bootstrap action again for
-   the same ready set.
+   **Approve this exact manifest** once. Rebuild only when the displayed pending
+   preview must be explicitly superseded; never approve an older hash.
 
-Deploy order: migration 008, this platform release plus `CRON_SECRET`, configure
+Rebuilding a still-pending bootstrap explicitly supersedes the old immutable
+manifest and invalidates only its unapproved item states so they release batch
+ownership. The old hash and frozen snapshots remain visible for audit and can
+never be approved; review and approve only the replacement manifest.
+
+Deploy order: migrations 008 and 009, this platform release plus `CRON_SECRET`, configure
 the workflow's `XHS_PLATFORM_URL` and matching `CRON_SECRET` repository secrets,
 then deploy worker support for strict `batchAuthorization` and reauthorization
 with bounded-batch bypass still disabled. Enable bypass only after both
