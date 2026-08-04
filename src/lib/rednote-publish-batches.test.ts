@@ -8,6 +8,7 @@ import {
   weeklyWindow,
 } from '@/lib/rednote-publish-batches';
 import type { ReadyXhsPost } from '@/types/ready-post';
+import type { LocalPublishJobSummary } from '@/types/local-publish-job';
 import { rednoteMediaIdentity } from '@/lib/rednote-publish-authorization';
 
 function post(
@@ -34,6 +35,21 @@ function post(
     lastEditedTime: '2026-08-04T12:00:00.000Z',
     publishBlockers: [],
     ...overrides,
+  };
+}
+
+function localJob(
+  notionPageId: string,
+  status: LocalPublishJobSummary['status'],
+  id: string,
+): LocalPublishJobSummary {
+  return {
+    id,
+    notionPageId,
+    status,
+    createdAt: '2026-08-04T12:00:00.000Z',
+    updatedAt: '2026-08-04T12:00:00.000Z',
+    verificationAttempts: 0,
   };
 }
 
@@ -101,8 +117,58 @@ describe('bounded RedNote publish batches', () => {
       notionPageId: day4.id,
       headline: 'Day 4',
       publishAt: '2026-08-06T02:30:00.000Z',
-      reason: expect.stringContaining('no authoritative RedNote-compatible verdict'),
+      reason: expect.stringMatching(
+        /no authoritative RedNote-compatible verdict.*Attach canonical MP4.*authoritative RedNote compatibility certification.*extension or container alone/i,
+      ),
     })]);
+  });
+
+  it('fails closed for the live bootstrap ownership and Published cases', () => {
+    const now = new Date('2026-08-04T14:04:00.000Z');
+    const scheduled = post('2026-08-04T15:00:00.000Z', {
+      id: '11111111-1111-4111-8111-111111111111',
+      headline: '他真的很像童话里的王子',
+    });
+    const submitted = post('2026-08-04T16:00:00.000Z', {
+      id: '22222222-2222-4222-8222-222222222222',
+      headline: '今日氛围格子：刘学义 / 源仲 / 老公',
+    });
+    const published = post('2026-08-04T17:00:00.000Z', {
+      id: '33333333-3333-4333-8333-333333333333',
+      headline: 'Canonical published record',
+      status: 'Published',
+    });
+    const eligibleSibling = post('2026-08-04T18:00:00.000Z', {
+      id: '44444444-4444-4444-8444-444444444444',
+      headline: 'Eligible sibling',
+    });
+
+    const accounting = buildBatchCandidateAccounting(
+      [scheduled, submitted, published, eligibleSibling],
+      'bootstrap',
+      now,
+      [
+        localJob(scheduled.id, 'scheduled', 'job-scheduled'),
+        localJob(submitted.id, 'submitted', 'job-submitted'),
+      ],
+    );
+
+    expect(accounting.items.map((item) => item.notionPageId))
+      .toEqual([eligibleSibling.id]);
+    expect(accounting.blockedCandidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        notionPageId: scheduled.id,
+        reason: expect.stringMatching(/job-scheduled is scheduled.*do not publish it again/i),
+      }),
+      expect.objectContaining({
+        notionPageId: submitted.id,
+        reason: expect.stringMatching(/job-submitted is submitted.*do not publish it again/i),
+      }),
+      expect.objectContaining({
+        notionPageId: published.id,
+        reason: expect.stringMatching(/Status is Published.*not authorized/i),
+      }),
+    ]));
   });
 
   it('computes the next Monday-Sunday window across New York DST', () => {

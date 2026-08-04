@@ -45,6 +45,17 @@ interface ItemRow extends QueryResultRow {
   local_publish_job_id: string | null;
 }
 
+interface OwningJobRow extends QueryResultRow {
+  notion_page_id: string;
+  id: string;
+  status: string;
+}
+
+function owningJobReason(job: OwningJobRow) {
+  return `Local publish job ${job.id} is ${job.status}. ` +
+    'An existing active or post-dispatch lifecycle owns this record; do not publish it again.';
+}
+
 function timestamp(value: Date | string) {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }
@@ -101,6 +112,53 @@ export async function createStoredPublishBatch(input: {
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
+    const pageIds = Array.from(
+      new Set(input.items.map((item) => item.notionPageId)),
+    ).sort();
+    for (const pageId of pageIds) {
+      await client.query(
+        'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+        [pageId],
+      );
+    }
+    const owningJobs = pageIds.length === 0
+      ? { rows: [] as OwningJobRow[] }
+      : await client.query<OwningJobRow>(
+          `SELECT DISTINCT ON (notion_page_id) notion_page_id, id, status
+           FROM local_publish_jobs
+           WHERE notion_page_id = ANY($1::text[])
+             AND (
+               status <> 'failed'
+               OR dispatch_authorized_at IS NOT NULL
+               OR dispatched_at IS NOT NULL
+               OR note_id IS NOT NULL
+               OR share_url IS NOT NULL
+             )
+           ORDER BY notion_page_id, created_at DESC`,
+          [pageIds],
+        );
+    const ownershipByPage = new Map(
+      owningJobs.rows.map((job) => [job.notion_page_id, job]),
+    );
+    const items = input.items.filter((item) => !ownershipByPage.has(item.notionPageId));
+    const blockedCandidates = [
+      ...input.blockedCandidates,
+      ...input.items.flatMap((item): PublishBatchBlockedCandidate[] => {
+        const job = ownershipByPage.get(item.notionPageId);
+        return job
+          ? [{
+              notionPageId: item.notionPageId,
+              headline: item.snapshot.headline,
+              ...(item.snapshot.publishAt ? { publishAt: item.snapshot.publishAt } : {}),
+              reason: owningJobReason(job),
+            }]
+          : [];
+      }),
+    ];
+    if (items.length === 0) {
+      await client.query('ROLLBACK');
+      return null;
+    }
     const batch = await client.query<BatchRow>(
       `INSERT INTO rednote_publish_batches (
         kind, manifest_hash, candidate_report, window_start, window_end
@@ -109,14 +167,14 @@ export async function createStoredPublishBatch(input: {
       [
        input.kind,
        input.manifestHash,
-       JSON.stringify(input.blockedCandidates),
+       JSON.stringify(blockedCandidates),
        input.windowStart ?? null,
        input.windowEnd ?? null,
       ],
     );
     let row = batch.rows[0];
     const storedItems: PublishBatchItem[] = [];
-    for (const item of input.items) {
+    for (const item of items) {
       const inserted = await client.query<ItemRow>(
         `INSERT INTO rednote_publish_batch_items (
            batch_id, notion_page_id, snapshot, item_hash, dispatch_mode, late_by_seconds
@@ -208,6 +266,10 @@ export async function approveStoredPublishBatch(
           AND batch_id = ${batchId}::uuid
           AND state = 'needs_approval'
         RETURNING *
+      ), page_lock AS (
+        SELECT approved_item.*,
+               pg_advisory_xact_lock(hashtextextended(approved_item.notion_page_id, 0))
+        FROM approved_item
       ), inserted_job AS (
         INSERT INTO local_publish_jobs (
           notion_page_id, snapshot, idempotency_key, batch_item_id
@@ -217,7 +279,25 @@ export async function approveStoredPublishBatch(
           snapshot,
           gen_random_uuid(),
           id
-        FROM approved_item
+        FROM page_lock
+        WHERE NOT EXISTS (
+          SELECT 1
+          FROM local_publish_jobs existing
+          WHERE existing.notion_page_id = page_lock.notion_page_id
+            AND (
+              existing.status <> 'failed'
+              OR existing.dispatch_authorized_at IS NOT NULL
+              OR existing.dispatched_at IS NOT NULL
+              OR existing.note_id IS NOT NULL
+              OR existing.share_url IS NOT NULL
+            )
+        )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM manual_reconciliation_requests reconciliation
+            WHERE reconciliation.notion_page_id = page_lock.notion_page_id
+              AND reconciliation.status IN ('queued', 'verifying')
+          )
         ON CONFLICT DO NOTHING
         RETURNING id, batch_item_id
       )

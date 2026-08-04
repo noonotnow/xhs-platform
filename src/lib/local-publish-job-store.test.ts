@@ -14,6 +14,7 @@ import {
   failStoredLocalPublishJob,
   insertLocalPublishJob,
   listLocalPublishJobs,
+  listPublishOwningLocalJobs,
   normalizeStoredLocalPublishSnapshot,
   prepareStoredLocalPublishVerification,
   recordStoredLocalPublishDispatch,
@@ -33,6 +34,30 @@ const snapshot: LocalPublishSnapshot = {
   mediaUrl: 'https://images.xhs.justlikekatie.com/videos/assets/post.mp4',
   notionLastEditedTime: '2026-08-01T12:00:00.000Z',
 };
+
+describe('publish ownership lookup', () => {
+  it('keeps active and post-dispatch failures while allowing pre-dispatch retry', async () => {
+    mocks.sql.mockResolvedValue({
+      rows: [
+        { ...claimedRow(), id: 'active', status: 'scheduled' },
+        {
+          ...claimedRow(),
+          id: 'dispatch-authorized-failure',
+          status: 'failed',
+          dispatch_authorized_at: '2026-08-01T12:59:00.000Z',
+        },
+        { ...claimedRow(), id: 'pre-dispatch-failure', status: 'failed' },
+      ],
+      rowCount: 3,
+    });
+
+    await expect(listPublishOwningLocalJobs([snapshot.notionPageId]))
+      .resolves.toEqual([
+        expect.objectContaining({ id: 'active', status: 'scheduled' }),
+        expect.objectContaining({ id: 'dispatch-authorized-failure', status: 'failed' }),
+      ]);
+  });
+});
 
 function claimedRow() {
   return {
