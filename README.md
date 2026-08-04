@@ -77,7 +77,7 @@ in Vercel:
 | `LOCAL_PUBLISH_VERIFICATION_BACKOFF_SECONDS` | Optional four-value retry schedule; defaults to `900,3600,21600,86400` seconds (15m, 1h, 6h, 24h) |
 | `MANUAL_RECONCILIATION_LEASE_SECONDS` | Optional existing-post verification lease; defaults to 1800 seconds and is clamped to 60–7200 |
 | `MANUAL_RECONCILIATION_BACKOFF_SECONDS` | Optional four-value existing-post retry schedule; defaults to `900,3600,21600,86400` |
-| `CRON_SECRET` | Bearer secret used by the hourly RedNote sweep; the app resolves 08:00 daily and Sunday 18:00 in `America/New_York` |
+| `CRON_SECRET` | Bearer secret used by the RedNote sweep endpoint and matching GitHub Actions repository secret |
 
 Database connections are selected in the order `XHS_DATABASE_URL`,
 `XHS_DATABASE_POSTGRES_URL`, `DATABASE_URL`, then `POSTGRES_URL`. The managed
@@ -252,7 +252,9 @@ timestamp. A source change invalidates only that item. Active unpublished record
 remain visible as `Needs publish time`, `Needs batch approval`, or their job state;
 an absent or date-only ScheduledDate is never interpreted as immediate publish.
 
-The hourly Vercel cron calls `/api/cron/rednote-sweep`. The application uses
+The hourly `.github/workflows/rednote-sweep.yml` workflow calls
+`/api/cron/rednote-sweep` using the `XHS_PLATFORM_URL` and `CRON_SECRET`
+repository secrets. The application uses
 `America/New_York`, not a fixed UTC offset, to run the daily 08:00 operational
 sweep and Sunday 18:00 weekly candidate for the following Monday-Sunday window.
 Sweeps never approve. Daily runs recover known receipts into verification,
@@ -271,10 +273,12 @@ For the one-time bootstrap after the migration and application deploy:
    **Approve this exact manifest** once. Do not use the bootstrap action again for
    the same ready set.
 
-Deploy order: migration 008, this platform release plus `CRON_SECRET`, then worker
-support for strict `batchAuthorization` and reauthorization (without enabling
-bypass). Enable bounded-batch bypass only after both reauthorization checks succeed
-against production. Finally perform the bootstrap steps above.
+Deploy order: migration 008, this platform release plus `CRON_SECRET`, configure
+the workflow's `XHS_PLATFORM_URL` and matching `CRON_SECRET` repository secrets,
+then deploy worker support for strict `batchAuthorization` and reauthorization
+with bounded-batch bypass still disabled. Enable bypass only after both
+reauthorization checks succeed against production. Finally perform the bootstrap
+steps above.
 
 ### Already-published manual reconciliation
 
