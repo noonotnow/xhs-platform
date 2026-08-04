@@ -16,7 +16,7 @@ import type {
 
 const MAX_TITLE_LENGTH = 100;
 const MAX_CAPTION_LENGTH = 5_000;
-const MAX_TAG_LENGTH = 100;
+const MAX_TAG_LENGTH = 50;
 const MAX_TAGS = 20;
 const CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 export class LocalPublishJobError extends Error {
@@ -47,7 +47,7 @@ function cleanText(value: unknown, field: string, maxLength: number) {
   return cleaned;
 }
 
-function cleanTags(value: unknown) {
+export function normalizeLocalPublishTags(value: unknown) {
   if (!Array.isArray(value) || value.length > MAX_TAGS) {
     throw new LocalPublishJobError(
       `tags must be an array with at most ${MAX_TAGS} entries`,
@@ -55,10 +55,19 @@ function cleanTags(value: unknown) {
       400,
     );
   }
-  const tags = value.map((tag) =>
-    cleanText(tag, 'Each tag', MAX_TAG_LENGTH).replace(/^#+/, '').trim());
-  if (tags.some((tag) => !tag)) {
-    throw new LocalPublishJobError('Tags cannot contain only # characters', 'VALIDATION_ERROR', 400);
+  const tags = value.flatMap((tag) =>
+    cleanText(tag, 'Each tag', MAX_CAPTION_LENGTH)
+      .split(/\s+#+(?=\S)/)
+      .map((part) => part.replace(/^#+/, '').trim()));
+  if (
+    tags.length > MAX_TAGS ||
+    tags.some((tag) => !tag || tag.length > MAX_TAG_LENGTH || tag.includes('#'))
+  ) {
+    throw new LocalPublishJobError(
+      `Tags must contain 1-${MAX_TAG_LENGTH} characters without #`,
+      'VALIDATION_ERROR',
+      400,
+    );
   }
   return Array.from(new Set(tags));
 }
@@ -131,7 +140,7 @@ export function parseQueueLocalPublishInput(value: unknown): QueueLocalPublishIn
     compatibilityTrialConfirmed: body.compatibilityTrialConfirmed === true,
     title: cleanText(body.title, 'title', MAX_TITLE_LENGTH),
     caption: cleanText(body.caption, 'caption', MAX_CAPTION_LENGTH),
-    tags: cleanTags(body.tags),
+    tags: normalizeLocalPublishTags(body.tags),
     media: mediaChoice(body.media),
   };
 }

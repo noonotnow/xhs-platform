@@ -83,6 +83,20 @@ describe('local publish job input', () => {
     expect(snapshot.tags).toEqual(['Legacy', '旧标签']);
   });
 
+  it('normalizes legacy combined hashtag fields to the strict worker contract', () => {
+    const parsed = parseQueueLocalPublishInput(input({
+      tags: ['好视频扶持计划 ##念无双 ##刘学义 ##源仲 ##古装剧'],
+    }));
+
+    expect(parsed.tags).toEqual([
+      '好视频扶持计划',
+      '念无双',
+      '刘学义',
+      '源仲',
+      '古装剧',
+    ]);
+  });
+
   it('rejects normal queueing when ScheduledDate is absent', () => {
     const parsed = parseQueueLocalPublishInput(input());
     expect(() => buildLocalPublishSnapshot(
