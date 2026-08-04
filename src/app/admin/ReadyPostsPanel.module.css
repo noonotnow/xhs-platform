@@ -67,6 +67,16 @@
   color: #713f12;
 }
 
+.supersededBatch {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  color: #713f12;
+  background: #fffbeb;
+  border: 1px solid #f59e0b;
+  border-radius: 8px;
+}
+
 .headingRow,
 .statusRow,
 .actionRow {

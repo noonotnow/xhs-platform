@@ -277,6 +277,13 @@ export async function approvePublishBatch(
   if (!batch || batch.manifestHash !== expectedManifestHash) {
     throw new Error('The batch manifest changed or no longer exists; refresh before approving.');
   }
+  if (batch.status !== 'pending_approval') {
+    throw new Error(
+      batch.status === 'superseded'
+        ? 'This batch was superseded and can never be approved. Refresh to review its replacement manifest.'
+        : 'The batch is no longer pending approval; refresh before approving.',
+    );
+  }
   const decisions = await Promise.all(batch.items.map(async (item) => {
     try {
       const post = await getReadyXhsPost(item.notionPageId);

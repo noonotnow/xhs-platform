@@ -289,7 +289,11 @@ export default function ReadyPostsPanel() {
     () => posts.filter((post) => post.candidateKind === 'active_unpublished'),
     [posts],
   );
-  const pendingBatch = batches.find((batch) => batch.status === 'pending_approval');
+  const pendingBatch = batches.find((batch) =>
+    batch.kind === 'bootstrap' && batch.status === 'pending_approval');
+  const supersededBatches = batches
+    .filter((batch) => batch.kind === 'bootstrap' && batch.status === 'superseded')
+    .slice(0, 3);
   const manualUrlError = manualPublicPostError(manualPublicPost);
   const packetReadyPosts = useMemo(
     () => posts.filter((post) => post.candidateKind === 'packet_ready'),
@@ -737,10 +741,14 @@ export default function ReadyPostsPanel() {
           <button
             className={styles.secondaryButton}
             type="button"
-            disabled={batchBusy || Boolean(pendingBatch)}
+            disabled={batchBusy}
             onClick={() => void updateBatch('create')}
           >
-            {batchBusy ? 'Working…' : 'Build bootstrap batch'}
+            {batchBusy
+              ? 'Working…'
+              : pendingBatch
+                ? 'Rebuild and supersede preview'
+                : 'Build bootstrap batch'}
           </button>
         </div>
         {pendingBatch ? (
@@ -792,7 +800,7 @@ export default function ReadyPostsPanel() {
             <button
               className={styles.queueButton}
               type="button"
-              disabled={batchBusy}
+              disabled={batchBusy || pendingBatch.items.length === 0}
               onClick={() => {
                 if (window.confirm(
                   `Approve exactly ${pendingBatch.items.length} frozen item(s)?\n\nManifest ${pendingBatch.manifestHash}`,
@@ -801,7 +809,9 @@ export default function ReadyPostsPanel() {
                 }
               }}
             >
-              Approve this exact manifest
+              {pendingBatch.items.length === 0
+                ? 'No approvable items'
+                : 'Approve this exact manifest'}
             </button>
           </>
         ) : (
@@ -809,6 +819,18 @@ export default function ReadyPostsPanel() {
             No batch is awaiting approval. Posts without exact times stay visible but are excluded.
           </p>
         )}
+        {supersededBatches.map((batch) => (
+          <div key={batch.id} className={styles.supersededBatch}>
+            <strong>Superseded preview — not approvable</strong>
+            <p className={styles.muted}>
+              Old manifest <code>{batch.manifestHash}</code> is retained for audit and can
+              never be approved.
+              {batch.supersededByBatchId && pendingBatch?.id === batch.supersededByBatchId
+                ? ' The replacement manifest is shown above.'
+                : ' Refresh to load its replacement manifest.'}
+            </p>
+          </div>
+        ))}
       </section>
 
       {loading && posts.length === 0 ? (
