@@ -678,6 +678,16 @@ export async function recordStoredLocalPublishDispatch(
         WHERE disposition.request_kind = 'targeted_local_job'
           AND disposition.source_local_job_id = local_publish_jobs.id
       )
+      AND (
+        (
+          ${status} = 'scheduled'
+          AND COALESCE(snapshot->>'publishAt', snapshot->>'scheduledDate') IS NOT NULL
+        )
+        OR (
+          ${status} = 'submitted'
+          AND COALESCE(snapshot->>'publishAt', snapshot->>'scheduledDate') IS NULL
+        )
+      )
     RETURNING *
   `;
   if (result.rows[0]) return mapRow(result.rows[0]);
