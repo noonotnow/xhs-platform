@@ -78,6 +78,7 @@ export async function createManualReconciliation(
   const existing = await findManualReconciliationByIdempotencyKey(idempotencyKey);
   if (existing) {
     if (
+      existing.kind !== 'notion_only' ||
       existing.notionPageId !== input.notionPageId ||
       existing.noteId !== input.noteId ||
       existing.shareUrl !== input.shareUrl

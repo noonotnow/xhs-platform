@@ -275,6 +275,21 @@ describe('external job disposition persistence', () => {
       .rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
   });
 
+  it('rejects a notion-only key reused for a targeted disposition', async () => {
+    mocks.query
+      .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result([job()]))
+      .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result([request({
+        request_kind: 'notion_only',
+        source_local_job_id: null,
+      })]))
+      .mockResolvedValueOnce(result());
+
+    await expect(insertExternalJobDisposition(input, idempotencyKey))
+      .rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+  });
+
   it('marks the job and batch verified in one transaction before external work', async () => {
     mocks.load.mockResolvedValue(stored({ status: 'verifying' }));
     mocks.query

@@ -104,6 +104,40 @@ describe('manual reconciliation orchestration', () => {
     });
   });
 
+  it('returns an exact notion-only idempotent replay', async () => {
+    mocks.find.mockResolvedValue(request);
+
+    await expect(createManualReconciliation({
+      notionPageId: request.notionPageId,
+      publicPost: request.shareUrl,
+      confirmed: true,
+    }, request.idempotencyKey)).resolves.toMatchObject({
+      created: false,
+      reconciliation: { id: request.id },
+    });
+    expect(mocks.getPost).not.toHaveBeenCalled();
+    expect(mocks.insert).not.toHaveBeenCalled();
+  });
+
+  it('rejects a targeted disposition key reused for notion-only reconciliation', async () => {
+    mocks.find.mockResolvedValue({
+      ...request,
+      kind: 'targeted_local_job',
+      sourceLocalJobId: '66666666-6666-4666-8666-666666666666',
+    });
+
+    await expect(createManualReconciliation({
+      notionPageId: request.notionPageId,
+      publicPost: request.shareUrl,
+      confirmed: true,
+    }, request.idempotencyKey)).rejects.toMatchObject({
+      code: 'IDEMPOTENCY_CONFLICT',
+      status: 409,
+    });
+    expect(mocks.getPost).not.toHaveBeenCalled();
+    expect(mocks.insert).not.toHaveBeenCalled();
+  });
+
   it('rejects MOV compatibility trials before creating reconciliation work', async () => {
     mocks.find.mockResolvedValue(null);
     mocks.getPost.mockResolvedValue({
