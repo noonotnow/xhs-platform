@@ -177,6 +177,7 @@ caching.
 | `GET /api/local-publish-jobs/next?lane=verification` | Atomic single claim only when verification or reconciliation is due |
 | `GET /api/local-publish-jobs/next` | Backward-compatible combined lane |
 | `POST /api/local-publish-jobs/:id/result` | Per-job token result; preserves staging, human approval, verification, and reconciliation gates |
+| `POST /admin/api/local-publish-job-success-attestations` | Access-authenticated exact scheduled-success attestation; immutable receipt, dispatch quarantine, and immediate worker release handshake |
 | `POST /admin/api/publish-job-recoveries` | Cloudflare Access operator action that requeues the same exact approved job only for a pre-dispatch `BOUNDED_BATCH_BYPASS_DISABLED` terminal claim generation and writes one append-only audit per generation |
 | `GET /api/rednote-metrics/due?limit=20` | Bounded metrics batch with a distinct token and lease per post |
 | `POST /api/rednote-metrics/observations` | Consolidated observations and one coalesced run summary |
@@ -200,6 +201,41 @@ For a valid observation batch, stale item tokens are counted in
 replays are idempotent after expiry and write nothing. Changed expired replays
 fail per item. Validation, authentication, stale single-job results, and
 unexpected storage failures use 400, 401, 409, and 500 respectively.
+
+#### Operator success release protocol
+
+`operator-success-attestation/v1` splits one job into dispatch-terminal and
+receipt-pending concerns. Creation is capability-gated by
+`LOCAL_PUBLISH_WORKER_ATTESTATION_CONTRACT_REVISION`; deploy the migration and
+platform with the gate unset, deploy the v1 worker, then enable the exact
+literal. The action accepts only the exact approved bounded scheduled job/item
+snapshot and only an expired staged attempt with consumed dispatch authorization
+or terminal `AMBIGUOUS_CREATOR_UI` evidence.
+
+The immutable receipt records operator, time, page/job/batch/item IDs, requested
+UTC `publishAt`, Eastern expected-outcome text, revision, manifest/item digest,
+and SHA-256 of the revoked prior claim token. `snapshotDigest === itemHash`;
+the digest is SHA-256 of stable JSON with recursively sorted object keys and
+array order preserved.
+
+The first due verification claim is release-only and sets
+`successAttestation.releaseRequired:true`. The worker must persist the full
+receipt as a local tombstone and atomically clear only a matching local slot,
+without opening Creator. It acknowledges with the exact
+`ATTESTATION_RELEASE_CONSUMED` result and contract message. The platform appends
+an immutable acknowledgement and schedules later verification at
+`max(now, requestedPublishAt + 15 minutes)`. Only subsequent claims with
+`releaseRequired:false` may discover identity in Notes Manager. Identity-free
+delays retain `operator_attested`; exact `verified` identity follows normal
+Notion reconciliation. Neither path is eligible for dispatch or recovery.
+
+Named 409 boundaries are `JOB_OPERATOR_ATTESTED` for any stale dispatch path,
+`STALE_CLAIM` for a mismatched current verification claim,
+`ATTESTATION_RELEASE_REQUIRED` before receipt lookup,
+`ATTESTATION_RELEASE_ACK_MISMATCH` for a changed reserved acknowledgement, and
+`ATTESTATION_RELEASE_ACK_CONFLICT` for different durable ownership. Exact
+attestation and acknowledgement replays are idempotent; changed evidence fails
+closed.
 
 ---
 

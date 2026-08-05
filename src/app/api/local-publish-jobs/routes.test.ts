@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   claim: vi.fn(),
   authorize: vi.fn(),
   submit: vi.fn(),
+  attestationCandidates: vi.fn(),
 }));
 
 vi.mock('@/lib/xhs-operator-auth', () => ({
@@ -25,6 +26,9 @@ vi.mock('@/lib/local-publish-jobs', async (importOriginal) => {
     submitLocalPublishJobResult: mocks.submit,
   };
 });
+vi.mock('@/lib/operator-success-attestation-store', () => ({
+  listOperatorSuccessAttestationEvidence: mocks.attestationCandidates,
+}));
 
 import {
   GET as listJobs,
@@ -49,6 +53,7 @@ describe('local publish job routes', () => {
     process.env.LOCAL_PUBLISH_WORKER_TOKEN = workerToken;
     mocks.requireOperator.mockResolvedValue(null);
     mocks.list.mockResolvedValue([]);
+    mocks.attestationCandidates.mockResolvedValue([]);
   });
 
   it('requires operator authentication for all admin job data', async () => {

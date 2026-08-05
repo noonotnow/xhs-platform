@@ -7,6 +7,7 @@ export type LocalPublishJobStatus =
   | 'staged'
   | 'submitted'
   | 'scheduled'
+  | 'operator_attested'
   | 'verification_pending'
   | 'verified'
   | 'reconciled'
@@ -48,6 +49,7 @@ export interface LocalPublishJobSummary {
   verifiedAt?: string;
   reconciledAt?: string;
   completedAt?: string;
+  successAttestation?: OperatorSuccessAttestationSummary;
 }
 
 export interface BatchAuthorization {
@@ -97,6 +99,35 @@ export interface PublishBatchItem {
   invalidationReason?: string;
   localPublishJobId?: string;
   recoveryEvidence?: RednotePublishJobRecoveryEvidence;
+  successAttestationEvidence?: OperatorSuccessAttestationEvidence;
+}
+
+export interface OperatorSuccessAttestationEvidence {
+  batchId: string;
+  manifestHash: string;
+  itemId: string;
+  jobId: string;
+  itemHash: string;
+  snapshotRevision: string;
+  requestedPublishAt: string;
+  expectedOutcome: {
+    kind: 'scheduled';
+    publishAt: string;
+    timeZone: 'America/New_York';
+    text: string;
+  };
+}
+
+export interface OperatorSuccessAttestationSummary
+  extends OperatorSuccessAttestationEvidence {
+  id: string;
+  notionPageId: string;
+  contractRevision: 'operator-success-attestation/v1';
+  snapshotDigest: string;
+  priorClaimTokenDigest: string;
+  releaseRequired: boolean;
+  attestedBy: string;
+  attestedAt: string;
 }
 
 export interface RednotePublishJobRecoveryEvidence {
@@ -155,6 +186,12 @@ export type ClaimedLocalPublishJob =
       shareUrl: string;
       verificationAttempts: number;
       nextVerificationAt: string;
+    })
+  | (ClaimedLocalPublishJobBase & {
+      status: 'operator_attested';
+      verificationAttempts: number;
+      nextVerificationAt: string;
+      successAttestation: OperatorSuccessAttestationSummary;
     })
   | (ClaimedLocalPublishJobBase & {
       status: 'verified';

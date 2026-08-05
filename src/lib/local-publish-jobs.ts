@@ -13,6 +13,7 @@ import {
   completeStoredLocalPublishReconciliation,
   consumeStoredDispatchAuthorization,
   deferStoredLocalPublishVerification,
+  deferStoredOperatorAttestedVerification,
   failStoredLocalPublishJob,
   findLocalPublishJobByIdempotencyKey,
   insertLocalPublishJob,
@@ -47,6 +48,7 @@ interface ResultDependencies {
   stage: typeof stageStoredLocalPublishJob;
   recordDispatch: typeof recordStoredLocalPublishDispatch;
   deferVerification: typeof deferStoredLocalPublishVerification;
+  deferAttestedVerification?: typeof deferStoredOperatorAttestedVerification;
   fail: typeof failStoredLocalPublishJob;
   prepareVerification: typeof prepareStoredLocalPublishVerification;
   completeReconciliation: typeof completeStoredLocalPublishReconciliation;
@@ -63,6 +65,7 @@ const resultDependencies: ResultDependencies = {
   stage: stageStoredLocalPublishJob,
   recordDispatch: recordStoredLocalPublishDispatch,
   deferVerification: deferStoredLocalPublishVerification,
+  deferAttestedVerification: deferStoredOperatorAttestedVerification,
   fail: failStoredLocalPublishJob,
   prepareVerification: prepareStoredLocalPublishVerification,
   completeReconciliation: completeStoredLocalPublishReconciliation,
@@ -118,6 +121,11 @@ export type LocalPublishWorkerResult =
       status: 'verification_pending';
       noteId: string;
       shareUrl: string;
+      code: string;
+      message: string;
+    }
+  | {
+      status: 'attested_verification_pending';
       code: string;
       message: string;
     }
@@ -179,6 +187,14 @@ export function parseLocalPublishWorkerResult(value: unknown): LocalPublishWorke
       message: cleanFailureMessage(body.message),
     };
   }
+  if (body.status === 'attested_verification_pending') {
+    assertExactKeys(body, ['code', 'message', 'status']);
+    return {
+      status: 'attested_verification_pending',
+      code: cleanCode(body.code),
+      message: cleanFailureMessage(body.message),
+    };
+  }
   if (body.status === 'verified' || body.status === 'succeeded') {
     assertExactKeys(body, ['noteId', 'shareUrl', 'status']);
     return { status: 'verified', ...publicationIdentifiers(body) };
@@ -192,7 +208,7 @@ export function parseLocalPublishWorkerResult(value: unknown): LocalPublishWorke
     };
   }
   throw new LocalPublishJobError(
-    'status must be staged, submitted, scheduled, verification_pending, verified, or failed',
+    'status must be staged, submitted, scheduled, verification_pending, attested_verification_pending, verified, or failed',
     'VALIDATION_ERROR',
     400,
   );
@@ -366,6 +382,17 @@ export async function submitLocalPublishJobResult(
       claimToken,
       result.noteId,
       result.shareUrl,
+      result.code,
+      result.message,
+      verificationBackoffSeconds(),
+    ));
+  }
+  if (result.status === 'attested_verification_pending') {
+    return jobSummary(await (
+      dependencies.deferAttestedVerification ?? deferStoredOperatorAttestedVerification
+    )(
+      id,
+      claimToken,
       result.code,
       result.message,
       verificationBackoffSeconds(),

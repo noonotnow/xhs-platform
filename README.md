@@ -75,6 +75,7 @@ in Vercel:
 | `LOCAL_PUBLISH_WORKER_TOKEN` | At least 32 random characters shared only with the trusted Mac-local browser worker |
 | `LOCAL_PUBLISH_JOB_LEASE_SECONDS` | Optional worker claim lease; defaults to 7200 seconds and is clamped to 60–86400 |
 | `LOCAL_PUBLISH_VERIFICATION_BACKOFF_SECONDS` | Optional four-value retry schedule; defaults to `900,3600,21600,86400` seconds (15m, 1h, 6h, 24h) |
+| `LOCAL_PUBLISH_WORKER_ATTESTATION_CONTRACT_REVISION` | Capability gate for operator success release; leave unset until the worker supports the exact literal `operator-success-attestation/v1` |
 | `MANUAL_RECONCILIATION_LEASE_SECONDS` | Optional existing-post verification lease; defaults to 1800 seconds and is clamped to 60–7200 |
 | `MANUAL_RECONCILIATION_BACKOFF_SECONDS` | Optional four-value existing-post retry schedule; defaults to `900,3600,21600,86400` |
 | `CRON_SECRET` | Bearer secret used by the RedNote sweep endpoint and matching GitHub Actions repository secret |
@@ -220,6 +221,7 @@ The local worker contract is:
    - `{"status":"submitted","noteId":"...","shareUrl":"https://www.rednote.com/explore/..."}`
    - `{"status":"scheduled","noteId":"...","shareUrl":"https://www.rednote.com/explore/..."}`
    - `{"status":"verification_pending","noteId":"...","shareUrl":"https://www.rednote.com/explore/...","code":"REDNOTE_300031","message":"Safe operator message"}`
+   - `{"status":"attested_verification_pending","code":"SAFE_CODE","message":"Safe operator message"}` for receipt-only work
    - `{"status":"verified","noteId":"...","shareUrl":"https://www.rednote.com/explore/..."}`
    - `{"status":"failed","code":"SAFE_CODE","message":"Safe operator message"}`,
      only before dispatch while the durable state is `claimed` or `staged`.
@@ -236,6 +238,82 @@ backfill advances the job to `reconciled`. If backfill fails, the row remains
 body `status:"succeeded"` remains accepted as a `verified` alias during rollout.
 `metrics_available` is a later sync concern and is not a publication-verification
 state.
+
+#### Operator-attested scheduled success
+
+Apply `migrations/013_operator_success_attestations.sql` before enabling the
+operator action. Deploy in this order: migration and platform code with
+`LOCAL_PUBLISH_WORKER_ATTESTATION_CONTRACT_REVISION` unset, a worker that
+implements `operator-success-attestation/v1`, then the exact environment value
+and a platform redeploy. Until the gate matches, Admin exposes no candidates and
+attestation POSTs return `SUCCESS_ATTESTATION_CONTRACT_DISABLED`.
+
+For an eligible expired `staged` or terminal `AMBIGUOUS_CREATOR_UI` bounded
+scheduled attempt, Admin shows **Yes, this succeeded — move on** with the exact
+requested time. Explicit confirmation writes one immutable receipt and moves the
+job and batch item to `operator_attested`. This state is terminal for dispatch:
+the prior claim is revoked, recovery and requeue exclude it, and dispatch,
+authorization, or failure results return `JOB_OPERATOR_ATTESTED`. It does not
+invent a note ID or URL.
+
+The verification lane first returns the attested job immediately with:
+
+```json
+{
+  "status": "operator_attested",
+  "successAttestation": {
+    "contractRevision": "operator-success-attestation/v1",
+    "id": "receipt-uuid",
+    "releaseRequired": true,
+    "jobId": "job-uuid",
+    "notionPageId": "page-id",
+    "batchId": "batch-uuid",
+    "manifestHash": "lowercase-sha256",
+    "itemId": "item-uuid",
+    "itemHash": "lowercase-sha256",
+    "snapshotRevision": "canonical UTC ISO timestamp",
+    "snapshotDigest": "lowercase-sha256",
+    "priorClaimTokenDigest": "lowercase-sha256",
+    "requestedPublishAt": "canonical UTC ISO timestamp",
+    "expectedOutcome": {
+      "kind": "scheduled",
+      "publishAt": "canonical UTC ISO timestamp",
+      "timeZone": "America/New_York",
+      "text": "Successfully scheduled for ... ET"
+    },
+    "attestedBy": "operator@example.com",
+    "attestedAt": "canonical UTC ISO timestamp"
+  }
+}
+```
+
+`priorClaimTokenDigest` is lowercase hex SHA-256 over the UTF-8 bytes of the
+exact revoked claim token. `snapshotDigest` must equal `itemHash`; both hash
+canonical JSON of the frozen `LocalPublishSnapshot`, recursively sorting object
+keys while preserving array order. `manifestHash` applies the same algorithm to
+the ordered array of batch snapshots.
+
+When `releaseRequired` is true, the worker must perform no browser action. It
+atomically persists the complete tombstone and deletes only the matching local
+dispatch slot after matching job, prior claim digest, batch/item hashes,
+snapshot revision, and `publishAt`. It then reports exactly:
+
+```json
+{"status":"attested_verification_pending","code":"ATTESTATION_RELEASE_CONSUMED","message":"Matching local dispatch slot released; receipt verification remains pending."}
+```
+
+The server appends an immutable release acknowledgement and schedules receipt
+lookup for no earlier than 15 minutes after `requestedPublishAt`. Exact
+acknowledgement replay is idempotent; a different claim returns
+`ATTESTATION_RELEASE_ACK_CONFLICT`, a changed message returns
+`ATTESTATION_RELEASE_ACK_MISMATCH`, and receipt lookup before acknowledgement
+returns `ATTESTATION_RELEASE_REQUIRED`.
+
+Later claims have `releaseRequired:false` and are reconciliation-only. They may
+report identity-free `attested_verification_pending` delays or the existing
+exact `verified` note ID and canonical URL. Only `verified` backfills Notion.
+Repeated lookup or authentication failures release only the verification lease;
+they never reacquire or block the Creator compose/dispatch slot.
 
 ### Bounded batch approval and sweeps
 
