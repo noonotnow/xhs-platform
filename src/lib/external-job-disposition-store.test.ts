@@ -133,7 +133,10 @@ function queueCreation(options: {
     .mockResolvedValueOnce(result())
     .mockResolvedValueOnce(result());
   if (options.targetJob?.status === 'operator_attested') {
-    mocks.query.mockResolvedValueOnce(result(options.release ?? [{ released: 1 }]));
+    mocks.query.mockResolvedValueOnce(result(options.release ?? [{
+      provenance: 'worker_ambiguous',
+      acknowledged_at: '2026-08-04T12:30:00.000Z',
+    }]));
   }
   mocks.query
     .mockResolvedValueOnce(result(options.batch ?? [{
@@ -245,6 +248,7 @@ describe('external job disposition persistence', () => {
       dispatch_authorized_at: '2026-08-04T12:02:00.000Z',
       success_attestation_id: '77777777-7777-4777-8777-777777777777',
     });
+
     queueCreation({
       targetJob,
       release: [],
@@ -266,7 +270,10 @@ describe('external job disposition persistence', () => {
     mocks.connect.mockResolvedValue({ query: mocks.query, release: mocks.release });
     queueCreation({
       targetJob,
-      release: [{ released: 1 }],
+      release: [{
+        provenance: 'worker_ambiguous',
+        acknowledged_at: '2026-08-04T12:30:00.000Z',
+      }],
       batch: [{
         id: batchItemId,
         notion_page_id: input.notionPageId,
@@ -278,6 +285,33 @@ describe('external job disposition persistence', () => {
       .mockResolvedValueOnce(result([{ id: requestId }]))
       .mockResolvedValueOnce(result([{ id: input.localJobId }], 1))
       .mockResolvedValueOnce(result());
+    await expect(insertExternalJobDisposition(input, idempotencyKey))
+      .resolves.toMatchObject({ created: true });
+  });
+
+  it('accepts manual scheduling provenance without a worker release acknowledgement', async () => {
+    const targetJob = job({
+      status: 'operator_attested',
+      success_attestation_id: '77777777-7777-4777-8777-777777777777',
+    });
+    queueCreation({
+      targetJob,
+      release: [{
+        provenance: 'manual_scheduled',
+        acknowledged_at: null,
+      }],
+      batch: [{
+        id: batchItemId,
+        notion_page_id: input.notionPageId,
+        local_publish_job_id: input.localJobId,
+        state: 'operator_attested',
+      }],
+    });
+    mocks.query
+      .mockResolvedValueOnce(result([{ id: requestId }]))
+      .mockResolvedValueOnce(result([{ id: input.localJobId }], 1))
+      .mockResolvedValueOnce(result());
+
     await expect(insertExternalJobDisposition(input, idempotencyKey))
       .resolves.toMatchObject({ created: true });
   });
@@ -400,7 +434,10 @@ describe('external job disposition persistence', () => {
         external_disposition_request_id: requestId,
       })]))
       .mockResolvedValueOnce(result([request()]))
-      .mockResolvedValueOnce(result([{ released: 1 }]))
+      .mockResolvedValueOnce(result([{
+        provenance: 'worker_ambiguous',
+        acknowledged_at: '2026-08-04T12:30:00.000Z',
+      }]))
       .mockResolvedValueOnce(result([{
         id: batchItemId,
         notion_page_id: input.notionPageId,

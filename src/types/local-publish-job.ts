@@ -118,15 +118,31 @@ export interface OperatorSuccessAttestationEvidence {
   };
 }
 
+export type OperatorSuccessAttestationProvenance =
+  | 'worker_ambiguous'
+  | 'manual_scheduled';
+
+export interface ManualSchedulingAttestationEvidence {
+  batchId: string;
+  manifestHash: string;
+  itemId: string;
+  itemHash: string;
+  snapshotRevision: string;
+  requestedPublishAt: string;
+}
+
 export interface OperatorSuccessAttestationSummary
   extends OperatorSuccessAttestationEvidence {
   id: string;
   notionPageId: string;
-  contractRevision: 'operator-success-attestation/v1';
+  provenance: OperatorSuccessAttestationProvenance;
+  contractRevision:
+    | 'operator-success-attestation/v1'
+    | 'manual-scheduling-attestation/v1';
   snapshotDigest: string;
-  priorClaimTokenDigest: string;
+  priorClaimTokenDigest?: string;
   releaseRequired: boolean;
-  localReleaseIdentity: {
+  localReleaseIdentity?: {
     jobId: string;
     notionPageId: string;
     priorClaimTokenDigest: string;

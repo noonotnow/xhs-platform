@@ -363,6 +363,13 @@ export async function claimNextStoredLocalPublishJob(
               )
               OR (
                 status = 'operator_attested'
+                AND EXISTS (
+                  SELECT 1
+                  FROM local_publish_job_success_attestations AS attestation
+                  WHERE attestation.id =
+                    local_publish_jobs.success_attestation_id
+                    AND attestation.provenance = 'worker_ambiguous'
+                )
                 AND next_verification_at <= CURRENT_TIMESTAMP
                 AND (
                   claim_expires_at IS NULL
@@ -385,6 +392,13 @@ export async function claimNextStoredLocalPublishJob(
             local_publish_jobs.id = ${expectedJobId ?? null}::uuid
             AND local_publish_jobs.status = 'operator_attested'
             AND local_publish_jobs.success_attestation_id IS NOT NULL
+            AND EXISTS (
+              SELECT 1
+              FROM local_publish_job_success_attestations AS attestation
+              WHERE attestation.id =
+                local_publish_jobs.success_attestation_id
+                AND attestation.provenance = 'worker_ambiguous'
+            )
             AND NOT EXISTS (
               SELECT 1
               FROM local_publish_job_success_attestation_release_acks AS release_ack

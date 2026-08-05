@@ -99,7 +99,7 @@ function assertExactRequest(
   }
 }
 
-async function assertReleasedOperatorAttestedJob(
+async function assertReceiptPendingOperatorAttestedJob(
   client: PoolClient,
   job: TargetJobRow,
   input: ExternalJobDispositionInput,
@@ -122,10 +122,13 @@ async function assertReleasedOperatorAttestedJob(
       'DISPOSITION_JOB_NOT_RELEASED',
     );
   }
-  const released = await client.query(
-    `SELECT 1
+  const released = await client.query<{
+    provenance: 'worker_ambiguous' | 'manual_scheduled';
+    acknowledged_at: Date | string | null;
+  }>(
+    `SELECT attestation.provenance, release_ack.acknowledged_at
      FROM local_publish_job_success_attestations AS attestation
-     JOIN local_publish_job_success_attestation_release_acks AS release_ack
+     LEFT JOIN local_publish_job_success_attestation_release_acks AS release_ack
        ON release_ack.success_attestation_id = attestation.id
      WHERE attestation.id = $1::uuid
        AND attestation.local_publish_job_id = $2::uuid
@@ -138,7 +141,14 @@ async function assertReleasedOperatorAttestedJob(
       input.notionPageId,
     ],
   );
-  if (released.rowCount !== 1) {
+  const evidence = released.rows[0];
+  if (
+    !evidence ||
+    (
+      evidence.provenance !== 'manual_scheduled' &&
+      !(evidence.provenance === 'worker_ambiguous' && evidence.acknowledged_at)
+    )
+  ) {
     throw dispositionError(
       'The operator success attestation still requires release acknowledgement',
       'DISPOSITION_RELEASE_REQUIRED',
@@ -234,7 +244,7 @@ async function assertEligibleDispositionJob(
   input: ExternalJobDispositionInput,
 ) {
   if (job.status === 'operator_attested') {
-    await assertReleasedOperatorAttestedJob(client, job, input);
+    await assertReceiptPendingOperatorAttestedJob(client, job, input);
     await assertBatchLinkage(client, job, ['operator_attested']);
     return;
   }
@@ -850,7 +860,7 @@ export async function retryExternalJobDisposition(id: string) {
     const identityMatches = job.note_id === request.requested_note_id &&
       job.share_url === request.requested_share_url;
     if (job.status === 'operator_attested') {
-      await assertReleasedOperatorAttestedJob(client, job, {
+      await assertReceiptPendingOperatorAttestedJob(client, job, {
         notionPageId: request.notion_page_id,
         localJobId: job.id,
         noteId: request.requested_note_id,
