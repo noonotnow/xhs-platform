@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import {
   claimNextLocalPublishJob,
   normalizeLocalPublishJobError,
+  validateExpectedVerificationJobId,
 } from '@/lib/local-publish-jobs';
 import { requireLocalPublishWorker } from '@/lib/local-publish-worker-auth';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
@@ -28,7 +29,22 @@ export async function GET(request: NextRequest) {
         400,
       );
     }
-    const job = await claimNextLocalPublishJob(rawLane as LocalPublishWorkLane);
+    const expectedJobIds = request.nextUrl.searchParams.getAll('expectedJobId');
+    const expectedJobId = expectedJobIds[0];
+    if (expectedJobIds.length > 1) {
+      throw new LocalPublishJobError(
+        'expectedJobId must be one exact UUID',
+        'VALIDATION_ERROR',
+        400,
+      );
+    }
+    const lane = rawLane as LocalPublishWorkLane;
+    if (expectedJobId !== undefined) {
+      validateExpectedVerificationJobId(lane, expectedJobId);
+    }
+    const job = expectedJobId
+      ? await claimNextLocalPublishJob(lane, expectedJobId)
+      : await claimNextLocalPublishJob(lane);
     if (!job) {
       return new NextResponse(null, { status: 204, headers: NO_STORE_HEADERS });
     }

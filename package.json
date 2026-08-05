@@ -25,6 +25,7 @@
     "uuid": "^14.0.1"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.3.16",
     "@types/bcrypt": "^6.0.0",
     "@types/bcryptjs": "^2.4.6",
     "@types/node": "^20",

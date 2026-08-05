@@ -175,6 +175,7 @@ caching.
 |---|---|
 | `GET /api/local-publish-jobs/next?lane=dispatch` | Atomic single claim for staging/dispatch; `FOR UPDATE SKIP LOCKED LIMIT 1` |
 | `GET /api/local-publish-jobs/next?lane=verification` | Atomic single claim only when verification or reconciliation is due |
+| `GET /api/local-publish-jobs/next?lane=verification&expectedJobId=:jobId` | Atomic fail-closed claim of that exact due, unacknowledged `operator_attested` release; never falls back to another row |
 | `GET /api/local-publish-jobs/next` | Backward-compatible combined lane |
 | `POST /api/local-publish-jobs/:id/result` | Per-job token result; preserves staging, human approval, verification, and reconciliation gates |
 | `POST /admin/api/local-publish-job-success-attestations` | Access-authenticated exact scheduled-success attestation; immutable receipt, dispatch quarantine, and immediate worker release handshake |
