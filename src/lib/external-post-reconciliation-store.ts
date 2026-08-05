@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from 'util';
-import type { QueryResultRow } from 'pg';
-import { sql } from '@/lib/db';
+import type { PoolClient, QueryResultRow } from 'pg';
+import { getPool, sql } from '@/lib/db';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
 import type {
   ExternalPostSnapshot,
@@ -83,154 +83,179 @@ export function externalReconciliationSummary(
   };
 }
 
+export async function lockExternalReconciliationIdentity(
+  client: Pick<PoolClient, 'query'>,
+  noteId: string,
+  shareUrl: string,
+) {
+  const locks = [
+    `rednote-note:${noteId}`,
+    `rednote-share-url:${shareUrl}`,
+  ].sort();
+  for (const lock of locks) {
+    await client.query(
+      'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+      [lock],
+    );
+  }
+}
+
 export async function beginExternalReconciliation(
   snapshot: ExternalPostSnapshot,
   idempotencyKey: string,
   targetDispositionId?: string,
 ) {
-  const inserted = await sql<ExternalReconciliationRow>`
-    INSERT INTO external_post_reconciliations (
-      note_id,
-      share_url,
-      snapshot,
-      idempotency_key
-    )
-    SELECT
-      ${snapshot.noteId},
-      ${snapshot.shareUrl},
-      ${JSON.stringify(snapshot)}::jsonb,
-      ${idempotencyKey}::uuid
-    WHERE NOT EXISTS (
-      SELECT 1
-      FROM manual_reconciliation_requests AS disposition
-      WHERE disposition.request_kind = 'targeted_local_job'
-        AND (
-          disposition.requested_note_id = ${snapshot.noteId}
-          OR disposition.requested_share_url = ${snapshot.shareUrl}
-        )
-        AND NOT (
-          ${targetDispositionId ?? null}::uuid IS NOT NULL
-          AND disposition.id = ${targetDispositionId ?? null}::uuid
-          AND disposition.requested_note_id = ${snapshot.noteId}
-          AND disposition.requested_share_url = ${snapshot.shareUrl}
-        )
-    )
-    ON CONFLICT DO NOTHING
-    RETURNING *
-  `;
-  if (inserted.rows[0]) {
-    return { record: mapRow(inserted.rows[0]), acquired: true };
-  }
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    await lockExternalReconciliationIdentity(
+      client,
+      snapshot.noteId,
+      snapshot.shareUrl,
+    );
+    const inserted = await client.query<ExternalReconciliationRow>(
+      `INSERT INTO external_post_reconciliations (
+         note_id,
+         share_url,
+         snapshot,
+         idempotency_key
+       )
+       SELECT $1, $2, $3::jsonb, $4::uuid
+       WHERE NOT EXISTS (
+         SELECT 1
+         FROM manual_reconciliation_requests AS disposition
+         WHERE disposition.request_kind = 'targeted_local_job'
+           AND (
+             disposition.requested_note_id = $1
+             OR disposition.requested_share_url = $2
+           )
+           AND NOT (
+             $5::uuid IS NOT NULL
+             AND disposition.id = $5::uuid
+             AND disposition.requested_note_id = $1
+             AND disposition.requested_share_url = $2
+           )
+       )
+       ON CONFLICT DO NOTHING
+       RETURNING *`,
+      [
+        snapshot.noteId,
+        snapshot.shareUrl,
+        JSON.stringify(snapshot),
+        idempotencyKey,
+        targetDispositionId ?? null,
+      ],
+    );
+    if (inserted.rows[0]) {
+      await client.query('COMMIT');
+      return { record: mapRow(inserted.rows[0]), acquired: true };
+    }
 
-  const dispositions = await sql<{
-    id: string;
-    requested_note_id: string;
-    requested_share_url: string;
-  }>`
-    SELECT id, requested_note_id, requested_share_url
-    FROM manual_reconciliation_requests
-    WHERE request_kind = 'targeted_local_job'
-      AND (
-        requested_note_id = ${snapshot.noteId}
-        OR requested_share_url = ${snapshot.shareUrl}
-      )
-    ORDER BY created_at
-    LIMIT 3
-  `;
-  if (dispositions.rows.length > 0) {
-    const owner = dispositions.rows[0];
-    const exactOwner = dispositions.rows.length === 1 &&
-      owner.id === targetDispositionId &&
-      owner.requested_note_id === snapshot.noteId &&
-      owner.requested_share_url === snapshot.shareUrl;
-    if (!exactOwner) {
+    const dispositions = await client.query<{
+      id: string;
+      requested_note_id: string;
+      requested_share_url: string;
+    }>(
+      `SELECT id, requested_note_id, requested_share_url
+       FROM manual_reconciliation_requests
+       WHERE request_kind = 'targeted_local_job'
+         AND (
+           requested_note_id = $1
+           OR requested_share_url = $2
+         )
+       ORDER BY created_at
+       LIMIT 3`,
+      [snapshot.noteId, snapshot.shareUrl],
+    );
+    if (dispositions.rows.length > 0) {
+      const owner = dispositions.rows[0];
+      const exactOwner = dispositions.rows.length === 1 &&
+        owner.id === targetDispositionId &&
+        owner.requested_note_id === snapshot.noteId &&
+        owner.requested_share_url === snapshot.shareUrl;
+      if (!exactOwner) {
+        throw new LocalPublishJobError(
+          'Verified post is owned by a targeted local job disposition',
+          'RECONCILIATION_CONFLICT',
+          409,
+        );
+      }
+    }
+
+    const conflicts = await client.query<ExternalReconciliationRow>(
+      `SELECT *
+       FROM external_post_reconciliations
+       WHERE idempotency_key = $1::uuid
+          OR note_id = $2
+          OR share_url = $3
+       ORDER BY created_at
+       LIMIT 3`,
+      [idempotencyKey, snapshot.noteId, snapshot.shareUrl],
+    );
+    if (conflicts.rows.length !== 1) {
       throw new LocalPublishJobError(
-        'Verified post is owned by a targeted local job disposition',
+        'Verified post conflicts with multiple reconciliation records',
         'RECONCILIATION_CONFLICT',
         409,
       );
     }
-  }
+    const existing = mapRow(conflicts.rows[0]);
+    if (!isDeepStrictEqual(existing.snapshot, snapshot)) {
+      throw new LocalPublishJobError(
+        'The verified post or Idempotency-Key was already reconciled with different content',
+        'RECONCILIATION_CONFLICT',
+        409,
+      );
+    }
+    if (existing.status === 'succeeded') {
+      await client.query('COMMIT');
+      return { record: existing, acquired: false };
+    }
 
-  const conflicts = await sql<ExternalReconciliationRow>`
-    SELECT *
-    FROM external_post_reconciliations
-    WHERE idempotency_key = ${idempotencyKey}::uuid
-       OR note_id = ${snapshot.noteId}
-       OR share_url = ${snapshot.shareUrl}
-    ORDER BY created_at
-    LIMIT 3
-  `;
-  if (conflicts.rows.length !== 1) {
-    throw new LocalPublishJobError(
-      'Verified post conflicts with multiple reconciliation records',
-      'RECONCILIATION_CONFLICT',
-      409,
-    );
-  }
-  const existing = mapRow(conflicts.rows[0]);
-  if (!isDeepStrictEqual(existing.snapshot, snapshot)) {
-    throw new LocalPublishJobError(
-      'The verified post or Idempotency-Key was already reconciled with different content',
-      'RECONCILIATION_CONFLICT',
-      409,
-    );
-  }
-  if (existing.status === 'succeeded') {
-    return { record: existing, acquired: false };
-  }
+    const stale = Date.now() - new Date(existing.updatedAt).getTime() >= PROCESSING_LEASE_MS;
+    if (existing.status === 'processing' && !stale) {
+      throw new LocalPublishJobError(
+        'This verified post is already being reconciled',
+        'RECONCILIATION_IN_PROGRESS',
+        409,
+      );
+    }
 
-  const stale = Date.now() - new Date(existing.updatedAt).getTime() >= PROCESSING_LEASE_MS;
-  if (existing.status === 'processing' && !stale) {
-    throw new LocalPublishJobError(
-      'This verified post is already being reconciled',
-      'RECONCILIATION_IN_PROGRESS',
-      409,
+    const reclaimed = await client.query<ExternalReconciliationRow>(
+      `UPDATE external_post_reconciliations
+       SET status = 'processing',
+           outcome = NULL,
+           notion_page_id = NULL,
+           error_code = NULL,
+           error_message = NULL,
+           completed_at = NULL,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1::uuid
+         AND (
+           status = 'failed'
+           OR (
+             status = 'processing'
+             AND updated_at <= CURRENT_TIMESTAMP - INTERVAL '5 minutes'
+           )
+         )
+       RETURNING *`,
+      [existing.id],
     );
+    if (!reclaimed.rows[0]) {
+      throw new LocalPublishJobError(
+        'This verified post is already being reconciled',
+        'RECONCILIATION_IN_PROGRESS',
+        409,
+      );
+    }
+    await client.query('COMMIT');
+    return { record: mapRow(reclaimed.rows[0]), acquired: true };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
-
-  const reclaimed = await sql<ExternalReconciliationRow>`
-    UPDATE external_post_reconciliations
-    SET status = 'processing',
-        outcome = NULL,
-        notion_page_id = NULL,
-        error_code = NULL,
-        error_message = NULL,
-        completed_at = NULL,
-        updated_at = CURRENT_TIMESTAMP
-    WHERE id = ${existing.id}::uuid
-      AND (
-        status = 'failed'
-        OR (
-          status = 'processing'
-          AND updated_at <= CURRENT_TIMESTAMP - INTERVAL '5 minutes'
-        )
-      )
-      AND NOT EXISTS (
-        SELECT 1
-        FROM manual_reconciliation_requests AS disposition
-        WHERE disposition.request_kind = 'targeted_local_job'
-          AND (
-            disposition.requested_note_id = ${snapshot.noteId}
-            OR disposition.requested_share_url = ${snapshot.shareUrl}
-          )
-          AND NOT (
-            ${targetDispositionId ?? null}::uuid IS NOT NULL
-            AND disposition.id = ${targetDispositionId ?? null}::uuid
-            AND disposition.requested_note_id = ${snapshot.noteId}
-            AND disposition.requested_share_url = ${snapshot.shareUrl}
-          )
-      )
-    RETURNING *
-  `;
-  if (!reclaimed.rows[0]) {
-    throw new LocalPublishJobError(
-      'This verified post is already being reconciled',
-      'RECONCILIATION_IN_PROGRESS',
-      409,
-    );
-  }
-  return { record: mapRow(reclaimed.rows[0]), acquired: true };
 }
 
 export async function completeExternalReconciliation(

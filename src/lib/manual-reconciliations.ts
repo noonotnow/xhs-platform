@@ -165,11 +165,12 @@ export async function submitManualReconciliationResult(
   );
   if (request.kind === 'targeted_local_job') {
     try {
-      return await reconcileExternalJobDisposition(
+      await reconcileExternalJobDisposition(
         id,
         claimToken,
         result.snapshot,
       );
+      return manualReconciliationSummary(await loadManualReconciliation(id));
     } catch (error) {
       const known = normalizeLocalPublishJobError(error);
       if (known.code === 'RECONCILIATION_IN_PROGRESS') {

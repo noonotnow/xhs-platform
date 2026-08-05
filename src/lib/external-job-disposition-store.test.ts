@@ -138,7 +138,6 @@ function queueCreation(options: {
     }]))
     .mockResolvedValueOnce(result())
     .mockResolvedValueOnce(result())
-    .mockResolvedValueOnce(result())
     .mockResolvedValueOnce(result(options.receipts ?? []))
     .mockResolvedValueOnce(result(options.localIdentities ?? []))
     .mockResolvedValueOnce(result(options.requests ?? []))

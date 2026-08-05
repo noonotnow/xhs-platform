@@ -196,13 +196,18 @@ describe('manual reconciliation orchestration', () => {
       localJobId: targeted.sourceLocalJobId,
       status: 'reconciled',
     });
+    mocks.load.mockResolvedValue({
+      ...targeted,
+      status: 'reconciled',
+    });
 
     await expect(submitManualReconciliationResult(
       targeted.id,
       targeted.claimToken,
       { status: 'verified', snapshot },
     )).resolves.toMatchObject({
-      localJobId: targeted.sourceLocalJobId,
+      sourceLocalJobId: targeted.sourceLocalJobId,
+      kind: 'targeted_local_job',
       status: 'reconciled',
     });
     expect(mocks.reconcileDisposition).toHaveBeenCalledWith(

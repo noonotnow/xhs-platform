@@ -6,6 +6,7 @@ import {
   loadManualReconciliation,
   type StoredManualReconciliation,
 } from '@/lib/manual-reconciliation-store';
+import { lockExternalReconciliationIdentity } from '@/lib/external-post-reconciliation-store';
 import type {
   ExternalJobDispositionInput,
 } from '@/lib/external-job-disposition-input';
@@ -409,17 +410,11 @@ export async function insertExternalJobDisposition(
     } else {
       assertSafePreDispatchJob(job, input);
       await assertBatchLinkage(client, job, ['queued', 'claimed']);
-      const identityLocks = [
-        `rednote-note:${input.noteId}`,
-        `rednote-share-url:${input.shareUrl}`,
-      ].sort();
-      for (const lock of identityLocks) {
-        await client.query(
-          'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
-          [lock],
-        );
-      }
-      await client.query('LOCK TABLE external_post_reconciliations IN SHARE MODE');
+      await lockExternalReconciliationIdentity(
+        client,
+        input.noteId,
+        input.shareUrl,
+      );
       const expected = expectedSnapshot(job);
       const snapshot = {
         noteId: input.noteId,
