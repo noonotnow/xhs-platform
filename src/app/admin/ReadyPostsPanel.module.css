@@ -87,6 +87,42 @@
   border-radius: 8px;
 }
 
+.successAttestation {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 18px;
+  padding: 16px;
+  color: #14532d;
+  background: #f0fdf4;
+  border: 1px solid #86efac;
+  border-radius: 10px;
+}
+
+.successAttestation h3,
+.successAttestation p {
+  margin: 0;
+}
+
+.successAttestation p {
+  max-width: 68ch;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.successAttestationCandidate {
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  background: #fff;
+  border: 1px solid #bbf7d0;
+  border-radius: 8px;
+}
+
+.successAttestationCandidate small {
+  overflow-wrap: anywhere;
+  color: #166534;
+}
+
 .recoveryBatch p {
   font-size: 0.8125rem;
   line-height: 1.5;
@@ -139,7 +175,8 @@
 .reconcileButton,
 .retryButton,
 .reconcileSubmit,
-.recoveryButton {
+.recoveryButton,
+.successAttestationButton {
   min-height: 40px;
   border-radius: 8px;
   font: inherit;
@@ -169,6 +206,7 @@
 .retryButton:focus-visible,
 .reconcileSubmit:focus-visible,
 .recoveryButton:focus-visible,
+.successAttestationButton:focus-visible,
 .experimental summary:focus-visible {
   outline: 3px solid rgba(124, 58, 237, 0.28);
   outline-offset: 2px;
@@ -184,6 +222,28 @@
 }
 
 .recoveryButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.successAttestationButton {
+  justify-self: start;
+  margin-top: 6px;
+  padding: 8px 12px;
+  color: #fff;
+  background: #15803d;
+  border: 1px solid #166534;
+}
+
+.successAttestationButton:hover {
+  background: #166534;
+}
+
+.successAttestationButton:active {
+  background: #14532d;
+}
+
+.successAttestationButton:disabled {
   cursor: not-allowed;
   opacity: 0.65;
 }

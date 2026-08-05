@@ -203,6 +203,70 @@ describe('local publish job orchestration', () => {
     })).toThrow('credential-like data');
   });
 
+  it('uses a distinct identity-free deferral only for attested verification', async () => {
+    expect(parseLocalPublishWorkerResult({
+      status: 'attested_verification_pending',
+      code: 'PUBLIC_NOTE_NOT_FOUND',
+      message: 'The scheduled post is not public yet',
+    })).toEqual({
+      status: 'attested_verification_pending',
+      code: 'PUBLIC_NOTE_NOT_FOUND',
+      message: 'The scheduled post is not public yet',
+    });
+
+    const deferAttestedVerification = vi.fn().mockResolvedValue(
+      stored('operator_attested'),
+    );
+    await expect(submitLocalPublishJobResult(
+      stored('operator_attested').id,
+      stored('operator_attested').claimToken!,
+      {
+        status: 'attested_verification_pending',
+        code: 'PUBLIC_NOTE_NOT_FOUND',
+        message: 'The scheduled post is not public yet',
+      },
+      {
+        stage: vi.fn(),
+        recordDispatch: vi.fn(),
+        deferVerification: vi.fn(),
+        deferAttestedVerification,
+        fail: vi.fn(),
+        prepareVerification: vi.fn(),
+        completeReconciliation: vi.fn(),
+        backfill: vi.fn(),
+      },
+    )).resolves.toMatchObject({ status: 'operator_attested' });
+    expect(deferAttestedVerification).toHaveBeenCalledOnce();
+  });
+
+  it('reconciles a later exact identity without reopening dispatch', async () => {
+    const dependencies = {
+      stage: vi.fn(),
+      recordDispatch: vi.fn(),
+      deferVerification: vi.fn(),
+      deferAttestedVerification: vi.fn(),
+      fail: vi.fn(),
+      prepareVerification: vi.fn().mockResolvedValue(stored('verified')),
+      completeReconciliation: vi.fn().mockResolvedValue(stored('reconciled')),
+      backfill: vi.fn(),
+    };
+    await expect(submitLocalPublishJobResult(
+      stored('operator_attested').id,
+      stored('operator_attested').claimToken!,
+      {
+        status: 'verified',
+        noteId: 'note_123',
+        shareUrl: 'https://www.rednote.com/explore/note_123',
+      },
+      dependencies,
+    )).resolves.toMatchObject({ status: 'reconciled' });
+    expect(dependencies.prepareVerification).toHaveBeenCalledOnce();
+    expect(dependencies.backfill).toHaveBeenCalledOnce();
+    expect(dependencies.completeReconciliation).toHaveBeenCalledOnce();
+    expect(dependencies.stage).not.toHaveBeenCalled();
+    expect(dependencies.recordDispatch).not.toHaveBeenCalled();
+  });
+
   it('records dispatch and verification delay without backfilling Notion', async () => {
     const dependencies = {
       stage: vi.fn(),
