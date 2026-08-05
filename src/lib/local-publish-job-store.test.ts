@@ -206,6 +206,27 @@ describe('local publish atomic claim storage', () => {
     expect(mocks.sql.mock.calls[0]).toContain('verification');
   });
 
+  it('adds the expected job ID to the same atomic verification claim statement', async () => {
+    const expectedJobId = '77777777-7777-4777-8777-777777777777';
+    mocks.sql.mockResolvedValue({ rows: [], rowCount: 0 });
+
+    await expect(claimNextStoredLocalPublishJob(
+      7_200,
+      'verification',
+      expectedJobId,
+    )).resolves.toBeNull();
+
+    expect(mocks.sql).toHaveBeenCalledTimes(1);
+    const query = (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
+    expect(query).toContain('local_publish_jobs.id = ?::uuid');
+    expect(query).toContain("local_publish_jobs.status = 'operator_attested'");
+    expect(query).toContain('local_publish_job_success_attestation_release_acks');
+    expect(mocks.sql.mock.calls[0]).toEqual(expect.arrayContaining([
+      'verification',
+      expectedJobId,
+    ]));
+  });
+
   it('returns verified jobs only for idempotent Notion reconciliation', async () => {
     mocks.sql.mockResolvedValue({
       rows: [verificationRow('verified')],
@@ -459,6 +480,7 @@ describe('local publish atomic claim storage', () => {
     expect(query).toContain('verification_attempts = verification_attempts + 1');
     expect(query).toContain('next_verification_at <= claimed_at');
     expect(query).toContain('claim_expires_at = CURRENT_TIMESTAMP');
+    expect(query).toContain('THEN ?::integer');
     expect(mocks.sql.mock.calls[0]).toEqual(expect.arrayContaining([
       3_600,
       21_600,
@@ -492,6 +514,7 @@ describe('local publish atomic claim storage', () => {
     );
     expect(query).not.toContain('note_id =');
     expect(query).not.toContain('share_url =');
+    expect(query).toContain('THEN ?::integer');
   });
 
   it('requires slot release before attested identity lookup', async () => {

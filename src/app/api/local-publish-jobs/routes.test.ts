@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest, NextResponse } from 'next/server';
+import { LocalPublishJobError } from '@/lib/local-publish-job-input';
 
 const mocks = vi.hoisted(() => ({
   requireOperator: vi.fn(),
@@ -150,6 +151,74 @@ describe('local publish job routes', () => {
     ));
     expect(response.status).toBe(204);
     expect(mocks.claim).toHaveBeenCalledWith('verification');
+  });
+
+  it('forwards an authenticated exact verification selector without client-side filtering', async () => {
+    mocks.claim.mockResolvedValue({
+      id: jobId,
+      status: 'operator_attested',
+      claimToken,
+      successAttestation: {
+        jobId,
+        releaseRequired: true,
+        contractRevision: 'operator-success-attestation/v1',
+      },
+    });
+
+    const response = await claimJob(request(
+      `/api/local-publish-jobs/next?lane=verification&expectedJobId=${jobId}`,
+      { headers: { Authorization: `Bearer ${workerToken}` } },
+    ));
+
+    expect(response.status).toBe(200);
+    expect(mocks.claim).toHaveBeenCalledWith('verification', jobId);
+    await expect(response.json()).resolves.toMatchObject({
+      id: jobId,
+      status: 'operator_attested',
+      successAttestation: {
+        jobId,
+        releaseRequired: true,
+        contractRevision: 'operator-success-attestation/v1',
+      },
+    });
+  });
+
+  it('fails closed when the exact verification job is not claimable', async () => {
+    mocks.claim.mockRejectedValue(new LocalPublishJobError(
+      'The expected verification job is not currently claimable',
+      'EXPECTED_JOB_NOT_CLAIMABLE',
+      409,
+    ));
+
+    const response = await claimJob(request(
+      `/api/local-publish-jobs/next?lane=verification&expectedJobId=${jobId}`,
+      { headers: { Authorization: `Bearer ${workerToken}` } },
+    ));
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: 'The expected verification job is not currently claimable',
+      code: 'EXPECTED_JOB_NOT_CLAIMABLE',
+    });
+  });
+
+  it('rejects malformed, repeated, or non-verification exact selectors before claiming', async () => {
+    const malformed = await claimJob(request(
+      '/api/local-publish-jobs/next?lane=verification&expectedJobId=not-a-uuid',
+      { headers: { Authorization: `Bearer ${workerToken}` } },
+    ));
+    const repeated = await claimJob(request(
+      `/api/local-publish-jobs/next?lane=verification&expectedJobId=${jobId}` +
+        `&expectedJobId=${claimToken}`,
+      { headers: { Authorization: `Bearer ${workerToken}` } },
+    ));
+    const wrongLane = await claimJob(request(
+      `/api/local-publish-jobs/next?lane=dispatch&expectedJobId=${jobId}`,
+      { headers: { Authorization: `Bearer ${workerToken}` } },
+    ));
+
+    expect([malformed.status, repeated.status, wrongLane.status]).toEqual([400, 400, 400]);
+    expect(mocks.claim).not.toHaveBeenCalled();
   });
 
   it('returns the current strict claim for worker reauthorization', async () => {

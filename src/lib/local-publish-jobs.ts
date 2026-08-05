@@ -41,6 +41,8 @@ const MIN_LEASE_SECONDS = 60;
 const MAX_LEASE_SECONDS = 24 * 60 * 60;
 const DEFAULT_VERIFICATION_BACKOFF_SECONDS = [15 * 60, 60 * 60, 6 * 60 * 60, 24 * 60 * 60] as const;
 const CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 interface QueueDependencies {
   getPost: (pageId: string) => Promise<ReadyXhsPost>;
@@ -292,9 +294,42 @@ export function verificationBackoffSeconds() {
   return [...DEFAULT_VERIFICATION_BACKOFF_SECONDS] as [number, number, number, number];
 }
 
-export async function claimNextLocalPublishJob(lane: LocalPublishWorkLane = 'all') {
+export function validateExpectedVerificationJobId(
+  lane: LocalPublishWorkLane,
+  expectedJobId: string,
+) {
+  if (!UUID_PATTERN.test(expectedJobId)) {
+    throw new LocalPublishJobError(
+      'expectedJobId must be one exact UUID',
+      'VALIDATION_ERROR',
+      400,
+    );
+  }
+  if (lane !== 'verification') {
+    throw new LocalPublishJobError(
+      'expectedJobId requires lane=verification',
+      'VALIDATION_ERROR',
+      400,
+    );
+  }
+}
+
+export async function claimNextLocalPublishJob(
+  lane: LocalPublishWorkLane = 'all',
+  expectedJobId?: string,
+) {
+  if (expectedJobId !== undefined) {
+    validateExpectedVerificationJobId(lane, expectedJobId);
+  }
   for (let attempt = 0; attempt < 10; attempt += 1) {
-    const job = await claimNextStoredLocalPublishJob(leaseSeconds(), lane);
+    const job = await claimNextStoredLocalPublishJob(leaseSeconds(), lane, expectedJobId);
+    if (!job && expectedJobId) {
+      throw new LocalPublishJobError(
+        'The expected verification job is not currently claimable',
+        'EXPECTED_JOB_NOT_CLAIMABLE',
+        409,
+      );
+    }
     if (!job || !job.batchAuthorization) return job;
     if (
       job.status !== 'claimed' &&

@@ -266,7 +266,11 @@ the prior claim is revoked, recovery and requeue exclude it, and dispatch,
 authorization, or failure results return `JOB_OPERATOR_ATTESTED`. It does not
 invent a note ID or URL.
 
-The verification lane first returns the attested job immediately with:
+For a controlled release, request the exact unacknowledged attested job with
+`GET /api/local-publish-jobs/next?lane=verification&expectedJobId=<job-uuid>`.
+The server either atomically claims that exact `operator_attested` release or
+returns `EXPECTED_JOB_NOT_CLAIMABLE`; it never falls back to another row. The
+claim retains this response shape:
 
 ```json
 {
@@ -552,9 +556,14 @@ combined lifecycle transition per wake:
 - `GET /api/local-publish-jobs/next?lane=dispatch` atomically claims one
   `queued`, expired `claimed`, or expired `staged` job.
 - `GET /api/local-publish-jobs/next?lane=verification` atomically claims one
-  due `submitted`, `scheduled`, or `verification_pending` job, or one
-  reclaimable `verified` reconciliation. Dispatch work cannot consume this
-  lane's capacity, and verification work cannot consume dispatch capacity.
+  due `submitted`, `scheduled`, `operator_attested`, or `verification_pending`
+  job, or one reclaimable `verified` reconciliation. Dispatch work cannot
+  consume this lane's capacity, and verification work cannot consume dispatch
+  capacity.
+- Adding `expectedJobId=<job-uuid>` to the verification lane is a release-only
+  fail-closed selector. It claims only that exact due, unacknowledged
+  `operator_attested` job and otherwise returns HTTP 409 without claiming any
+  row. It cannot target ordinary verification or acknowledged release work.
 - Omitting `lane` preserves the existing combined single-claim behavior for
   older workers. Every response still has its own rotating `claimToken` and
   `claimExpiresAt`; result contracts and human Publish approval are unchanged.

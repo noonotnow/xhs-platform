@@ -323,6 +323,7 @@ export async function listPublishOwningLocalJobs(notionPageIds: string[]) {
 export async function claimNextStoredLocalPublishJob(
   leaseSeconds: number,
   lane: LocalPublishWorkLane = 'all',
+  expectedJobId?: string,
 ): Promise<ClaimedLocalPublishJob | null> {
   const result = await sql<LocalPublishJobRow>`
     WITH candidate AS (
@@ -370,6 +371,20 @@ export async function claimNextStoredLocalPublishJob(
             )
           )
       )
+        AND (
+          ${expectedJobId ?? null}::uuid IS NULL
+          OR (
+            local_publish_jobs.id = ${expectedJobId ?? null}::uuid
+            AND local_publish_jobs.status = 'operator_attested'
+            AND local_publish_jobs.success_attestation_id IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1
+              FROM local_publish_job_success_attestation_release_acks AS release_ack
+              WHERE release_ack.success_attestation_id =
+                local_publish_jobs.success_attestation_id
+            )
+          )
+        )
         AND external_disposition_request_id IS NULL
         AND NOT EXISTS (
           SELECT 1
@@ -785,9 +800,9 @@ export async function deferStoredLocalPublishVerification(
         verification_attempts = verification_attempts + 1,
         next_verification_at = CURRENT_TIMESTAMP + (
           CASE LEAST(verification_attempts, 3)
-            WHEN 0 THEN ${backoffSeconds[1]}
-            WHEN 1 THEN ${backoffSeconds[2]}
-            ELSE ${backoffSeconds[3]}
+            WHEN 0 THEN ${backoffSeconds[1]}::integer
+            WHEN 1 THEN ${backoffSeconds[2]}::integer
+            ELSE ${backoffSeconds[3]}::integer
           END * INTERVAL '1 second'
         ),
         error_code = ${code},
@@ -870,9 +885,9 @@ export async function deferStoredOperatorAttestedVerification(
     SET verification_attempts = verification_attempts + 1,
         next_verification_at = CURRENT_TIMESTAMP + (
           CASE LEAST(verification_attempts, 3)
-            WHEN 0 THEN ${verificationBackoffSeconds[1]}
-            WHEN 1 THEN ${verificationBackoffSeconds[2]}
-            ELSE ${verificationBackoffSeconds[3]}
+            WHEN 0 THEN ${verificationBackoffSeconds[1]}::integer
+            WHEN 1 THEN ${verificationBackoffSeconds[2]}::integer
+            ELSE ${verificationBackoffSeconds[3]}::integer
           END * INTERVAL '1 second'
         ),
         claim_expires_at = CURRENT_TIMESTAMP,
