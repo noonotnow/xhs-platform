@@ -32,7 +32,7 @@ function post(
     thumbnailUrl: '',
     tags: ['FrozenTag'],
     ...(publishAt ? { publishAt } : {}),
-    scheduledDate: null,
+    scheduledDate: publishAt ?? null,
     lastEditedTime: '2026-08-04T12:00:00.000Z',
     publishBlockers: [],
     ...overrides,
@@ -90,6 +90,21 @@ describe('bounded RedNote publish batches', () => {
       'bootstrap',
       now,
     )).toEqual([]);
+  });
+
+  it('leaves unrelated untimed Posts unchanged and outside every dispatch batch', () => {
+    const now = new Date('2026-08-04T13:00:00.000Z');
+    const untimed = post(undefined, {
+      id: '22222222-2222-4222-8222-222222222222',
+      headline: 'Planning without a publish time',
+    });
+    const before = structuredClone(untimed);
+    const timed = post('2026-08-04T14:00:00.000Z');
+
+    expect(buildBatchItems([untimed, timed], 'bootstrap', now)).toEqual([
+      expect.objectContaining({ notionPageId: timed.id }),
+    ]);
+    expect(untimed).toEqual(before);
   });
 
   it('accounts for a late bootstrap item and visibly blocks a trial-only MOV sibling', () => {
