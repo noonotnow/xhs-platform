@@ -7,10 +7,12 @@ const mocks = vi.hoisted(() => ({
 vi.mock('@/lib/db', () => ({ sql: mocks.sql }));
 
 import {
+  authorizeStoredLocalPublishJob,
   claimNextStoredLocalPublishJob,
   completeStoredLocalPublishReconciliation,
   consumeStoredDispatchAuthorization,
   deferStoredLocalPublishVerification,
+  deferStoredOperatorAttestedVerification,
   failStoredLocalPublishJob,
   insertLocalPublishJob,
   listLocalPublishJobs,
@@ -87,7 +89,13 @@ function claimedRow() {
 }
 
 function verificationRow(
-  status: 'submitted' | 'scheduled' | 'verification_pending' | 'verified' | 'reconciled',
+  status:
+    | 'submitted'
+    | 'scheduled'
+    | 'operator_attested'
+    | 'verification_pending'
+    | 'verified'
+    | 'reconciled',
 ) {
   return {
     ...claimedRow(),
@@ -458,6 +466,58 @@ describe('local publish atomic claim storage', () => {
     ]));
   });
 
+  it('defers an attested identity lookup without adding dispatch identity', async () => {
+    mocks.sql.mockResolvedValue({
+      rows: [{
+        ...verificationRow('operator_attested'),
+        note_id: null,
+        share_url: null,
+      }],
+      rowCount: 1,
+    });
+    const deferred = await deferStoredOperatorAttestedVerification(
+      claimedRow().id,
+      claimedRow().claim_token,
+      'PUBLIC_NOTE_NOT_FOUND',
+      'The scheduled post is not public yet',
+      [900, 3_600, 21_600, 86_400],
+    );
+    expect(deferred).toMatchObject({ status: 'operator_attested' });
+    expect(deferred).not.toHaveProperty('noteId');
+    expect(deferred).not.toHaveProperty('shareUrl');
+    const query = (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
+    expect(query).toContain("status = 'operator_attested'");
+    expect(query).toContain(
+      'local_publish_job_success_attestation_release_acks',
+    );
+    expect(query).not.toContain('note_id =');
+    expect(query).not.toContain('share_url =');
+  });
+
+  it('requires slot release before attested identity lookup', async () => {
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({
+        rows: [{
+          ...verificationRow('operator_attested'),
+          note_id: null,
+          share_url: null,
+          claim_expires_at: '2099-08-05T13:00:00.000Z',
+          success_attestation_id: '99999999-9999-4999-8999-999999999999',
+        }],
+        rowCount: 1,
+      });
+    await expect(prepareStoredLocalPublishVerification(
+      claimedRow().id,
+      claimedRow().claim_token,
+      'note_123',
+      'https://www.rednote.com/explore/note_123',
+    )).rejects.toMatchObject({
+      code: 'ATTESTATION_RELEASE_REQUIRED',
+      status: 409,
+    });
+  });
+
   it('rejects terminal failure after Creator dispatch', async () => {
     mocks.sql
       .mockResolvedValueOnce({ rows: [], rowCount: 0 })
@@ -469,6 +529,53 @@ describe('local publish atomic claim storage', () => {
       'PUBLIC_LOOKUP_DELAY',
       'Public lookup is not ready',
     )).rejects.toMatchObject({ code: 'INVALID_JOB_TRANSITION', status: 409 });
+  });
+
+  it('signals the local slot to release after operator attestation', async () => {
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({
+        rows: [{
+          ...verificationRow('operator_attested'),
+          note_id: null,
+          share_url: null,
+          success_attestation_id: '99999999-9999-4999-8999-999999999999',
+        }],
+        rowCount: 1,
+      });
+
+    await expect(authorizeStoredLocalPublishJob(
+      claimedRow().id,
+      claimedRow().claim_token,
+    )).rejects.toMatchObject({
+      code: 'JOB_OPERATOR_ATTESTED',
+      status: 409,
+    });
+    const authorizationQuery =
+      (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
+    expect(authorizationQuery).not.toContain("'operator_attested'");
+  });
+
+  it('cannot record dispatch after operator attestation', async () => {
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({
+        rows: [{
+          ...verificationRow('operator_attested'),
+          note_id: null,
+          share_url: null,
+          success_attestation_id: '99999999-9999-4999-8999-999999999999',
+        }],
+        rowCount: 1,
+      });
+    await expect(recordStoredLocalPublishDispatch(
+      claimedRow().id,
+      claimedRow().claim_token,
+      'scheduled',
+      'invented_note',
+      'https://www.rednote.com/explore/invented_note',
+      900,
+    )).rejects.toMatchObject({ code: 'JOB_OPERATOR_ATTESTED', status: 409 });
   });
 
   it('persists verified state before reconciliation completion', async () => {
@@ -487,7 +594,7 @@ describe('local publish atomic claim storage', () => {
     const verificationQuery =
       (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
     expect(verificationQuery).toContain('note_id = COALESCE(note_id');
-    expect(verificationQuery).toContain("status IN ('submitted', 'scheduled', 'verification_pending')");
+    expect(verificationQuery).toContain("'operator_attested'");
 
     await expect(completeStoredLocalPublishReconciliation(
       claimedRow().id,

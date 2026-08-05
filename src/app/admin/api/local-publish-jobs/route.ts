@@ -6,6 +6,7 @@ import {
   normalizeLocalPublishJobError,
   queueLocalPublishJob,
 } from '@/lib/local-publish-jobs';
+import { listOperatorSuccessAttestationEvidence } from '@/lib/operator-success-attestation-store';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -36,8 +37,12 @@ export async function GET(request: NextRequest) {
   }
 
   try {
+    const [jobs, successAttestationCandidates] = await Promise.all([
+      getLocalPublishJobSummaries(),
+      listOperatorSuccessAttestationEvidence(),
+    ]);
     return NextResponse.json(
-      { jobs: await getLocalPublishJobSummaries() },
+      { jobs, successAttestationCandidates },
       { headers: NO_STORE_HEADERS },
     );
   } catch (error) {

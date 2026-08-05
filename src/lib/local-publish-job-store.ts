@@ -6,6 +6,14 @@ import {
   normalizeLocalPublishTags,
 } from '@/lib/local-publish-job-input';
 import { rednoteMediaIdentity } from '@/lib/rednote-publish-authorization';
+import {
+  acknowledgeOperatorSuccessAttestationRelease,
+  loadOperatorSuccessAttestation,
+} from '@/lib/operator-success-attestation-store';
+import {
+  ATTESTATION_RELEASE_CONSUMED_CODE,
+  ATTESTATION_RELEASE_CONSUMED_MESSAGE,
+} from '@/lib/operator-success-attestation-contract';
 import type {
   ClaimedLocalPublishJob,
   LocalPublishJobStatus,
@@ -13,6 +21,7 @@ import type {
   LocalPublishSnapshot,
   BatchAuthorization,
   LocalPublishWorkLane,
+  OperatorSuccessAttestationSummary,
 } from '@/types/local-publish-job';
 
 interface LocalPublishJobRow extends QueryResultRow {
@@ -40,6 +49,7 @@ interface LocalPublishJobRow extends QueryResultRow {
   completed_at: Date | string | null;
   batch_item_id?: string | null;
   dispatch_authorized_at?: Date | string | null;
+  success_attestation_id?: string | null;
 }
 
 export interface StoredLocalPublishJob {
@@ -64,6 +74,7 @@ export interface StoredLocalPublishJob {
   reconciledAt?: string;
   completedAt?: string;
   batchAuthorization?: BatchAuthorization;
+  successAttestation?: OperatorSuccessAttestationSummary;
 }
 
 function timestamp(value: Date | string) {
@@ -158,6 +169,7 @@ export function jobSummary(job: StoredLocalPublishJob): LocalPublishJobSummary {
     ...(job.verifiedAt ? { verifiedAt: job.verifiedAt } : {}),
     ...(job.reconciledAt ? { reconciledAt: job.reconciledAt } : {}),
     ...(job.completedAt ? { completedAt: job.completedAt } : {}),
+    ...(job.successAttestation ? { successAttestation: job.successAttestation } : {}),
   };
 }
 
@@ -341,6 +353,14 @@ export async function claimNextStoredLocalPublishJob(
                 )
               )
               OR (
+                status = 'operator_attested'
+                AND next_verification_at <= CURRENT_TIMESTAMP
+                AND (
+                  claim_expires_at IS NULL
+                  OR claim_expires_at <= CURRENT_TIMESTAMP
+                )
+              )
+              OR (
                 status = 'verified'
                 AND (
                   claim_expires_at IS NULL
@@ -398,7 +418,7 @@ async function claimedResponse(row: LocalPublishJobRow): Promise<ClaimedLocalPub
     );
   }
   const job = mapRow(row);
-  if (row.batch_item_id) {
+  if (row.batch_item_id && job.status !== 'operator_attested') {
     const authorization = await sql<{
       batch_id: string;
       batch_item_id: string;
@@ -480,6 +500,30 @@ async function claimedResponse(row: LocalPublishJobRow): Promise<ClaimedLocalPub
     claimExpiresAt: timestamp(row.claim_expires_at),
     ...(job.batchAuthorization ? { batchAuthorization: job.batchAuthorization } : {}),
   };
+  if (job.status === 'operator_attested') {
+    if (!row.success_attestation_id || !job.nextVerificationAt) {
+      throw new LocalPublishJobError(
+        'An operator-attested job is missing its durable receipt or verification time',
+        'INVALID_OPERATOR_ATTESTED_JOB',
+        500,
+      );
+    }
+    const attestation = await loadOperatorSuccessAttestation(row.success_attestation_id);
+    if (!attestation || attestation.jobId !== job.id) {
+      throw new LocalPublishJobError(
+        'The operator attestation does not match its local job',
+        'INVALID_OPERATOR_ATTESTED_JOB',
+        500,
+      );
+    }
+    return {
+      ...base,
+      status: 'operator_attested',
+      verificationAttempts: job.verificationAttempts,
+      nextVerificationAt: job.nextVerificationAt,
+      successAttestation: attestation,
+    };
+  }
   if (
     job.status === 'submitted' ||
     job.status === 'scheduled' ||
@@ -535,7 +579,14 @@ export async function authorizeStoredLocalPublishJob(id: string, claimToken: str
     LIMIT 1
   `;
   if (result.rows[0]) return claimedResponse(result.rows[0]);
-  await loadResultJob(id);
+  const job = await loadResultJob(id);
+  if (job.status === 'operator_attested') {
+    throw new LocalPublishJobError(
+      'The exact local attempt was operator-attested; release it and do not dispatch again',
+      'JOB_OPERATOR_ATTESTED',
+      409,
+    );
+  }
   throw new LocalPublishJobError(
     'The local publish claim is stale, expired, or revoked',
     'STALE_CLAIM',
@@ -579,6 +630,13 @@ async function loadResultJob(id: string) {
 }
 
 function assertMatchingClaim(job: StoredLocalPublishJob, claimToken: string) {
+  if (job.status === 'operator_attested') {
+    throw new LocalPublishJobError(
+      'The exact local attempt was operator-attested; release it and do not dispatch again',
+      'JOB_OPERATOR_ATTESTED',
+      409,
+    );
+  }
   if (job.claimToken !== claimToken) {
     throw new LocalPublishJobError(
       'The local publish claim is no longer current',
@@ -770,6 +828,7 @@ export async function deferStoredLocalPublishVerification(
   ) {
     return job;
   }
+
   if (
     job.status === 'submitted' ||
     job.status === 'scheduled' ||
@@ -783,6 +842,77 @@ export async function deferStoredLocalPublishVerification(
   }
   throw new LocalPublishJobError(
     'The job cannot defer verification from its current state',
+    'INVALID_JOB_TRANSITION',
+    409,
+  );
+}
+
+export async function deferStoredOperatorAttestedVerification(
+  id: string,
+  claimToken: string,
+  code: string,
+  message: string,
+  verificationBackoffSeconds: readonly [number, number, number, number],
+) {
+  if (code === ATTESTATION_RELEASE_CONSUMED_CODE) {
+    if (message !== ATTESTATION_RELEASE_CONSUMED_MESSAGE) {
+      throw new LocalPublishJobError(
+        'The attestation release acknowledgement message does not match the contract',
+        'ATTESTATION_RELEASE_ACK_MISMATCH',
+        409,
+      );
+    }
+    await acknowledgeOperatorSuccessAttestationRelease(id, claimToken);
+    return loadResultJob(id);
+  }
+  const result = await sql<LocalPublishJobRow>`
+    UPDATE local_publish_jobs
+    SET verification_attempts = verification_attempts + 1,
+        next_verification_at = CURRENT_TIMESTAMP + (
+          CASE LEAST(verification_attempts, 3)
+            WHEN 0 THEN ${verificationBackoffSeconds[1]}
+            WHEN 1 THEN ${verificationBackoffSeconds[2]}
+            ELSE ${verificationBackoffSeconds[3]}
+          END * INTERVAL '1 second'
+        ),
+        claim_expires_at = CURRENT_TIMESTAMP,
+        error_code = ${code},
+        error_message = ${message},
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ${id}::uuid
+      AND status = 'operator_attested'
+      AND claim_token = ${claimToken}::uuid
+      AND claim_expires_at > CURRENT_TIMESTAMP
+      AND success_attestation_id IS NOT NULL
+      AND EXISTS (
+        SELECT 1
+        FROM local_publish_job_success_attestation_release_acks AS release_ack
+        WHERE release_ack.success_attestation_id =
+          local_publish_jobs.success_attestation_id
+      )
+    RETURNING *
+  `;
+  if (result.rows[0]) return mapRow(result.rows[0]);
+  const job = await loadResultJob(id);
+  if (job.status === 'operator_attested') {
+    if (job.claimToken !== claimToken) {
+      throw new LocalPublishJobError(
+        'The operator-attested verification claim is no longer current',
+        'STALE_CLAIM',
+        409,
+      );
+    }
+    assertUnexpiredClaim(job);
+    throw new LocalPublishJobError(
+      'The matching local slot must be durably released before receipt verification',
+      'ATTESTATION_RELEASE_REQUIRED',
+      409,
+    );
+  }
+  assertMatchingClaim(job, claimToken);
+  assertUnexpiredClaim(job);
+  throw new LocalPublishJobError(
+    'The operator-attested verification cannot be deferred from its current state',
     'INVALID_JOB_TRANSITION',
     409,
   );
@@ -853,6 +983,7 @@ export async function prepareStoredLocalPublishVerification(
         'staged',
         'submitted',
         'scheduled',
+        'operator_attested',
         'verification_pending'
       )
       AND claim_token = ${claimToken}::uuid
@@ -866,9 +997,18 @@ export async function prepareStoredLocalPublishVerification(
       )
       AND (
         (
-          status IN ('claimed', 'staged')
+          status IN ('claimed', 'staged', 'operator_attested')
           AND (note_id IS NULL OR note_id = ${noteId})
           AND (share_url IS NULL OR share_url = ${shareUrl})
+          AND (
+            status <> 'operator_attested'
+            OR EXISTS (
+              SELECT 1
+              FROM local_publish_job_success_attestation_release_acks AS release_ack
+              WHERE release_ack.success_attestation_id =
+                local_publish_jobs.success_attestation_id
+            )
+          )
         )
         OR (
           status IN ('submitted', 'scheduled', 'verification_pending')
@@ -881,6 +1021,14 @@ export async function prepareStoredLocalPublishVerification(
   if (result.rows[0]) return mapRow(result.rows[0]);
 
   const job = await loadResultJob(id);
+  if (job.status === 'operator_attested' && job.claimToken === claimToken) {
+    assertUnexpiredClaim(job);
+    throw new LocalPublishJobError(
+      'The matching local slot must be durably released before receipt verification',
+      'ATTESTATION_RELEASE_REQUIRED',
+      409,
+    );
+  }
   assertMatchingClaim(job, claimToken);
   if (
     (job.status === 'verified' || job.status === 'reconciled') &&
@@ -892,7 +1040,8 @@ export async function prepareStoredLocalPublishVerification(
   if (
     (
       job.status === 'claimed' ||
-      job.status === 'staged'
+      job.status === 'staged' ||
+      job.status === 'operator_attested'
     ) &&
     !job.noteId &&
     !job.shareUrl
