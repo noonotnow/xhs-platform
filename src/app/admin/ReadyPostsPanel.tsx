@@ -37,6 +37,7 @@ import {
   isActiveLocalPublishJob,
   receiptPendingLocalPublishJobs,
 } from '@/lib/local-publish-job-display';
+import { manualSchedulingProvenanceMismatch } from '@/lib/manual-scheduling-provenance';
 
 interface ApiError {
   error?: string;
@@ -137,7 +138,10 @@ function publishTiming(post: ReadyXhsPost) {
   };
 }
 
-function jobStatusCopy(job: LocalPublishJobSummary | undefined) {
+function jobStatusCopy(
+  job: LocalPublishJobSummary | undefined,
+  post?: ReadyXhsPost,
+) {
   if (!job) return null;
   const movTrial = job.compatibilityTrial === 'unverified_mov';
   if (job.status === 'queued') {
@@ -186,11 +190,32 @@ function jobStatusCopy(job: LocalPublishJobSummary | undefined) {
   }
   if (job.status === 'operator_attested') {
     if (job.successAttestation?.provenance === 'manual_scheduled') {
+      const mismatch = post
+        ? manualSchedulingProvenanceMismatch(post, job.successAttestation)
+        : null;
+      const attestedTime = new Intl.DateTimeFormat('en-US', {
+        dateStyle: 'full',
+        timeStyle: 'short',
+        timeZone: 'America/New_York',
+      }).format(new Date(job.successAttestation.requestedPublishAt));
+      if (mismatch) {
+        return {
+          tone: 'warning',
+          title: 'Scheduled · provenance mismatch · needs review',
+          detail:
+            `The immutable assertion records ${attestedTime} ET at source revision ` +
+            `${job.successAttestation.snapshotRevision}, but the current Notion ScheduledDate ` +
+            'or Post revision no longer matches. Dispatch remains closed; review the evidence ' +
+            'and reconcile by public URL rather than rewriting the assertion.',
+        };
+      }
       return {
         tone: 'warning',
         title: 'Scheduled · receipt pending',
         detail:
-          'Manual scheduling is recorded for the exact frozen packet. Dispatch is closed. Add the public URL later to verify identity, backfill Published, and reconcile metrics.',
+          `Manual scheduling is recorded for ${attestedTime} ET and the exact frozen packet. ` +
+          'Dispatch is closed. Add the public URL later to verify identity, backfill Published, ' +
+          'and reconcile metrics.',
       };
     }
     return {
@@ -390,10 +415,17 @@ export default function ReadyPostsPanel() {
   const currentJob = selected
     ? displayedLocalPublishJob(jobs, selected.id)
     : undefined;
-  const currentJobStatus = jobStatusCopy(currentJob);
+  const currentJobStatus = jobStatusCopy(currentJob, selected);
   const manualSchedulingCandidate = useMemo<ManualSchedulingAttestationEvidence | undefined>(
     () => {
-      if (!selected || selected.candidateKind !== 'packet_ready') return undefined;
+      if (
+        !selected ||
+        selected.candidateKind !== 'packet_ready' ||
+        !selected.scheduledDate ||
+        !selected.publishAt
+      ) {
+        return undefined;
+      }
       for (const batch of batches) {
         if (!['approved', 'partially_approved'].includes(batch.status)) continue;
         const item = batch.items.find((candidate) =>
@@ -1493,8 +1525,10 @@ export default function ReadyPostsPanel() {
                       <div>
                         <strong>Already scheduled manually?</strong>
                         <p>
-                          Close dispatch for this exact frozen packet now. Notion stays unchanged
-                          until a public URL is independently verified.
+                          First set this exact time in RedNote Creator, then copy the same instant
+                          into Notion ScheduledDate. Only then close dispatch for this frozen
+                          packet. Notion stays unchanged until a public URL is independently
+                          verified.
                         </p>
                         <small>
                           Packet <code>{manualSchedulingCandidate.itemHash}</code>

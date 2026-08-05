@@ -24,6 +24,13 @@ export async function createManualSchedulingAttestation(
     return replay;
   }
   const post = await getReadyXhsPost(input.notionPageId);
+  if (!post.scheduledDate || !post.publishAt) {
+    throw new LocalPublishJobError(
+      'Set a valid canonical ScheduledDate in Notion before asserting manual scheduling',
+      'MANUAL_SCHEDULING_SCHEDULE_REQUIRED',
+      409,
+    );
+  }
   const currentSnapshot = buildBatchSnapshot(post);
   if (
     !currentSnapshot ||

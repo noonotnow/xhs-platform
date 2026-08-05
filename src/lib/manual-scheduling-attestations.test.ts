@@ -72,7 +72,7 @@ describe('manual scheduling attestation service', () => {
     mocks.insert.mockResolvedValue({ created: true, attestation: { id: 'receipt' } });
   });
 
-  it('returns an exact durable replay without reading changed Notion state', async () => {
+  it('returns an exact durable replay without rewriting changed Notion state', async () => {
     mocks.replay.mockResolvedValue({
       created: false,
       attestation: { id: 'receipt', provenance: 'manual_scheduled' },
@@ -105,7 +105,35 @@ describe('manual scheduling attestation service', () => {
     );
   });
 
-  it('fails closed when Notion changed and when Published is no longer eligible', async () => {
+  it('leaves untimed Posts ineligible and never reaches persistence', async () => {
+    mocks.getPost.mockResolvedValue({
+      ...post,
+      scheduledDate: null,
+      publishAt: undefined,
+    });
+
+    await expect(createManualSchedulingAttestation(
+      input,
+      '33333333-3333-4333-8333-333333333333',
+      'operator@example.com',
+    )).rejects.toMatchObject({ code: 'MANUAL_SCHEDULING_SCHEDULE_REQUIRED' });
+    expect(mocks.getPost).toHaveBeenCalledWith(post.id);
+    expect(mocks.insert).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the exact ScheduledDate or Post revision changed before submit', async () => {
+    mocks.getPost.mockResolvedValueOnce({
+      ...post,
+      scheduledDate: '2026-08-06T11:30:00-04:00',
+      publishAt: '2026-08-06T15:30:00.000Z',
+    });
+    await expect(createManualSchedulingAttestation(
+      input,
+      '33333333-3333-4333-8333-333333333333',
+      'operator@example.com',
+    )).rejects.toMatchObject({ code: 'MANUAL_SCHEDULING_STALE_REVISION' });
+    expect(mocks.insert).not.toHaveBeenCalled();
+
     mocks.getPost.mockResolvedValueOnce({
       ...post,
       lastEditedTime: '2026-08-05T13:12:00.000Z',
@@ -116,7 +144,9 @@ describe('manual scheduling attestation service', () => {
       'operator@example.com',
     )).rejects.toMatchObject({ code: 'MANUAL_SCHEDULING_STALE_REVISION' });
     expect(mocks.insert).not.toHaveBeenCalled();
+  });
 
+  it('rejects a Post that became Published before submit', async () => {
     mocks.getPost.mockRejectedValueOnce(Object.assign(
       new Error('Post is already Published'),
       { code: 'POST_NOT_READY', status: 409 },
