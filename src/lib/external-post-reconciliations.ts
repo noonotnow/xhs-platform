@@ -30,7 +30,7 @@ function completedResult(record: {
   status: string;
   notionPageId?: string;
   outcome?: string;
-}) {
+}, targetNotionPageId?: string) {
   if (
     record.status !== 'succeeded' ||
     !record.notionPageId ||
@@ -39,6 +39,13 @@ function completedResult(record: {
     throw new LocalPublishJobError(
       'External reconciliation is not complete',
       'INVALID_RECONCILIATION_TRANSITION',
+      409,
+    );
+  }
+  if (targetNotionPageId && record.notionPageId !== targetNotionPageId) {
+    throw new LocalPublishJobError(
+      'The verified post was already reconciled to a different canonical page',
+      'RECONCILIATION_CONFLICT',
       409,
     );
   }
@@ -54,12 +61,16 @@ export async function reconcileVerifiedExternalPost(input: {
   snapshot: ExternalPostSnapshot;
   idempotencyKey: string;
   targetNotionPageId?: string;
+  targetDispositionId?: string;
 }) {
   const started = await beginExternalReconciliation(
     input.snapshot,
     input.idempotencyKey,
+    input.targetDispositionId,
   );
-  if (!started.acquired) return completedResult(started.record);
+  if (!started.acquired) {
+    return completedResult(started.record, input.targetNotionPageId);
+  }
 
   try {
     const result = input.targetNotionPageId
@@ -77,7 +88,7 @@ export async function reconcileVerifiedExternalPost(input: {
       result.notionPageId,
       result.outcome,
     );
-    return completedResult(completed);
+    return completedResult(completed, input.targetNotionPageId);
   } catch (error) {
     const failure = safeFailure(error);
     await failExternalReconciliation(

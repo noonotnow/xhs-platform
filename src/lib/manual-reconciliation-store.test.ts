@@ -6,6 +6,7 @@ vi.mock('@/lib/db', () => ({ sql: mocks.sql }));
 import {
   claimDueManualReconciliations,
   deferManualReconciliation,
+  failManualReconciliation,
   insertManualReconciliation,
   retryManualReconciliation,
 } from '@/lib/manual-reconciliation-store';
@@ -24,6 +25,7 @@ function row(status: 'queued' | 'verifying' | 'reconciled' | 'failed') {
     requested_note_id: 'note_123',
     requested_share_url: 'https://www.rednote.com/explore/note_123',
     expected_snapshot: expected,
+    request_kind: 'notion_only',
     status,
     idempotency_key: '44444444-4444-4444-8444-444444444444',
     claim_token:
@@ -74,6 +76,7 @@ describe('manual reconciliation persistence', () => {
     await expect(claimDueManualReconciliations(10, 1_800)).resolves.toEqual([{
       id: row('verifying').id,
       notionPageId: row('verifying').notion_page_id,
+      kind: 'notion_only',
       noteId: 'note_123',
       shareUrl: 'https://www.rednote.com/explore/note_123',
       expected,
@@ -108,6 +111,30 @@ describe('manual reconciliation persistence', () => {
     )).resolves.toMatchObject({ status: 'failed', verificationAttempts: 4 });
     const query = (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
     expect(query).toContain('verification_attempts + 1 >= 4');
+  });
+
+  it('returns an exact failed-result replay after the claim lease closes', async () => {
+    const failed = {
+      ...row('failed'),
+      claim_token: row('verifying').claim_token,
+      claim_expires_at: '2026-08-03T12:01:00.000Z',
+      error_code: 'NOTION_ERROR',
+      error_message: 'Notion unavailable',
+      completed_at: '2026-08-03T12:01:00.000Z',
+    };
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [failed] });
+
+    await expect(failManualReconciliation(
+      failed.id,
+      failed.claim_token!,
+      failed.error_code,
+      failed.error_message,
+    )).resolves.toMatchObject({
+      status: 'failed',
+      errorCode: failed.error_code,
+    });
   });
 
   it('returns a conflict when a newer reconciliation is active on retry', async () => {

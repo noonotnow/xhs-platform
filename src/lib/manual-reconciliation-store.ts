@@ -5,6 +5,7 @@ import { LocalPublishJobError } from '@/lib/local-publish-job-input';
 import type {
   ClaimedManualReconciliation,
   ExternalPostSnapshot,
+  ManualReconciliationKind,
   ManualReconciliationExpectedSnapshot,
   ManualReconciliationStatus,
   ManualReconciliationSummary,
@@ -17,6 +18,7 @@ interface ManualReconciliationRow extends QueryResultRow {
   requested_note_id: string;
   requested_share_url: string;
   expected_snapshot: ManualReconciliationExpectedSnapshot;
+  request_kind?: ManualReconciliationKind;
   status: ManualReconciliationStatus;
   idempotency_key: string;
   claim_token: string | null;
@@ -40,6 +42,7 @@ export interface StoredManualReconciliation {
   noteId: string;
   shareUrl: string;
   expected: ManualReconciliationExpectedSnapshot;
+  kind: ManualReconciliationKind;
   status: ManualReconciliationStatus;
   idempotencyKey: string;
   claimToken?: string;
@@ -72,6 +75,7 @@ function mapRow(row: ManualReconciliationRow): StoredManualReconciliation {
     noteId: row.requested_note_id,
     shareUrl: row.requested_share_url,
     expected: row.expected_snapshot,
+    kind: row.request_kind ?? 'notion_only',
     status: row.status,
     idempotencyKey: row.idempotency_key,
     ...(row.claim_token ? { claimToken: row.claim_token } : {}),
@@ -103,6 +107,7 @@ export function manualReconciliationSummary(
   return {
     id: record.id,
     notionPageId: record.notionPageId,
+    kind: record.kind,
     ...(record.sourceLocalJobId ? { sourceLocalJobId: record.sourceLocalJobId } : {}),
     noteId: record.noteId,
     shareUrl: record.shareUrl,
@@ -338,6 +343,10 @@ export async function claimDueManualReconciliations(
     return {
       id: request.id,
       notionPageId: request.notionPageId,
+      kind: request.kind,
+      ...(request.kind === 'targeted_local_job' && request.sourceLocalJobId
+        ? { sourceLocalJobId: request.sourceLocalJobId }
+        : {}),
       noteId: request.noteId,
       shareUrl: request.shareUrl,
       expected: request.expected,
@@ -352,9 +361,13 @@ function assertCurrentClaim(
   request: StoredManualReconciliation,
   claimToken: string,
 ) {
-  if (request.claimToken !== claimToken) {
+  if (
+    request.claimToken !== claimToken ||
+    !request.claimExpiresAt ||
+    new Date(request.claimExpiresAt).getTime() <= Date.now()
+  ) {
     throw new LocalPublishJobError(
-      'The manual reconciliation claim is no longer current',
+      'The manual reconciliation claim is stale, expired, or revoked',
       'STALE_CLAIM',
       409,
     );
@@ -427,18 +440,20 @@ export async function deferManualReconciliation(
     WHERE id = ${id}::uuid
       AND status = 'verifying'
       AND claim_token = ${claimToken}::uuid
+      AND claim_expires_at > CURRENT_TIMESTAMP
     RETURNING *
   `;
   if (result.rows[0]) return mapRow(result.rows[0]);
   const request = await loadManualReconciliation(id);
-  assertCurrentClaim(request, claimToken);
   if (
+    request.claimToken === claimToken &&
     request.errorCode === code &&
     request.errorMessage === message &&
     (request.status === 'queued' || request.status === 'failed')
   ) {
     return request;
   }
+  assertCurrentClaim(request, claimToken);
   throw new LocalPublishJobError(
     'The manual reconciliation could not be deferred',
     'INVALID_RECONCILIATION_TRANSITION',
@@ -463,18 +478,20 @@ export async function failManualReconciliation(
     WHERE id = ${id}::uuid
       AND status = 'verifying'
       AND claim_token = ${claimToken}::uuid
+      AND claim_expires_at > CURRENT_TIMESTAMP
     RETURNING *
   `;
   if (result.rows[0]) return mapRow(result.rows[0]);
   const request = await loadManualReconciliation(id);
-  assertCurrentClaim(request, claimToken);
   if (
+    request.claimToken === claimToken &&
     request.status === 'failed' &&
     request.errorCode === code &&
     request.errorMessage === message
   ) {
     return request;
   }
+  assertCurrentClaim(request, claimToken);
   throw new LocalPublishJobError(
     'The manual reconciliation could not be failed',
     'INVALID_RECONCILIATION_TRANSITION',
@@ -499,6 +516,7 @@ export async function completeManualReconciliation(
     WHERE id = ${id}::uuid
       AND status = 'verifying'
       AND claim_token = ${claimToken}::uuid
+      AND claim_expires_at > CURRENT_TIMESTAMP
     RETURNING *
   `;
   if (result.rows[0]) return mapRow(result.rows[0]);

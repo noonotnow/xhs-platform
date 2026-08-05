@@ -99,6 +99,31 @@ describe('external reconciliation orchestration', () => {
     );
   });
 
+  it('passes targeted ownership separately from the idempotency key', async () => {
+    mocks.begin.mockResolvedValue({ record: processing, acquired: true });
+    mocks.reconcileNotion.mockResolvedValue({
+      notionPageId: 'target-page',
+      outcome: 'targeted_page',
+    });
+    mocks.complete.mockResolvedValue({
+      ...succeeded,
+      notionPageId: 'target-page',
+      outcome: 'targeted_page',
+    });
+
+    await reconcileVerifiedExternalPost({
+      snapshot,
+      idempotencyKey,
+      targetNotionPageId: 'target-page',
+      targetDispositionId: processing.id,
+    });
+    expect(mocks.begin).toHaveBeenCalledWith(
+      snapshot,
+      idempotencyKey,
+      processing.id,
+    );
+  });
+
   it('records safe Notion failures and never returns a success-shaped fallback', async () => {
     mocks.begin.mockResolvedValue({ record: processing, acquired: true });
     mocks.reconcileNotion.mockRejectedValue(
@@ -113,5 +138,22 @@ describe('external reconciliation orchestration', () => {
       'RedNote identity is ambiguous',
     );
     expect(mocks.complete).not.toHaveBeenCalled();
+  });
+
+  it('rejects an idempotent receipt targeting a different canonical page', async () => {
+    mocks.begin.mockResolvedValue({
+      acquired: false,
+      record: { ...succeeded, notionPageId: 'different-page' },
+    });
+
+    await expect(reconcileVerifiedExternalPost({
+      snapshot,
+      idempotencyKey,
+      targetNotionPageId: 'target-page',
+    })).rejects.toMatchObject({
+      code: 'RECONCILIATION_CONFLICT',
+      status: 409,
+    });
+    expect(mocks.reconcileNotion).not.toHaveBeenCalled();
   });
 });

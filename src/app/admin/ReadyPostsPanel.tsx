@@ -7,6 +7,7 @@ import type {
   LocalPublishJobSummary,
   LocalPublishMediaType,
   ManualReconciliationSummary,
+  OperatorSuccessAttestationEvidence,
   PublishBatch,
   RednotePublishJobRecovery,
   RednotePublishJobRecoveryEvidence,
@@ -46,6 +47,7 @@ interface PublishBatchesResponse extends ApiError {
 
 interface LocalJobsResponse extends ApiError {
   jobs: LocalPublishJobSummary[];
+  successAttestationCandidates: OperatorSuccessAttestationEvidence[];
 }
 
 interface PublishJobRecoveryResponse extends ApiError {
@@ -182,6 +184,14 @@ function jobStatusCopy(job: LocalPublishJobSummary | undefined) {
         : 'Stable identifiers are saved. Public verification is pending; do not publish again.',
     };
   }
+  if (job.status === 'operator_attested') {
+    return {
+      tone: 'pending',
+      title: 'Success attested — awaiting public verification',
+      detail:
+        'Dispatch and recovery are permanently closed. The exact public note will be discovered after publication.',
+    };
+  }
   if (job.status === 'verification_pending') {
     return {
       tone: 'warning',
@@ -223,6 +233,7 @@ function dashboardState(job: LocalPublishJobSummary | undefined) {
   if (job.status === 'queued') return 'Queued';
   if (job.status === 'claimed' || job.status === 'staged') return 'Scheduling';
   if (job.status === 'submitted' || job.status === 'scheduled') return 'Scheduled/Submitted';
+  if (job.status === 'operator_attested') return 'Attested/Verifying';
   if (job.status === 'verification_pending' || job.status === 'verified') return 'Verifying';
   if (job.status === 'reconciled') return 'Reconciled';
   return 'Failed';
@@ -273,9 +284,13 @@ function manualReconciliationStatusCopy(
 export default function ReadyPostsPanel() {
   const [posts, setPosts] = useState<ReadyXhsPost[]>([]);
   const [jobs, setJobs] = useState<LocalPublishJobSummary[]>([]);
+  const [successAttestationCandidates, setSuccessAttestationCandidates] = useState<
+    OperatorSuccessAttestationEvidence[]
+  >([]);
   const [batches, setBatches] = useState<PublishBatch[]>([]);
   const [batchBusy, setBatchBusy] = useState(false);
   const [recoveryBusyJobId, setRecoveryBusyJobId] = useState('');
+  const [attestationBusyJobId, setAttestationBusyJobId] = useState('');
   const [reconciliations, setReconciliations] = useState<ExternalReconciliationSummary[]>([]);
   const [reconciliationError, setReconciliationError] = useState('');
   const [manualReconciliations, setManualReconciliations] = useState<
@@ -300,6 +315,7 @@ export default function ReadyPostsPanel() {
   const selectedPostIdRef = useRef<string>();
   const idempotencyKeysRef = useRef<Record<string, string>>({});
   const reconciliationKeysRef = useRef<Record<string, string>>({});
+  const attestationKeysRef = useRef<Record<string, string>>({});
 
   const selected = useMemo(
     () => posts.find((post) => post.id === selectedId) ?? posts[0],
@@ -423,6 +439,7 @@ export default function ReadyPostsPanel() {
       const data = await responseJson<LocalJobsResponse>(response, `GET ${path}`);
       if (!response.ok) throw new Error(data.error || 'Failed to load local publish jobs');
       setJobs(data.jobs);
+      setSuccessAttestationCandidates(data.successAttestationCandidates);
     } catch (loadError) {
       if (showError) {
         setError(
@@ -644,6 +661,7 @@ export default function ReadyPostsPanel() {
       if (!response.ok) {
         throw new Error(data.error || 'Failed to recover approved publish job');
       }
+
       await Promise.all([loadBatches(), loadJobs()]);
     } catch (recoveryError) {
       setError(
@@ -654,6 +672,59 @@ export default function ReadyPostsPanel() {
       await Promise.all([loadBatches(), loadJobs()]);
     } finally {
       setRecoveryBusyJobId('');
+    }
+  }
+
+  async function attestScheduledSuccess(
+    candidate: OperatorSuccessAttestationEvidence,
+  ) {
+    const confirmed = window.confirm(
+      `Yes, this exact attempt succeeded?\n\n${candidate.expectedOutcome.text}\n\n` +
+      `Job ${candidate.jobId}\nBatch ${candidate.batchId}\n` +
+      `Item ${candidate.itemId}\nManifest ${candidate.manifestHash}\n` +
+      `Item hash ${candidate.itemHash}\nSource revision ${candidate.snapshotRevision}\n\n` +
+      'This permanently stops dispatch and recovery for this attempt. ' +
+      'Public identity will be verified later.',
+    );
+    if (!confirmed) return;
+    const idempotencyKey =
+      attestationKeysRef.current[candidate.jobId] ?? crypto.randomUUID();
+    attestationKeysRef.current[candidate.jobId] = idempotencyKey;
+    setAttestationBusyJobId(candidate.jobId);
+    setError('');
+    try {
+      const path = '/admin/api/local-publish-job-success-attestations';
+      const response = await fetch(path, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey,
+        },
+        body: JSON.stringify({
+          batchId: candidate.batchId,
+          manifestHash: candidate.manifestHash,
+          itemId: candidate.itemId,
+          jobId: candidate.jobId,
+          itemHash: candidate.itemHash,
+          snapshotRevision: candidate.snapshotRevision,
+          requestedPublishAt: candidate.requestedPublishAt,
+          confirmed: true,
+        }),
+      });
+      const data = await responseJson<ApiError>(response, `POST ${path}`);
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to record success attestation');
+      }
+      await Promise.all([loadBatches(), loadJobs()]);
+    } catch (attestationError) {
+      setError(
+        attestationError instanceof Error
+          ? attestationError.message
+          : 'Failed to record success attestation',
+      );
+      await Promise.all([loadBatches(), loadJobs()]);
+    } finally {
+      setAttestationBusyJobId('');
     }
   }
 
@@ -826,6 +897,35 @@ export default function ReadyPostsPanel() {
 
       {warnings.length > 0 && (
         <p className={styles.muted}>Schema notices: {warnings.join(' · ')}</p>
+      )}
+
+      {successAttestationCandidates.length > 0 && (
+        <section className={styles.successAttestation} aria-labelledby="success-attestation-heading">
+          <div>
+            <h3 id="success-attestation-heading">Confirm an ambiguous scheduled success</h3>
+            <p>
+              Use only when the exact frozen attempt succeeded in Creator but the local worker
+              could not finish recording it.
+            </p>
+          </div>
+          {successAttestationCandidates.map((candidate) => (
+            <div key={candidate.jobId} className={styles.successAttestationCandidate}>
+              <strong>{candidate.expectedOutcome.text}</strong>
+              <small>Job: <code>{candidate.jobId}</code></small>
+              <small>Frozen item: <code>{candidate.itemHash}</code></small>
+              <button
+                className={styles.successAttestationButton}
+                type="button"
+                disabled={Boolean(attestationBusyJobId)}
+                onClick={() => void attestScheduledSuccess(candidate)}
+              >
+                {attestationBusyJobId === candidate.jobId
+                  ? 'Recording attestation…'
+                  : 'Yes, this succeeded — move on'}
+              </button>
+            </div>
+          ))}
+        </section>
       )}
 
       <section className={styles.batchApproval} aria-labelledby="batch-approval-heading">

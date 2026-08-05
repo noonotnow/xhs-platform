@@ -20,6 +20,10 @@ import {
 import { reconcileVerifiedExternalPost } from '@/lib/external-post-reconciliations';
 import { getReadyXhsPost } from '@/lib/notion-posts';
 import { normalizeLocalPublishJobError } from '@/lib/local-publish-jobs';
+import {
+  reconcileExternalJobDisposition,
+  retryFailedExternalJobDisposition,
+} from '@/lib/external-job-dispositions';
 
 const DEFAULT_LEASE_SECONDS = 30 * 60;
 const MIN_LEASE_SECONDS = 60;
@@ -74,6 +78,7 @@ export async function createManualReconciliation(
   const existing = await findManualReconciliationByIdempotencyKey(idempotencyKey);
   if (existing) {
     if (
+      existing.kind !== 'notion_only' ||
       existing.notionPageId !== input.notionPageId ||
       existing.noteId !== input.noteId ||
       existing.shareUrl !== input.shareUrl
@@ -115,6 +120,9 @@ export async function retryFailedManualReconciliation(
   if (existing.status === 'reconciled') {
     return manualReconciliationSummary(existing);
   }
+  if (existing.kind === 'targeted_local_job') {
+    return retryFailedExternalJobDisposition(id);
+  }
   const post = await getReadyXhsPost(existing.notionPageId);
   assertManualReconciliationCandidate(post);
   return manualReconciliationSummary(
@@ -150,7 +158,43 @@ export async function submitManualReconciliationResult(
     ));
   }
 
-  const request = await assertManualVerifiedSnapshot(id, claimToken, result.snapshot);
+  const request = await assertManualVerifiedSnapshot(
+    id,
+    claimToken,
+    result.snapshot,
+  );
+  if (request.kind === 'targeted_local_job') {
+    try {
+      await reconcileExternalJobDisposition(
+        id,
+        claimToken,
+        result.snapshot,
+      );
+      return manualReconciliationSummary(await loadManualReconciliation(id));
+    } catch (error) {
+      const known = normalizeLocalPublishJobError(error);
+      if (known.code === 'RECONCILIATION_IN_PROGRESS') {
+        return manualReconciliationSummary(await loadManualReconciliation(id));
+      }
+      const terminal = known.status >= 400 && known.status < 500;
+      const stored = terminal
+        ? await failManualReconciliation(
+            id,
+            claimToken,
+            known.code,
+            known.message,
+          )
+        : await deferManualReconciliation(
+            id,
+            claimToken,
+            known.code,
+            'Verified post found, but canonical Notion backfill is incomplete',
+            manualReconciliationBackoffSeconds(),
+          );
+      return manualReconciliationSummary(stored);
+    }
+  }
+
   if (request.status === 'reconciled') return manualReconciliationSummary(request);
   try {
     const receipt = await reconcileVerifiedExternalPost({
@@ -165,6 +209,9 @@ export async function submitManualReconciliationResult(
     ));
   } catch (error) {
     const known = normalizeLocalPublishJobError(error);
+    if (known.code === 'RECONCILIATION_IN_PROGRESS') {
+      return manualReconciliationSummary(await loadManualReconciliation(id));
+    }
     const terminal = known.status >= 400 && known.status < 500;
     const stored = terminal
       ? await failManualReconciliation(

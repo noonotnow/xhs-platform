@@ -1,12 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireXhsOperator } from '@/lib/xhs-operator-auth';
-import { parseIdempotencyKey, LocalPublishJobError } from '@/lib/local-publish-job-input';
+import { createExternalJobDisposition } from '@/lib/external-job-dispositions';
 import {
-  getLocalPublishJobSummaries,
-  normalizeLocalPublishJobError,
-  queueLocalPublishJob,
-} from '@/lib/local-publish-jobs';
-import { listOperatorSuccessAttestationEvidence } from '@/lib/operator-success-attestation-store';
+  LocalPublishJobError,
+  parseIdempotencyKey,
+} from '@/lib/local-publish-job-input';
+import { normalizeLocalPublishJobError } from '@/lib/local-publish-jobs';
+import { requireXhsOperator } from '@/lib/xhs-operator-auth';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -27,29 +26,6 @@ function errorResponse(error: unknown) {
   );
 }
 
-export async function GET(request: NextRequest) {
-  const unauthorized = await requireXhsOperator(request);
-  if (unauthorized) {
-    for (const [name, value] of Object.entries(NO_STORE_HEADERS)) {
-      unauthorized.headers.set(name, value);
-    }
-    return unauthorized;
-  }
-
-  try {
-    const [jobs, successAttestationCandidates] = await Promise.all([
-      getLocalPublishJobSummaries(),
-      listOperatorSuccessAttestationEvidence(),
-    ]);
-    return NextResponse.json(
-      { jobs, successAttestationCandidates },
-      { headers: NO_STORE_HEADERS },
-    );
-  } catch (error) {
-    return errorResponse(error);
-  }
-}
-
 export async function POST(request: NextRequest) {
   const unauthorized = await requireXhsOperator(request);
   if (unauthorized) {
@@ -58,9 +34,10 @@ export async function POST(request: NextRequest) {
     }
     return unauthorized;
   }
-
   try {
-    const idempotencyKey = parseIdempotencyKey(request.headers.get('idempotency-key'));
+    const idempotencyKey = parseIdempotencyKey(
+      request.headers.get('idempotency-key'),
+    );
     let body: unknown;
     try {
       body = await request.json();
@@ -71,9 +48,9 @@ export async function POST(request: NextRequest) {
         400,
       );
     }
-    const result = await queueLocalPublishJob(body, idempotencyKey);
+    const result = await createExternalJobDisposition(body, idempotencyKey);
     return NextResponse.json(
-      { job: result.job },
+      { disposition: result.disposition },
       { status: result.created ? 201 : 200, headers: NO_STORE_HEADERS },
     );
   } catch (error) {
