@@ -304,12 +304,7 @@ async function lockedCandidate(client: PoolClient, jobId: string) {
   return result.rows[0];
 }
 
-async function assertNoConflictingOwnership(
-  client: PoolClient,
-  row: OperatorSuccessCandidateRow,
-) {
-  const ownership = await client.query<{ conflict: boolean }>(
-    `SELECT (
+export const OPERATOR_SUCCESS_ATTESTATION_OWNERSHIP_SQL = `SELECT (
        EXISTS (
          SELECT 1 FROM local_publish_jobs AS other
          WHERE other.notion_page_id = $1
@@ -340,13 +335,20 @@ async function assertNoConflictingOwnership(
        )
        OR EXISTS (
          SELECT 1 FROM external_post_reconciliations
-         WHERE notion_page_id = $1 OR status = 'processing'
+         WHERE notion_page_id = $1
        )
        OR EXISTS (
          SELECT 1 FROM xhs_publish_receipts
          WHERE notion_page_id = $1
        )
-     ) AS conflict`,
+     ) AS conflict`;
+
+async function assertNoConflictingOwnership(
+  client: PoolClient,
+  row: OperatorSuccessCandidateRow,
+) {
+  const ownership = await client.query<{ conflict: boolean }>(
+    OPERATOR_SUCCESS_ATTESTATION_OWNERSHIP_SQL,
     [row.notion_page_id, row.job_id, row.item_id],
   );
   if (ownership.rows[0]?.conflict) {
