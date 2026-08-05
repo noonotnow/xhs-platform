@@ -199,6 +199,7 @@ export type ManualReconciliationStatus =
   | 'verifying'
   | 'reconciled'
   | 'failed';
+export type ManualReconciliationKind = 'notion_only' | 'targeted_local_job';
 
 export interface ManualReconciliationExpectedSnapshot {
   title: string;
@@ -209,6 +210,7 @@ export interface ManualReconciliationExpectedSnapshot {
 export interface ManualReconciliationSummary {
   id: string;
   notionPageId: string;
+  kind: ManualReconciliationKind;
   sourceLocalJobId?: string;
   noteId: string;
   shareUrl: string;
@@ -226,6 +228,8 @@ export interface ManualReconciliationSummary {
 export interface ClaimedManualReconciliation {
   id: string;
   notionPageId: string;
+  kind: ManualReconciliationKind;
+  sourceLocalJobId?: string;
   noteId: string;
   shareUrl: string;
   expected: ManualReconciliationExpectedSnapshot;

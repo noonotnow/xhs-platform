@@ -637,6 +637,8 @@ export async function invalidateStoredBatchItem(
       FROM local_publish_jobs
       WHERE id = ${jobId}::uuid
         AND claim_token = ${claimToken}::uuid
+        AND claim_expires_at > CURRENT_TIMESTAMP
+        AND external_disposition_request_id IS NULL
         AND batch_item_id IS NOT NULL
         AND status IN ('claimed', 'staged')
     ), invalidated AS (

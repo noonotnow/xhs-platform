@@ -86,6 +86,7 @@ export function externalReconciliationSummary(
 export async function beginExternalReconciliation(
   snapshot: ExternalPostSnapshot,
   idempotencyKey: string,
+  targetDispositionId?: string,
 ) {
   const inserted = await sql<ExternalReconciliationRow>`
     INSERT INTO external_post_reconciliations (
@@ -94,17 +95,61 @@ export async function beginExternalReconciliation(
       snapshot,
       idempotency_key
     )
-    VALUES (
+    SELECT
       ${snapshot.noteId},
       ${snapshot.shareUrl},
       ${JSON.stringify(snapshot)}::jsonb,
       ${idempotencyKey}::uuid
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM manual_reconciliation_requests AS disposition
+      WHERE disposition.request_kind = 'targeted_local_job'
+        AND (
+          disposition.requested_note_id = ${snapshot.noteId}
+          OR disposition.requested_share_url = ${snapshot.shareUrl}
+        )
+        AND NOT (
+          ${targetDispositionId ?? null}::uuid IS NOT NULL
+          AND disposition.id = ${targetDispositionId ?? null}::uuid
+          AND disposition.requested_note_id = ${snapshot.noteId}
+          AND disposition.requested_share_url = ${snapshot.shareUrl}
+        )
     )
     ON CONFLICT DO NOTHING
     RETURNING *
   `;
   if (inserted.rows[0]) {
     return { record: mapRow(inserted.rows[0]), acquired: true };
+  }
+
+  const dispositions = await sql<{
+    id: string;
+    requested_note_id: string;
+    requested_share_url: string;
+  }>`
+    SELECT id, requested_note_id, requested_share_url
+    FROM manual_reconciliation_requests
+    WHERE request_kind = 'targeted_local_job'
+      AND (
+        requested_note_id = ${snapshot.noteId}
+        OR requested_share_url = ${snapshot.shareUrl}
+      )
+    ORDER BY created_at
+    LIMIT 3
+  `;
+  if (dispositions.rows.length > 0) {
+    const owner = dispositions.rows[0];
+    const exactOwner = dispositions.rows.length === 1 &&
+      owner.id === targetDispositionId &&
+      owner.requested_note_id === snapshot.noteId &&
+      owner.requested_share_url === snapshot.shareUrl;
+    if (!exactOwner) {
+      throw new LocalPublishJobError(
+        'Verified post is owned by a targeted local job disposition',
+        'RECONCILIATION_CONFLICT',
+        409,
+      );
+    }
   }
 
   const conflicts = await sql<ExternalReconciliationRow>`
@@ -160,6 +205,21 @@ export async function beginExternalReconciliation(
           status = 'processing'
           AND updated_at <= CURRENT_TIMESTAMP - INTERVAL '5 minutes'
         )
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM manual_reconciliation_requests AS disposition
+        WHERE disposition.request_kind = 'targeted_local_job'
+          AND (
+            disposition.requested_note_id = ${snapshot.noteId}
+            OR disposition.requested_share_url = ${snapshot.shareUrl}
+          )
+          AND NOT (
+            ${targetDispositionId ?? null}::uuid IS NOT NULL
+            AND disposition.id = ${targetDispositionId ?? null}::uuid
+            AND disposition.requested_note_id = ${snapshot.noteId}
+            AND disposition.requested_share_url = ${snapshot.shareUrl}
+          )
       )
     RETURNING *
   `;

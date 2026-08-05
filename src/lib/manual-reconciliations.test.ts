@@ -9,6 +9,9 @@ const mocks = vi.hoisted(() => ({
   complete: vi.fn(),
   defer: vi.fn(),
   fail: vi.fn(),
+  load: vi.fn(),
+  reconcileDisposition: vi.fn(),
+  retryDisposition: vi.fn(),
 }));
 
 vi.mock('@/lib/manual-reconciliation-store', async (importOriginal) => {
@@ -23,6 +26,7 @@ vi.mock('@/lib/manual-reconciliation-store', async (importOriginal) => {
     completeManualReconciliation: mocks.complete,
     deferManualReconciliation: mocks.defer,
     failManualReconciliation: mocks.fail,
+    loadManualReconciliation: mocks.load,
   };
 });
 vi.mock('@/lib/notion-posts', async (importOriginal) => {
@@ -32,11 +36,16 @@ vi.mock('@/lib/notion-posts', async (importOriginal) => {
 vi.mock('@/lib/external-post-reconciliations', () => ({
   reconcileVerifiedExternalPost: mocks.reconcile,
 }));
+vi.mock('@/lib/external-job-dispositions', () => ({
+  reconcileExternalJobDisposition: mocks.reconcileDisposition,
+  retryFailedExternalJobDisposition: mocks.retryDisposition,
+}));
 
 import {
   createManualReconciliation,
   submitManualReconciliationResult,
 } from '@/lib/manual-reconciliations';
+import { LocalPublishJobError } from '@/lib/local-publish-job-input';
 
 const request = {
   id: '11111111-1111-4111-8111-111111111111',
@@ -48,9 +57,11 @@ const request = {
     caption: 'Canonical caption',
     mediaType: 'video' as const,
   },
+  kind: 'notion_only' as const,
   status: 'verifying' as const,
   idempotencyKey: '33333333-3333-4333-8333-333333333333',
   claimToken: '44444444-4444-4444-8444-444444444444',
+  claimExpiresAt: '2099-08-03T12:30:00.000Z',
   claimAttempts: 1,
   verificationAttempts: 0,
   createdAt: '2026-08-03T11:00:00.000Z',
@@ -137,5 +148,58 @@ describe('manual reconciliation orchestration', () => {
     });
     expect(mocks.complete.mock.invocationCallOrder[0])
       .toBeGreaterThan(mocks.reconcile.mock.invocationCallOrder[0]);
+  });
+
+  it('routes targeted requests through verification-only job disposition', async () => {
+    const targeted = {
+      ...request,
+      kind: 'targeted_local_job' as const,
+      sourceLocalJobId: '66666666-6666-4666-8666-666666666666',
+    };
+    mocks.assertSnapshot.mockResolvedValue(targeted);
+    mocks.reconcileDisposition.mockResolvedValue({
+      id: targeted.id,
+      localJobId: targeted.sourceLocalJobId,
+      status: 'reconciled',
+    });
+
+    await expect(submitManualReconciliationResult(
+      targeted.id,
+      targeted.claimToken,
+      { status: 'verified', snapshot },
+    )).resolves.toMatchObject({
+      localJobId: targeted.sourceLocalJobId,
+      status: 'reconciled',
+    });
+    expect(mocks.reconcileDisposition).toHaveBeenCalledWith(
+      targeted.id,
+      targeted.claimToken,
+      snapshot,
+    );
+    expect(mocks.reconcile).not.toHaveBeenCalled();
+    expect(mocks.complete).not.toHaveBeenCalled();
+  });
+
+  it('leaves a concurrent targeted reconciliation in progress', async () => {
+    const targeted = {
+      ...request,
+      kind: 'targeted_local_job' as const,
+      sourceLocalJobId: '66666666-6666-4666-8666-666666666666',
+    };
+    mocks.assertSnapshot.mockResolvedValue(targeted);
+    mocks.reconcileDisposition.mockRejectedValue(new LocalPublishJobError(
+      'This verified post is already being reconciled',
+      'RECONCILIATION_IN_PROGRESS',
+      409,
+    ));
+    mocks.load.mockResolvedValue(targeted);
+
+    await expect(submitManualReconciliationResult(
+      targeted.id,
+      targeted.claimToken,
+      { status: 'verified', snapshot },
+    )).resolves.toMatchObject({ status: 'verifying' });
+    expect(mocks.fail).not.toHaveBeenCalled();
+    expect(mocks.defer).not.toHaveBeenCalled();
   });
 });

@@ -140,10 +140,12 @@ describe('local publish atomic claim storage', () => {
     expect(query).toContain("status = 'claimed' AND claim_expires_at <= CURRENT_TIMESTAMP");
     expect(query).toContain("status = 'staged'");
     expect(query).toContain('dispatch_authorized_at IS NULL');
+    expect(query).toContain('external_disposition_request_id IS NULL');
     expect(query).toContain("status IN ('submitted', 'scheduled', 'verification_pending')");
     expect(query).toContain('claim_expires_at IS NULL');
     expect(query).toContain('FOR UPDATE SKIP LOCKED');
     expect(query).toContain('claim_token = gen_random_uuid()');
+    expect(query).toContain("request_kind = 'targeted_local_job'");
     expect(query).toContain('claim_attempts = claim_attempts + 1');
     expect(mocks.sql.mock.calls[0]).toContain('dispatch');
     expect(claimed).toMatchObject({
@@ -175,6 +177,7 @@ describe('local publish atomic claim storage', () => {
     expect(query).toContain('dispatch_authorized_at = COALESCE');
     expect(query).toContain("status = 'staged'");
     expect(query).toContain('claim_expires_at > CURRENT_TIMESTAMP');
+    expect(query).toContain('external_disposition_request_id IS NULL');
   });
 
   it('preserves post-dispatch state and returns verification-only work', async () => {
@@ -382,6 +385,25 @@ describe('local publish atomic claim storage', () => {
     });
     const query = (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
     expect(query).toContain("AND status = 'claimed'");
+    expect(query).toContain('claim_expires_at > CURRENT_TIMESTAMP');
+    expect(query).toContain("request_kind = 'targeted_local_job'");
+  });
+
+  it('rejects an expired result before it can change pre-dispatch state', async () => {
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({
+        rows: [{
+          ...claimedRow(),
+          claim_expires_at: '2020-08-01T14:00:00.000Z',
+        }],
+        rowCount: 1,
+      });
+
+    await expect(stageStoredLocalPublishJob(
+      claimedRow().id,
+      claimedRow().claim_token,
+    )).rejects.toMatchObject({ code: 'STALE_CLAIM', status: 409 });
   });
 
   it('anchors scheduled verification after the frozen publishAt', async () => {

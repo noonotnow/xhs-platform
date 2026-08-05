@@ -317,36 +317,45 @@ export async function claimNextStoredLocalPublishJob(
       SELECT id, status
       FROM local_publish_jobs
       WHERE (
-        ${lane} IN ('all', 'dispatch')
-        AND (
-          status = 'queued'
-          OR (status = 'claimed' AND claim_expires_at <= CURRENT_TIMESTAMP)
-          OR (
-            status = 'staged'
-            AND dispatch_authorized_at IS NULL
-            AND claim_expires_at <= CURRENT_TIMESTAMP
+        (
+          ${lane} IN ('all', 'dispatch')
+          AND (
+            status = 'queued'
+            OR (status = 'claimed' AND claim_expires_at <= CURRENT_TIMESTAMP)
+            OR (
+              status = 'staged'
+              AND dispatch_authorized_at IS NULL
+              AND claim_expires_at <= CURRENT_TIMESTAMP
+            )
           )
         )
-      )
-        OR (
-          ${lane} IN ('all', 'verification')
-          AND (
-            (
-              status IN ('submitted', 'scheduled', 'verification_pending')
-              AND next_verification_at <= CURRENT_TIMESTAMP
-              AND (
-                claim_expires_at IS NULL
-                OR claim_expires_at <= CURRENT_TIMESTAMP
+          OR (
+            ${lane} IN ('all', 'verification')
+            AND (
+              (
+                status IN ('submitted', 'scheduled', 'verification_pending')
+                AND next_verification_at <= CURRENT_TIMESTAMP
+                AND (
+                  claim_expires_at IS NULL
+                  OR claim_expires_at <= CURRENT_TIMESTAMP
+                )
               )
-            )
-            OR (
-              status = 'verified'
-              AND (
-                claim_expires_at IS NULL
-                OR claim_expires_at <= CURRENT_TIMESTAMP
+              OR (
+                status = 'verified'
+                AND (
+                  claim_expires_at IS NULL
+                  OR claim_expires_at <= CURRENT_TIMESTAMP
+                )
               )
             )
           )
+      )
+        AND external_disposition_request_id IS NULL
+        AND NOT EXISTS (
+          SELECT 1
+          FROM manual_reconciliation_requests AS disposition
+          WHERE disposition.request_kind = 'targeted_local_job'
+            AND disposition.source_local_job_id = local_publish_jobs.id
         )
       ORDER BY COALESCE(next_verification_at, claim_expires_at, created_at), created_at
       FOR UPDATE SKIP LOCKED
@@ -372,6 +381,7 @@ export async function claimNextStoredLocalPublishJob(
         updated_at = CURRENT_TIMESTAMP
     FROM candidate
     WHERE job.id = candidate.id
+      AND job.external_disposition_request_id IS NULL
     RETURNING job.*
   `;
   const row = result.rows[0];
@@ -517,6 +527,7 @@ export async function authorizeStoredLocalPublishJob(id: string, claimToken: str
     WHERE id = ${id}::uuid
       AND claim_token = ${claimToken}::uuid
       AND claim_expires_at > CURRENT_TIMESTAMP
+      AND external_disposition_request_id IS NULL
       AND status IN (
         'claimed', 'staged', 'submitted', 'scheduled',
         'verification_pending', 'verified'
@@ -541,6 +552,7 @@ export async function consumeStoredDispatchAuthorization(id: string, claimToken:
       AND claim_token = ${claimToken}::uuid
       AND status = 'staged'
       AND claim_expires_at > CURRENT_TIMESTAMP
+      AND external_disposition_request_id IS NULL
     RETURNING *
   `;
   if (result.rows[0]) return claimedResponse(result.rows[0]);
@@ -576,6 +588,19 @@ function assertMatchingClaim(job: StoredLocalPublishJob, claimToken: string) {
   }
 }
 
+function assertUnexpiredClaim(job: StoredLocalPublishJob) {
+  if (
+    !job.claimExpiresAt ||
+    new Date(job.claimExpiresAt).getTime() <= Date.now()
+  ) {
+    throw new LocalPublishJobError(
+      'The local publish claim is stale, expired, or revoked',
+      'STALE_CLAIM',
+      409,
+    );
+  }
+}
+
 export async function stageStoredLocalPublishJob(id: string, claimToken: string) {
   const result = await sql<LocalPublishJobRow>`
     UPDATE local_publish_jobs
@@ -585,6 +610,14 @@ export async function stageStoredLocalPublishJob(id: string, claimToken: string)
     WHERE id = ${id}::uuid
       AND status = 'claimed'
       AND claim_token = ${claimToken}::uuid
+      AND claim_expires_at > CURRENT_TIMESTAMP
+      AND external_disposition_request_id IS NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM manual_reconciliation_requests AS disposition
+        WHERE disposition.request_kind = 'targeted_local_job'
+          AND disposition.source_local_job_id = local_publish_jobs.id
+      )
     RETURNING *
   `;
   if (result.rows[0]) return mapRow(result.rows[0]);
@@ -592,6 +625,7 @@ export async function stageStoredLocalPublishJob(id: string, claimToken: string)
   const job = await loadResultJob(id);
   assertMatchingClaim(job, claimToken);
   if (job.status === 'staged') return job;
+  if (job.status === 'claimed') assertUnexpiredClaim(job);
   throw new LocalPublishJobError(
     'The job cannot transition to staged from its current state',
     'INVALID_JOB_TRANSITION',
@@ -636,6 +670,14 @@ export async function recordStoredLocalPublishDispatch(
     WHERE id = ${id}::uuid
       AND status IN ('claimed', 'staged')
       AND claim_token = ${claimToken}::uuid
+      AND claim_expires_at > CURRENT_TIMESTAMP
+      AND external_disposition_request_id IS NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM manual_reconciliation_requests AS disposition
+        WHERE disposition.request_kind = 'targeted_local_job'
+          AND disposition.source_local_job_id = local_publish_jobs.id
+      )
     RETURNING *
   `;
   if (result.rows[0]) return mapRow(result.rows[0]);
@@ -649,6 +691,9 @@ export async function recordStoredLocalPublishDispatch(
     job.shareUrl === shareUrl
   ) {
     return job;
+  }
+  if (job.status === 'claimed' || job.status === 'staged') {
+    assertUnexpiredClaim(job);
   }
   throw new LocalPublishJobError(
     'The job cannot record this dispatch from its current state',
@@ -683,8 +728,16 @@ export async function deferStoredLocalPublishVerification(
         updated_at = CURRENT_TIMESTAMP
     WHERE id = ${id}::uuid
       AND claim_token = ${claimToken}::uuid
+      AND claim_expires_at > CURRENT_TIMESTAMP
       AND note_id = ${noteId}
       AND share_url = ${shareUrl}
+      AND external_disposition_request_id IS NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM manual_reconciliation_requests AS disposition
+        WHERE disposition.request_kind = 'targeted_local_job'
+          AND disposition.source_local_job_id = local_publish_jobs.id
+      )
       AND (
         status IN ('submitted', 'scheduled')
         OR (
@@ -706,6 +759,17 @@ export async function deferStoredLocalPublishVerification(
     job.errorMessage === message
   ) {
     return job;
+  }
+  if (
+    job.status === 'submitted' ||
+    job.status === 'scheduled' ||
+    (
+      job.status === 'verification_pending' &&
+      job.noteId === noteId &&
+      job.shareUrl === shareUrl
+    )
+  ) {
+    assertUnexpiredClaim(job);
   }
   throw new LocalPublishJobError(
     'The job cannot defer verification from its current state',
@@ -730,6 +794,14 @@ export async function failStoredLocalPublishJob(
     WHERE id = ${id}::uuid
       AND status IN ('claimed', 'staged')
       AND claim_token = ${claimToken}::uuid
+      AND claim_expires_at > CURRENT_TIMESTAMP
+      AND external_disposition_request_id IS NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM manual_reconciliation_requests AS disposition
+        WHERE disposition.request_kind = 'targeted_local_job'
+          AND disposition.source_local_job_id = local_publish_jobs.id
+      )
     RETURNING *
   `;
   if (result.rows[0]) return mapRow(result.rows[0]);
@@ -738,6 +810,9 @@ export async function failStoredLocalPublishJob(
   assertMatchingClaim(job, claimToken);
   if (job.status === 'failed' && job.errorCode === code && job.errorMessage === message) {
     return job;
+  }
+  if (job.status === 'claimed' || job.status === 'staged') {
+    assertUnexpiredClaim(job);
   }
   throw new LocalPublishJobError(
     'The job cannot transition to failed from its current state',
@@ -771,6 +846,14 @@ export async function prepareStoredLocalPublishVerification(
         'verification_pending'
       )
       AND claim_token = ${claimToken}::uuid
+      AND claim_expires_at > CURRENT_TIMESTAMP
+      AND external_disposition_request_id IS NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM manual_reconciliation_requests AS disposition
+        WHERE disposition.request_kind = 'targeted_local_job'
+          AND disposition.source_local_job_id = local_publish_jobs.id
+      )
       AND (
         (
           status IN ('claimed', 'staged')
@@ -796,6 +879,27 @@ export async function prepareStoredLocalPublishVerification(
   ) {
     return job;
   }
+  if (
+    (
+      job.status === 'claimed' ||
+      job.status === 'staged'
+    ) &&
+    !job.noteId &&
+    !job.shareUrl
+  ) {
+    assertUnexpiredClaim(job);
+  }
+  if (
+    (
+      job.status === 'submitted' ||
+      job.status === 'scheduled' ||
+      job.status === 'verification_pending'
+    ) &&
+    job.noteId === noteId &&
+    job.shareUrl === shareUrl
+  ) {
+    assertUnexpiredClaim(job);
+  }
   throw new LocalPublishJobError(
     'The job cannot accept this success result from its current state',
     'INVALID_JOB_TRANSITION',
@@ -818,8 +922,16 @@ export async function completeStoredLocalPublishReconciliation(
     WHERE id = ${id}::uuid
       AND status = 'verified'
       AND claim_token = ${claimToken}::uuid
+      AND claim_expires_at > CURRENT_TIMESTAMP
       AND note_id = ${noteId}
       AND share_url = ${shareUrl}
+      AND external_disposition_request_id IS NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM manual_reconciliation_requests AS disposition
+        WHERE disposition.request_kind = 'targeted_local_job'
+          AND disposition.source_local_job_id = local_publish_jobs.id
+      )
     RETURNING *
   `;
   if (result.rows[0]) return mapRow(result.rows[0]);
@@ -829,6 +941,7 @@ export async function completeStoredLocalPublishReconciliation(
   if (job.status === 'reconciled' && job.noteId === noteId && job.shareUrl === shareUrl) {
     return job;
   }
+  assertUnexpiredClaim(job);
   throw new LocalPublishJobError(
     'The verified result could not be completed',
     'INVALID_JOB_TRANSITION',

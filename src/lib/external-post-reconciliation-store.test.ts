@@ -38,6 +38,7 @@ describe('external reconciliation persistence', () => {
   it('returns a prior success idempotently without touching Notion again', async () => {
     mocks.sql
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [row('succeeded', new Date().toISOString())] });
 
     await expect(beginExternalReconciliation(snapshot, idempotencyKey))
@@ -45,11 +46,29 @@ describe('external reconciliation persistence', () => {
         acquired: false,
         record: { status: 'succeeded', outcome: 'created' },
       });
-    expect(mocks.sql).toHaveBeenCalledTimes(2);
+    expect(mocks.sql).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not create a conflicting receipt owned by a targeted disposition', async () => {
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{
+        id: 'target-request',
+        requested_note_id: snapshot.noteId,
+        requested_share_url: snapshot.shareUrl,
+      }] });
+
+    await expect(beginExternalReconciliation(snapshot, idempotencyKey))
+      .rejects.toMatchObject({ code: 'RECONCILIATION_CONFLICT', status: 409 });
+    const insert = (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
+    expect(insert).toContain("request_kind = 'targeted_local_job'");
+    expect(insert).toContain('disposition.id =');
+    expect(insert).toContain('IS NOT NULL');
   });
 
   it('refuses a live processing lease and reclaims a stale one atomically', async () => {
     mocks.sql
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [row('processing', new Date().toISOString())] });
     await expect(beginExternalReconciliation(snapshot, idempotencyKey))
@@ -60,11 +79,12 @@ describe('external reconciliation persistence', () => {
     const reclaimed = row('processing', new Date().toISOString());
     mocks.sql
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [stale] })
       .mockResolvedValueOnce({ rows: [reclaimed] });
     await expect(beginExternalReconciliation(snapshot, idempotencyKey))
       .resolves.toMatchObject({ acquired: true, record: { status: 'processing' } });
-    const update = (mocks.sql.mock.calls[2][0] as TemplateStringsArray).join('?');
+    const update = (mocks.sql.mock.calls[3][0] as TemplateStringsArray).join('?');
     expect(update).toContain("status = 'failed'");
     expect(update).toContain("updated_at <= CURRENT_TIMESTAMP - INTERVAL '5 minutes'");
   });
@@ -74,6 +94,7 @@ describe('external reconciliation persistence', () => {
     const reclaimed = row('processing', new Date().toISOString());
     mocks.sql
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [failed] })
       .mockResolvedValueOnce({ rows: [reclaimed] });
 
@@ -81,8 +102,23 @@ describe('external reconciliation persistence', () => {
       .resolves.toMatchObject({ acquired: true, record: { status: 'processing' } });
   });
 
+  it('does not reclaim a failed record owned by a targeted disposition', async () => {
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{
+        id: 'target-request',
+        requested_note_id: snapshot.noteId,
+        requested_share_url: snapshot.shareUrl,
+      }] });
+
+    await expect(beginExternalReconciliation(snapshot, idempotencyKey))
+      .rejects.toMatchObject({ code: 'RECONCILIATION_CONFLICT', status: 409 });
+    expect(mocks.sql).toHaveBeenCalledTimes(2);
+  });
+
   it('rejects conflicting natural keys instead of creating duplicate Notion rows', async () => {
     mocks.sql
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [

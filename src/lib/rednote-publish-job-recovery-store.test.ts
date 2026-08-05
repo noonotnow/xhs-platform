@@ -148,6 +148,7 @@ describe('stored approved publish job recovery', () => {
     expect(update.split('WHERE')[0]).not.toContain('claim_attempts');
     expect(update).not.toContain('snapshot =');
     expect(update).toContain('AND claim_attempts = $3');
+    expect(update).toContain('external_disposition_request_id IS NULL');
     expect(update).toContain('AND claimed_at = $4::timestamptz');
     expect(update).toContain('AND completed_at = $5::timestamptz');
     expect(update).toContain('AND error_code = $6');

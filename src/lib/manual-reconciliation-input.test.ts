@@ -67,4 +67,15 @@ describe('manual reconciliation input', () => {
       message: 'Cookie token=secret',
     })).toThrow('credential-like');
   });
+
+  it.each(['staged', 'submitted', 'scheduled', 'publishing'])(
+    'does not accept the dispatch status %s',
+    (status) => {
+      expect(() => parseManualReconciliationWorkerResult({
+        status,
+        noteId: 'note_123',
+        shareUrl: 'https://www.rednote.com/explore/note_123',
+      })).toThrow('status must be verified');
+    },
+  );
 });

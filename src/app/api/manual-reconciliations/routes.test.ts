@@ -118,6 +118,31 @@ describe('manual reconciliation routes', () => {
     expect(mocks.claim).toHaveBeenCalledWith(20);
   });
 
+  it('returns exact targeted job identity without dispatch authorization', async () => {
+    mocks.claim.mockResolvedValue([{
+      id: requestId,
+      notionPageId: 'notion-page',
+      kind: 'targeted_local_job',
+      sourceLocalJobId: '44444444-4444-4444-8444-444444444444',
+      noteId: 'note_123',
+      shareUrl: 'https://www.rednote.com/explore/note_123',
+      expected: { title: 'Title', caption: 'Caption', mediaType: 'video' },
+      verificationAttempts: 0,
+      claimToken,
+      claimExpiresAt: '2099-08-04T12:30:00.000Z',
+    }]);
+    const response = await claimDue(request(
+      '/api/manual-reconciliations/due',
+      { headers: { Authorization: ['Bearer', workerToken].join(' ') } },
+    ));
+    await expect(response.json()).resolves.toMatchObject({
+      items: [{
+        kind: 'targeted_local_job',
+        sourceLocalJobId: '44444444-4444-4444-8444-444444444444',
+      }],
+    });
+  });
+
   it('requires the dedicated claim header for worker results', async () => {
     const body = {
       status: 'failed',
@@ -154,4 +179,5 @@ describe('manual reconciliation routes', () => {
     expect(response.status).toBe(200);
     expect(mocks.submit).toHaveBeenCalledWith(requestId, claimToken, body);
   });
+
 });

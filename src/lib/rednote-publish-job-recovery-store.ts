@@ -361,6 +361,7 @@ export async function recoverStoredApprovedPublishJob(
            updated_at = CURRENT_TIMESTAMP
        WHERE id = $1::uuid
          AND batch_item_id = $2::uuid
+         AND external_disposition_request_id IS NULL
          AND status = 'failed'
          AND error_code = $6
          AND error_message IS NOT DISTINCT FROM $7
