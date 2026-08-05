@@ -218,6 +218,15 @@ and SHA-256 of the revoked prior claim token. `snapshotDigest === itemHash`;
 the digest is SHA-256 of stable JSON with recursively sorted object keys and
 array order preserved.
 
+The batch item UUID is server audit identity, not an existing-worker release
+key: batch items and local jobs receive independent generated UUIDs, and v5
+worker state did not persist the item UUID. The claim therefore carries an
+explicit `localReleaseIdentity` containing only persisted/comparable job ID,
+page ID, prior claim-token digest, batch/manifest/item hashes, snapshot
+revision, requested publish time, and scheduled publish mode. First release
+matches that tuple plus the outer frozen job. Once the full tombstone is
+persisted, replay equality includes every receipt field, including item ID.
+
 The first due verification claim is release-only and sets
 `successAttestation.releaseRequired:true`. The worker must persist the full
 receipt as a local tombstone and atomically clear only a matching local slot,

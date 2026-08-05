@@ -196,6 +196,18 @@ describe('operator success attestation store', () => {
       receipt.attested_by,
     );
     expect(result.created).toBe(true);
+    expect(result.attestation.itemId).not.toBe(result.attestation.jobId);
+    expect(result.attestation.localReleaseIdentity).toEqual({
+      jobId: input.jobId,
+      notionPageId: snapshot.notionPageId,
+      priorClaimTokenDigest: claimTokenDigest(row.claim_token),
+      batchId: input.batchId,
+      manifestHash: input.manifestHash,
+      itemHash: input.itemHash,
+      snapshotRevision: input.snapshotRevision,
+      requestedPublishAt: input.requestedPublishAt,
+      publishMode: 'scheduled',
+    });
     const statements = mocks.query.mock.calls.map(([statement]) => statement);
     expect(statements.some((statement) =>
       statement.includes("status = 'operator_attested'") &&

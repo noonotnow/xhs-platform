@@ -274,6 +274,17 @@ The verification lane first returns the attested job immediately with:
     "snapshotRevision": "canonical UTC ISO timestamp",
     "snapshotDigest": "lowercase-sha256",
     "priorClaimTokenDigest": "lowercase-sha256",
+    "localReleaseIdentity": {
+      "jobId": "job-uuid",
+      "notionPageId": "page-id",
+      "priorClaimTokenDigest": "lowercase-sha256",
+      "batchId": "batch-uuid",
+      "manifestHash": "lowercase-sha256",
+      "itemHash": "lowercase-sha256",
+      "snapshotRevision": "canonical UTC ISO timestamp",
+      "requestedPublishAt": "canonical UTC ISO timestamp",
+      "publishMode": "scheduled"
+    },
     "requestedPublishAt": "canonical UTC ISO timestamp",
     "expectedOutcome": {
       "kind": "scheduled",
@@ -293,10 +304,18 @@ canonical JSON of the frozen `LocalPublishSnapshot`, recursively sorting object
 keys while preserving array order. `manifestHash` applies the same algorithm to
 the ordered array of batch snapshots.
 
+`itemId` is server audit identity only during the first release. Batch-item and
+local-job IDs are independently generated UUIDs, and worker state v5 did not
+persist the item ID, so it is neither derivable from `jobId` nor part of the
+existing-attempt release gate. The exact locally comparable first-release tuple
+is `localReleaseIdentity`, plus exact equality of the outer frozen `PublishJob`
+against the persisted staged job. After the worker persists the complete
+tombstone, all receipt fields, including `itemId`, must match on replay.
+
 When `releaseRequired` is true, the worker must perform no browser action. It
 atomically persists the complete tombstone and deletes only the matching local
-dispatch slot after matching job, prior claim digest, batch/item hashes,
-snapshot revision, and `publishAt`. It then reports exactly:
+dispatch slot after matching `localReleaseIdentity` and the outer frozen job.
+It then reports exactly:
 
 ```json
 {"status":"attested_verification_pending","code":"ATTESTATION_RELEASE_CONSUMED","message":"Matching local dispatch slot released; receipt verification remains pending."}

@@ -119,6 +119,17 @@ function evidence(row: OperatorSuccessCandidateRow): OperatorSuccessAttestationE
 
 function summary(row: OperatorSuccessAttestationRow): OperatorSuccessAttestationSummary {
   const requestedPublishAt = timestamp(row.requested_publish_at);
+  const localReleaseIdentity = {
+    jobId: row.local_publish_job_id,
+    notionPageId: row.notion_page_id,
+    priorClaimTokenDigest: row.prior_claim_token_digest,
+    batchId: row.batch_id,
+    manifestHash: row.manifest_hash,
+    itemHash: row.item_hash,
+    snapshotRevision: row.snapshot_revision,
+    requestedPublishAt,
+    publishMode: 'scheduled' as const,
+  };
   return {
     id: row.id,
     notionPageId: row.notion_page_id,
@@ -132,6 +143,7 @@ function summary(row: OperatorSuccessAttestationRow): OperatorSuccessAttestation
     snapshotDigest: row.snapshot_digest,
     priorClaimTokenDigest: row.prior_claim_token_digest,
     releaseRequired: !row.release_acknowledged_at,
+    localReleaseIdentity,
     requestedPublishAt,
     expectedOutcome: {
       kind: 'scheduled',

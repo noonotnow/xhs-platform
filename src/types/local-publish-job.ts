@@ -126,6 +126,17 @@ export interface OperatorSuccessAttestationSummary
   snapshotDigest: string;
   priorClaimTokenDigest: string;
   releaseRequired: boolean;
+  localReleaseIdentity: {
+    jobId: string;
+    notionPageId: string;
+    priorClaimTokenDigest: string;
+    batchId: string;
+    manifestHash: string;
+    itemHash: string;
+    snapshotRevision: string;
+    requestedPublishAt: string;
+    publishMode: 'scheduled';
+  };
   attestedBy: string;
   attestedAt: string;
 }
