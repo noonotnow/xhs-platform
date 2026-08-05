@@ -540,6 +540,7 @@ async function claimedResponse(row: LocalPublishJobRow): Promise<ClaimedLocalPub
     if (
       !job.batchAuthorization ||
       row.batch_item_id !== attestation.itemId ||
+      job.snapshot.notionPageId !== attestation.notionPageId ||
       job.batchAuthorization.batchId !== attestation.batchId ||
       job.batchAuthorization.manifestHash !== attestation.manifestHash ||
       job.batchAuthorization.itemHash !== attestation.itemHash ||
