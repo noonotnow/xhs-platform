@@ -401,6 +401,26 @@ describe('Notion Posts mapping', () => {
     });
   });
 
+  it('treats a status-only Published record as a candidate only for explicit reconciliation', () => {
+    const fixture = pageFixture();
+    fixture.properties.Status = {
+      id: 'status',
+      type: 'status',
+      status: { id: 'published', name: 'Published', color: 'green' },
+    };
+    const { resolved, duplicateAliases } = resolvePostsSchema(
+      Object.fromEntries(
+        Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
+      ),
+    );
+
+    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toBeNull();
+    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases, true)).toMatchObject({
+      candidateKind: 'packet_ready',
+      publishPacketReady: true,
+    });
+  });
+
   it('requires canonical primary media for the declared packet type', () => {
     const videoWithCoverOnly = pageFixture();
     videoWithCoverOnly.properties['Image URLs'] = {

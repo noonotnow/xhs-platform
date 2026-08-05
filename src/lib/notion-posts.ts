@@ -1145,7 +1145,7 @@ export async function reconcileExternalXhsPost(
         outcome: 'targeted_page' as const,
       };
     }
-    const current = toReadyPostCandidate(rawTarget, resolved, duplicateAliases);
+    const current = toReadyPostCandidate(rawTarget, resolved, duplicateAliases, true);
     if (!current || current.candidateKind !== 'packet_ready') {
       throw new NotionPostsError(
         'The canonical post changed and is no longer eligible for manual reconciliation',

@@ -1,10 +1,9 @@
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
 import { parseExternalPostSnapshot } from '@/lib/external-post-reconciliation-input';
+import { normalizeRednotePublicIdentity } from '@/lib/rednote-publication';
 import type { ExternalPostSnapshot } from '@/types/local-publish-job';
 
 const CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
-const NOTE_ID = /^[A-Za-z0-9_-]{1,128}$/;
-const NOTE_URL = /^https:\/\/www\.rednote\.com\/explore\/([A-Za-z0-9_-]{1,128})$/;
 
 function exactKeys(value: Record<string, unknown>, expected: string[], label: string) {
   const keys = Object.keys(value).sort();
@@ -66,19 +65,15 @@ function safeMessage(value: unknown) {
 
 export function normalizeManualRedNoteIdentity(value: unknown) {
   const publicPost = cleanText(value, 'publicPost', 500);
-  const urlMatch = NOTE_URL.exec(publicPost);
-  const noteId = urlMatch?.[1] ?? (NOTE_ID.test(publicPost) ? publicPost : '');
-  if (!noteId) {
+  const identity = normalizeRednotePublicIdentity(publicPost);
+  if (!identity) {
     throw new LocalPublishJobError(
-      'Remove xsec_token, query, creator-manager, fragment, trailing-slash, or alternate-host parameters. Use a bare note ID or the exact query-free https://www.rednote.com/explore/NOTE_ID.',
+      'Use a bare note ID or an allowed public RedNote explore URL.',
       'INVALID_REDNOTE_IDENTITY',
       400,
     );
   }
-  return {
-    noteId,
-    shareUrl: `https://www.rednote.com/explore/${noteId}`,
-  };
+  return identity;
 }
 
 export interface CreateManualReconciliationInput {

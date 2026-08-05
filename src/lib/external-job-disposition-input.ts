@@ -1,9 +1,9 @@
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
+import { normalizeRednotePublicIdentity } from '@/lib/rednote-publication';
 
 const CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const NOTE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 export interface ExternalJobDispositionInput {
   notionPageId: string;
@@ -32,18 +32,24 @@ function cleanText(value: unknown, field: string, maxLength: number) {
 }
 
 function exactKeys(value: Record<string, unknown>) {
-  const expected = [
+  const legacy = [
     'confirmed',
     'localJobId',
     'noteId',
     'notionPageId',
     'shareUrl',
   ];
+  const publicPost = [
+    'confirmed',
+    'localJobId',
+    'notionPageId',
+    'publicPost',
+  ];
   const keys = Object.keys(value).sort();
-  if (
-    keys.length !== expected.length ||
-    keys.some((key, index) => key !== expected[index])
-  ) {
+  const matches = (expected: string[]) =>
+    keys.length === expected.length &&
+    keys.every((key, index) => key === expected[index]);
+  if (!matches(legacy) && !matches(publicPost)) {
     throw new LocalPublishJobError(
       'Request body contains unsupported fields',
       'VALIDATION_ERROR',
@@ -80,21 +86,25 @@ export function parseExternalJobDispositionInput(
       400,
     );
   }
-  const noteId = cleanText(body.noteId, 'noteId', 128);
-  if (!NOTE_ID.test(noteId)) {
+  const identity = 'publicPost' in body
+    ? normalizeRednotePublicIdentity(cleanText(body.publicPost, 'publicPost', 500))
+    : normalizeRednotePublicIdentity(cleanText(body.shareUrl, 'shareUrl', 500));
+  if (!identity) {
     throw new LocalPublishJobError(
-      'noteId contains unsupported characters',
+      'A bare note ID or allowed public RedNote explore URL is required',
       'INVALID_REDNOTE_IDENTITY',
       400,
     );
   }
-  const shareUrl = cleanText(body.shareUrl, 'shareUrl', 500);
-  if (shareUrl !== `https://www.rednote.com/explore/${noteId}`) {
+  if (
+    'noteId' in body &&
+    cleanText(body.noteId, 'noteId', 128) !== identity.noteId
+  ) {
     throw new LocalPublishJobError(
-      'shareUrl must exactly match the query-free RedNote explore URL for noteId',
+      'Explicit noteId conflicts with the public RedNote URL',
       'INVALID_REDNOTE_IDENTITY',
       400,
     );
   }
-  return { notionPageId, localJobId, noteId, shareUrl };
+  return { notionPageId, localJobId, ...identity };
 }

@@ -27,6 +27,7 @@ import {
   claimNextStoredLocalPublishJob,
   deferStoredLocalPublishVerification,
   deferStoredOperatorAttestedVerification,
+  listLocalPublishJobs,
 } from '@/lib/local-publish-job-store';
 
 const scheduledJobId = '11111111-1111-4111-8111-111111111111';
@@ -526,6 +527,30 @@ describe('local publish job PostgreSQL execution', () => {
     )).resolves.toBeNull();
 
     expect((await claimState()).rows).toEqual(before);
+  });
+
+  it('hydrates release acknowledgement for listed operator-attested jobs', async () => {
+    await insertJob({
+      id: attestedJobId,
+      status: 'operator_attested',
+      dueOffset: '-1 day',
+      successAttestationId: attestationId,
+    });
+    mocks.loadAttestation.mockResolvedValue(successAttestation({
+      releaseRequired: false,
+    }));
+
+    await expect(listLocalPublishJobs()).resolves.toEqual([
+      expect.objectContaining({
+        id: attestedJobId,
+        status: 'operator_attested',
+        successAttestation: expect.objectContaining({
+          id: attestationId,
+          releaseRequired: false,
+        }),
+      }),
+    ]);
+    expect(mocks.loadAttestation).toHaveBeenCalledWith(attestationId);
   });
 
   it('executes the cast post-dispatch verification backoff update', async () => {

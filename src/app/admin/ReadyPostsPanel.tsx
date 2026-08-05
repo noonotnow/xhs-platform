@@ -19,6 +19,7 @@ import {
   getEditorialScheduleDisplay,
   type EditorialScheduleStatus,
 } from '@/lib/editorial-schedule';
+import { normalizeRednotePublicIdentity } from '@/lib/rednote-publication';
 import {
   copyHandoffText,
   formatTags,
@@ -33,6 +34,7 @@ import { isMovCompatibilityTrialEligible } from '@/lib/mov-compatibility-trial';
 import {
   displayedLocalPublishJob,
   isActiveLocalPublishJob,
+  receiptPendingLocalPublishJobs,
 } from '@/lib/local-publish-job-display';
 
 interface ApiError {
@@ -57,16 +59,9 @@ interface PublishJobRecoveryResponse extends ApiError {
 function manualPublicPostError(value: string) {
   const candidate = value.trim();
   if (!candidate) return '';
-  if (/[?#]/.test(candidate) || /xsec_token|creator|manager/i.test(candidate)) {
-    return 'Remove all query, xsec_token, creator-manager, and fragment parameters. Use https://www.rednote.com/explore/NOTE_ID.';
-  }
-  if (
-    candidate.startsWith('http') &&
-    !/^https:\/\/www\.rednote\.com\/explore\/[A-Za-z0-9_-]+$/.test(candidate)
-  ) {
-    return 'Use the clean public URL format https://www.rednote.com/explore/NOTE_ID.';
-  }
-  return '';
+  return normalizeRednotePublicIdentity(candidate)
+    ? ''
+    : 'Use a public https://www.rednote.com/explore/NOTE_ID URL or bare note ID.';
 }
 
 interface LocalJobResponse extends ApiError {
@@ -186,10 +181,10 @@ function jobStatusCopy(job: LocalPublishJobSummary | undefined) {
   }
   if (job.status === 'operator_attested') {
     return {
-      tone: 'pending',
-      title: 'Success attested — awaiting public verification',
+      tone: 'warning',
+      title: 'Scheduled success attested — receipt pending',
       detail:
-        'Dispatch and recovery are permanently closed. The exact public note will be discovered after publication.',
+        'Dispatch and recovery are permanently closed, and the local staging release remains eligible even if Notion says Published. Published is only a cue until an exact public receipt is endorsed.',
     };
   }
   if (job.status === 'verification_pending') {
@@ -291,6 +286,10 @@ export default function ReadyPostsPanel() {
   const [batchBusy, setBatchBusy] = useState(false);
   const [recoveryBusyJobId, setRecoveryBusyJobId] = useState('');
   const [attestationBusyJobId, setAttestationBusyJobId] = useState('');
+  const [receiptBusyJobId, setReceiptBusyJobId] = useState('');
+  const [receiptInputs, setReceiptInputs] = useState<Record<string, string>>({});
+  const [receiptConfirmed, setReceiptConfirmed] = useState<Record<string, boolean>>({});
+  const [receiptErrors, setReceiptErrors] = useState<Record<string, string>>({});
   const [reconciliations, setReconciliations] = useState<ExternalReconciliationSummary[]>([]);
   const [reconciliationError, setReconciliationError] = useState('');
   const [manualReconciliations, setManualReconciliations] = useState<
@@ -316,6 +315,7 @@ export default function ReadyPostsPanel() {
   const idempotencyKeysRef = useRef<Record<string, string>>({});
   const reconciliationKeysRef = useRef<Record<string, string>>({});
   const attestationKeysRef = useRef<Record<string, string>>({});
+  const receiptKeysRef = useRef<Record<string, string>>({});
 
   const selected = useMemo(
     () => posts.find((post) => post.id === selectedId) ?? posts[0],
@@ -340,6 +340,10 @@ export default function ReadyPostsPanel() {
   const movTrialPosts = useMemo(
     () => posts.filter((post) => post.candidateKind === 'mov_compatibility_trial'),
     [posts],
+  );
+  const receiptPendingJobs = useMemo(
+    () => receiptPendingLocalPublishJobs(jobs),
+    [jobs],
   );
   const mediaChoices = useMemo<MediaChoice[]>(() => {
     if (!selected) return [];
@@ -728,6 +732,48 @@ export default function ReadyPostsPanel() {
     }
   }
 
+  async function reconcileAttestedJob(job: LocalPublishJobSummary) {
+    const publicPost = receiptInputs[job.id]?.trim();
+    if (!publicPost || !receiptConfirmed[job.id] || job.successAttestation?.releaseRequired) {
+      return;
+    }
+    const idempotencyKey = receiptKeysRef.current[job.id] ?? crypto.randomUUID();
+    receiptKeysRef.current[job.id] = idempotencyKey;
+    setReceiptBusyJobId(job.id);
+    setReceiptErrors((current) => ({ ...current, [job.id]: '' }));
+    try {
+      const path = '/admin/api/local-publish-job-dispositions';
+      const response = await fetch(path, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey,
+        },
+        body: JSON.stringify({
+          notionPageId: job.notionPageId,
+          localJobId: job.id,
+          publicPost,
+          confirmed: true,
+        }),
+      });
+      const data = await responseJson<ApiError>(response, `POST ${path}`);
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to queue public receipt reconciliation');
+      }
+      delete receiptKeysRef.current[job.id];
+      await Promise.all([loadJobs(), loadManualReconciliations()]);
+    } catch (submitError) {
+      setReceiptErrors((current) => ({
+        ...current,
+        [job.id]: submitError instanceof Error
+          ? submitError.message
+          : 'Failed to queue public receipt reconciliation',
+      }));
+    } finally {
+      setReceiptBusyJobId('');
+    }
+  }
+
   async function reconcileSelected() {
       if (!selected || !manualConfirmed || !manualPublicPost.trim()) return;
       const idempotencyKey =
@@ -902,10 +948,11 @@ export default function ReadyPostsPanel() {
       {successAttestationCandidates.length > 0 && (
         <section className={styles.successAttestation} aria-labelledby="success-attestation-heading">
           <div>
-            <h3 id="success-attestation-heading">Confirm an ambiguous scheduled success</h3>
+            <h3 id="success-attestation-heading">Attest scheduled success</h3>
             <p>
-              Use only when the exact frozen attempt succeeded in Creator but the local worker
-              could not finish recording it.
+              Use only when Creator accepted the exact frozen scheduling attempt but the worker
+              receipt is incomplete. This closes dispatch and releases matching staging; it does
+              not create a public receipt or mark the post complete.
             </p>
           </div>
           {successAttestationCandidates.map((candidate) => (
@@ -921,10 +968,108 @@ export default function ReadyPostsPanel() {
               >
                 {attestationBusyJobId === candidate.jobId
                   ? 'Recording attestation…'
-                  : 'Yes, this succeeded — move on'}
+                  : 'Attest exact scheduled success'}
               </button>
             </div>
           ))}
+        </section>
+      )}
+
+      {receiptPendingJobs.length > 0 && (
+        <section
+          className={styles.receiptReconciliation}
+          aria-labelledby="receipt-reconciliation-heading"
+        >
+          <div>
+            <h3 id="receipt-reconciliation-heading">Reconcile public URL</h3>
+            <p>
+              These exact attempts were scheduled successfully but still lack a verified public
+              receipt. A Posts status of Published is only a cue and does not complete this step.
+            </p>
+          </div>
+          {receiptPendingJobs.map((job) => {
+            const reconciliation = manualReconciliations.find(
+              (item) => item.sourceLocalJobId === job.id,
+            );
+            const releaseRequired = job.successAttestation?.releaseRequired !== false;
+            const inputError = manualPublicPostError(receiptInputs[job.id] ?? '');
+            const isBusy = receiptBusyJobId === job.id;
+            return (
+              <div key={job.id} className={styles.receiptCandidate}>
+                <strong>
+                  {job.successAttestation?.expectedOutcome.text ?? 'Scheduled success attested'}
+                </strong>
+                <small>Job: <code>{job.id}</code></small>
+                <small>Post: <code>{job.notionPageId}</code></small>
+                {releaseRequired ? (
+                  <p className={styles.receiptBlocker}>
+                    Release the matching local staging slot first. This action appears
+                    automatically after the capable worker acknowledges the targeted release.
+                  </p>
+                ) : reconciliation ? (
+                  <p className={styles.receiptProgress}>
+                    Public receipt verification: {reconciliation.status.replace('_', ' ')}.
+                    The worker verifies identity and content before Published Complete.
+                  </p>
+                ) : (
+                  <>
+                    <label className={styles.reviewField}>
+                      <span>Public RedNote URL or note ID</span>
+                      <input
+                        autoComplete="off"
+                        maxLength={500}
+                        placeholder="https://www.rednote.com/explore/…"
+                        value={receiptInputs[job.id] ?? ''}
+                        onChange={(event) => setReceiptInputs((current) => ({
+                          ...current,
+                          [job.id]: event.target.value,
+                        }))}
+                        disabled={isBusy}
+                      />
+                      <small>
+                        Query and fragment data, including xsec_token, is discarded by the server.
+                        Only the canonical public note identity is retained.
+                      </small>
+                      {inputError && (
+                        <small className={styles.inlineError} role="alert">{inputError}</small>
+                      )}
+                    </label>
+                    <label className={styles.confirmation}>
+                      <input
+                        type="checkbox"
+                        checked={receiptConfirmed[job.id] ?? false}
+                        onChange={(event) => setReceiptConfirmed((current) => ({
+                          ...current,
+                          [job.id]: event.target.checked,
+                        }))}
+                        disabled={isBusy}
+                      />
+                      <span>
+                        I confirm this exact post is public and should be verified, not published
+                        again.
+                      </span>
+                    </label>
+                    <button
+                      className={styles.reconcileSubmit}
+                      type="button"
+                      onClick={() => void reconcileAttestedJob(job)}
+                      disabled={
+                        isBusy ||
+                        !receiptConfirmed[job.id] ||
+                        !receiptInputs[job.id]?.trim() ||
+                        Boolean(inputError)
+                      }
+                    >
+                      {isBusy ? 'Queueing verification…' : 'Reconcile public URL'}
+                    </button>
+                  </>
+                )}
+                {receiptErrors[job.id] && (
+                  <p className={styles.inlineError} role="alert">{receiptErrors[job.id]}</p>
+                )}
+              </div>
+            );
+          })}
         </section>
       )}
 
@@ -1270,7 +1415,7 @@ export default function ReadyPostsPanel() {
                   <div className={styles.manualReconciliation}>
                     <div className={styles.manualReconciliationHeading}>
                       <div>
-                        <strong>Already published?</strong>
+                        <strong>Reconcile public URL</strong>
                         <p>
                           Verify an existing public post and backfill this canonical row.
                           This action never publishes.
@@ -1298,8 +1443,8 @@ export default function ReadyPostsPanel() {
                             disabled={manualSubmitting}
                           />
                           <small>
-                            Use the exact query-free public URL or bare note ID. The worker verifies
-                            it against the canonical title, caption, and media type.
+                            Paste the public URL or bare note ID. Query and fragment data is
+                            discarded; the worker verifies canonical title, caption, and media.
                           </small>
                           {manualUrlError && (
                             <small className={styles.inlineError} role="alert">

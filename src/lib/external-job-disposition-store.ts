@@ -34,6 +34,7 @@ interface TargetJobRow extends QueryResultRow {
   completed_at: Date | string | null;
   batch_item_id: string | null;
   external_disposition_request_id: string | null;
+  success_attestation_id: string | null;
 }
 
 interface RequestRow extends QueryResultRow {
@@ -49,6 +50,13 @@ interface RequestRow extends QueryResultRow {
   claim_token: string | null;
   claim_valid: boolean;
   external_reconciliation_id: string | null;
+}
+
+interface ReceiptRow extends QueryResultRow {
+  notion_page_id: string;
+  status: 'publishing' | 'published';
+  note_id: string | null;
+  share_url: string | null;
 }
 
 function dispositionError(message: string, code: string) {
@@ -87,6 +95,53 @@ function assertExactRequest(
     throw dispositionError(
       'Idempotency-Key was already used for a different disposition request',
       'IDEMPOTENCY_CONFLICT',
+    );
+  }
+}
+
+async function assertReleasedOperatorAttestedJob(
+  client: PoolClient,
+  job: TargetJobRow,
+  input: ExternalJobDispositionInput,
+) {
+  if (
+    job.status !== 'operator_attested' ||
+    !job.success_attestation_id ||
+    !job.batch_item_id ||
+    job.notion_page_id !== input.notionPageId ||
+    job.snapshot.notionPageId !== input.notionPageId ||
+    job.note_id ||
+    job.share_url ||
+    job.verified_at ||
+    job.reconciled_at ||
+    job.completed_at ||
+    job.dispatched_at
+  ) {
+    throw dispositionError(
+      'Only an exact released operator-attested job may enter known-live disposition',
+      'DISPOSITION_JOB_NOT_RELEASED',
+    );
+  }
+  const released = await client.query(
+    `SELECT 1
+     FROM local_publish_job_success_attestations AS attestation
+     JOIN local_publish_job_success_attestation_release_acks AS release_ack
+       ON release_ack.success_attestation_id = attestation.id
+     WHERE attestation.id = $1::uuid
+       AND attestation.local_publish_job_id = $2::uuid
+       AND attestation.batch_item_id = $3::uuid
+       AND attestation.notion_page_id = $4`,
+    [
+      job.success_attestation_id,
+      job.id,
+      job.batch_item_id,
+      input.notionPageId,
+    ],
+  );
+  if (released.rowCount !== 1) {
+    throw dispositionError(
+      'The operator success attestation still requires release acknowledgement',
+      'DISPOSITION_RELEASE_REQUIRED',
     );
   }
 }
@@ -173,6 +228,96 @@ async function assertBatchLinkage(
   }
 }
 
+async function assertEligibleDispositionJob(
+  client: PoolClient,
+  job: TargetJobRow,
+  input: ExternalJobDispositionInput,
+) {
+  if (job.status === 'operator_attested') {
+    await assertReleasedOperatorAttestedJob(client, job, input);
+    await assertBatchLinkage(client, job, ['operator_attested']);
+    return;
+  }
+  assertSafePreDispatchJob(job, input);
+  await assertBatchLinkage(client, job, ['queued', 'claimed']);
+}
+
+async function ensureVerifiedPublishedReceipt(
+  client: PoolClient,
+  job: TargetJobRow,
+  request: RequestRow,
+) {
+  await lockExternalReconciliationIdentity(
+    client,
+    request.requested_note_id,
+    request.requested_share_url,
+  );
+  const receipts = await client.query<ReceiptRow>(
+    `SELECT notion_page_id, status, note_id, share_url
+     FROM xhs_publish_receipts
+     WHERE notion_page_id = $1
+        OR note_id = $2
+        OR share_url = $3
+     FOR UPDATE`,
+    [
+      request.notion_page_id,
+      request.requested_note_id,
+      request.requested_share_url,
+    ],
+  );
+  if (receipts.rows.length === 0) {
+    await client.query(
+      `INSERT INTO xhs_publish_receipts (
+         notion_page_id, status, note_id, share_url
+       ) VALUES ($1, 'published', $2, $3)`,
+      [
+        request.notion_page_id,
+        request.requested_note_id,
+        request.requested_share_url,
+      ],
+    );
+    return;
+  }
+  if (
+    receipts.rows.length !== 1 ||
+    receipts.rows[0].notion_page_id !== job.notion_page_id ||
+    receipts.rows[0].status !== 'published' ||
+    receipts.rows[0].note_id !== request.requested_note_id ||
+    receipts.rows[0].share_url !== request.requested_share_url
+  ) {
+    throw dispositionError(
+      'The verified post conflicts with an existing publish receipt',
+      'DISPOSITION_RECEIPT_CONFLICT',
+    );
+  }
+}
+
+async function assertExactPublishedReceipt(
+  client: PoolClient,
+  job: TargetJobRow,
+  request: RequestRow,
+) {
+  const receipt = await client.query<ReceiptRow>(
+    `SELECT notion_page_id, status, note_id, share_url
+     FROM xhs_publish_receipts
+     WHERE notion_page_id = $1
+     FOR SHARE`,
+    [request.notion_page_id],
+  );
+  if (
+    receipt.rowCount !== 1 ||
+    receipt.rows[0].notion_page_id !== job.notion_page_id ||
+    receipt.rows[0].status !== 'published' ||
+    receipt.rows[0].note_id !== request.requested_note_id ||
+    receipt.rows[0].share_url !== request.requested_share_url
+  ) {
+    throw dispositionError(
+      'The verified disposition is missing its exact published receipt',
+      'DISPOSITION_RECEIPT_MISSING',
+    );
+  }
+}
+
 async function assertReceiptAndIdentitySafety(
   client: PoolClient,
   job: TargetJobRow,
@@ -193,6 +338,12 @@ async function assertReceiptAndIdentitySafety(
      FOR UPDATE`,
     [input.notionPageId, input.noteId, input.shareUrl],
   );
+  if (job.status === 'operator_attested' && receipts.rows.length > 0) {
+    throw dispositionError(
+      'A released operator-attested job must not already have receipt identity',
+      'DISPOSITION_RECEIPT_CONFLICT',
+    );
+  }
   for (const receipt of receipts.rows) {
     const exact = receipt.status === 'published' &&
       receipt.notion_page_id === input.notionPageId &&
@@ -408,8 +559,7 @@ export async function insertExternalJobDisposition(
       existingId = existing.rows[0].id;
       await client.query('COMMIT');
     } else {
-      assertSafePreDispatchJob(job, input);
-      await assertBatchLinkage(client, job, ['queued', 'claimed']);
+      await assertEligibleDispositionJob(client, job, input);
       await lockExternalReconciliationIdentity(
         client,
         input.noteId,
@@ -525,13 +675,12 @@ export async function prepareExternalJobDisposition(
       }
       await assertBatchLinkage(client, job, ['verified']);
     } else {
-      assertSafePreDispatchJob(job, {
+      await assertEligibleDispositionJob(client, job, {
         notionPageId: request.notion_page_id,
         localJobId: job.id,
         noteId: request.requested_note_id,
         shareUrl: request.requested_share_url,
       });
-      await assertBatchLinkage(client, job, ['queued', 'claimed']);
       await client.query(
         `UPDATE local_publish_jobs
          SET status = 'verified',
@@ -554,7 +703,7 @@ export async function prepareExternalJobDisposition(
                updated_at = CURRENT_TIMESTAMP
            WHERE id = $1::uuid
              AND local_publish_job_id = $2::uuid
-             AND state IN ('queued', 'claimed', 'verified')
+             AND state IN ('queued', 'claimed', 'operator_attested', 'verified')
            RETURNING id`,
           [job.batch_item_id, job.id],
         );
@@ -566,6 +715,7 @@ export async function prepareExternalJobDisposition(
         }
       }
     }
+    await ensureVerifiedPublishedReceipt(client, job, request);
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK');
@@ -613,6 +763,7 @@ export async function completeExternalJobDisposition(
       );
     }
     await assertBatchLinkage(client, job, [job.status]);
+    await assertExactPublishedReceipt(client, job, request);
     if (job.status === 'verified') {
       await client.query(
         `UPDATE local_publish_jobs
@@ -698,7 +849,14 @@ export async function retryExternalJobDisposition(id: string) {
     }
     const identityMatches = job.note_id === request.requested_note_id &&
       job.share_url === request.requested_share_url;
-    if (
+    if (job.status === 'operator_attested') {
+      await assertReleasedOperatorAttestedJob(client, job, {
+        notionPageId: request.notion_page_id,
+        localJobId: job.id,
+        noteId: request.requested_note_id,
+        shareUrl: request.requested_share_url,
+      });
+    } else if (
       !(
         (
           job.status === 'queued' &&

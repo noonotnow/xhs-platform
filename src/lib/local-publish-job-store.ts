@@ -297,7 +297,15 @@ export async function listLocalPublishJobs() {
     ORDER BY created_at DESC
     LIMIT 100
   `;
-  return result.rows.map(mapRow);
+  return Promise.all(result.rows.map(async (row) => {
+    const job = mapRow(row);
+    if (job.status === 'operator_attested' && row.success_attestation_id) {
+      job.successAttestation = await loadOperatorSuccessAttestation(
+        row.success_attestation_id,
+      );
+    }
+    return job;
+  }));
 }
 
 export async function listPublishOwningLocalJobs(notionPageIds: string[]) {

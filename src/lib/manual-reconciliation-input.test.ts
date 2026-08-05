@@ -6,7 +6,7 @@ import {
 } from '@/lib/manual-reconciliation-input';
 
 describe('manual reconciliation input', () => {
-  it('normalizes only bare IDs or exact canonical query-free URLs', () => {
+  it('canonicalizes public URLs and strips query and fragment data', () => {
     expect(normalizeManualRedNoteIdentity('note_123')).toEqual({
       noteId: 'note_123',
       shareUrl: 'https://www.rednote.com/explore/note_123',
@@ -20,12 +20,27 @@ describe('manual reconciliation input', () => {
     for (const value of [
       'https://www.rednote.com/explore/note_123?source=share',
       'https://www.rednote.com/explore/note_123/',
-      'https://rednote.com/explore/note_123',
       'https://www.xiaohongshu.com/explore/note_123',
+    ]) {
+      expect(normalizeManualRedNoteIdentity(value)).toEqual({
+        noteId: 'note_123',
+        shareUrl: 'https://www.rednote.com/explore/note_123',
+      });
+    }
+    expect(normalizeManualRedNoteIdentity(
+      'https://www.rednote.com/explore/note_123?xsec_token=secret#fragment',
+    )).toEqual({
+      noteId: 'note_123',
+      shareUrl: 'https://www.rednote.com/explore/note_123',
+    });
+    for (const value of [
+      'https://rednote.com/explore/note_123',
+      'https://example.com/explore/note_123',
+      'https://www.rednote.com/user/note_123',
       'note 123',
     ]) {
       expect(() => normalizeManualRedNoteIdentity(value)).toThrow(
-        'exact query-free',
+        'allowed public RedNote explore URL',
       );
     }
   });
