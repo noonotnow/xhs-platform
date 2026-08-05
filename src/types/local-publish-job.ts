@@ -10,7 +10,28 @@ export type LocalPublishJobStatus =
   | 'verification_pending'
   | 'verified'
   | 'reconciled'
+  | 'operator_attested'
   | 'failed';
+
+export interface OperatorSuccessAttestationIdentity {
+  jobId: string;
+  pageId: string;
+  batchId: string;
+  itemId: string;
+  snapshotDigest: string;
+  itemHash: string;
+  scheduledAt: string;
+  claimTokenDigest: string;
+}
+
+export interface OperatorSuccessAttestationSummary {
+  id: string;
+  revision: 'rednote.operator-success-attestation.v1';
+  state: 'operator_attested';
+  verification: 'pending_receipt' | 'verified';
+  publicationVerified: boolean;
+  identity: OperatorSuccessAttestationIdentity;
+}
 
 export interface LocalPublishSnapshot {
   notionPageId: string;
@@ -48,6 +69,8 @@ export interface LocalPublishJobSummary {
   verifiedAt?: string;
   reconciledAt?: string;
   completedAt?: string;
+  successAttestationEligible?: OperatorSuccessAttestationIdentity;
+  successAttestation?: OperatorSuccessAttestationSummary;
 }
 
 export interface BatchAuthorization {
@@ -84,6 +107,7 @@ export type PublishBatchItemState =
   | 'needs_approval'
   | 'approved'
   | 'invalidated'
+  | 'operator_attested'
   | LocalPublishJobStatus;
 
 export interface PublishBatchItem {

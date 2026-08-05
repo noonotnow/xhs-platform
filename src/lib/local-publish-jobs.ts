@@ -29,6 +29,7 @@ import {
   buildBatchSnapshot,
   manifestHash,
 } from '@/lib/rednote-publish-batches';
+import { listOperatorSuccessAttestationState } from '@/lib/operator-success-attestation-store';
 import { invalidateStoredBatchItem } from '@/lib/rednote-publish-batch-store';
 
 const DEFAULT_LEASE_SECONDS = 2 * 60 * 60;
@@ -337,7 +338,22 @@ export async function authorizeLocalPublishJob(id: string, claimToken: string) {
 }
 
 export async function getLocalPublishJobSummaries() {
-  return (await listLocalPublishJobs()).map(jobSummary);
+  const [jobs, state] = await Promise.all([
+    listLocalPublishJobs(),
+    listOperatorSuccessAttestationState(),
+  ]);
+  return {
+    jobs: jobs.map((job) => ({
+      ...jobSummary(job),
+      ...(state.eligibility.get(job.id)
+        ? { successAttestationEligible: state.eligibility.get(job.id) }
+        : {}),
+      ...(state.attestations.get(job.id)
+        ? { successAttestation: state.attestations.get(job.id) }
+        : {}),
+    })),
+    successAttestationCapabilityAvailable: state.capabilityAvailable,
+  };
 }
 
 export async function submitLocalPublishJobResult(

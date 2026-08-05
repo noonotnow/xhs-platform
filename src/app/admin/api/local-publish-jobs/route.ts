@@ -36,8 +36,9 @@ export async function GET(request: NextRequest) {
   }
 
   try {
+    const result = await getLocalPublishJobSummaries();
     return NextResponse.json(
-      { jobs: await getLocalPublishJobSummaries() },
+      result,
       { headers: NO_STORE_HEADERS },
     );
   } catch (error) {

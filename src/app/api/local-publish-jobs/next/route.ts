@@ -6,6 +6,8 @@ import {
 import { requireLocalPublishWorker } from '@/lib/local-publish-worker-auth';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
 import type { LocalPublishWorkLane } from '@/types/local-publish-job';
+import { workerCapabilities } from '@/lib/operator-success-attestation';
+import { recordLocalPublishWorkerCapabilities } from '@/lib/operator-success-attestation-store';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -20,6 +22,9 @@ const NO_STORE_HEADERS = {
 export async function GET(request: NextRequest) {
   try {
     requireLocalPublishWorker(request.headers.get('authorization'));
+    await recordLocalPublishWorkerCapabilities(
+      workerCapabilities(request.headers.get('x-local-publish-worker-capabilities')),
+    );
     const rawLane = request.nextUrl.searchParams.get('lane') ?? 'all';
     if (!['all', 'dispatch', 'verification'].includes(rawLane)) {
       throw new LocalPublishJobError(

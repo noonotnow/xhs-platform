@@ -42,6 +42,7 @@ interface PublishBatchesResponse extends ApiError {
 
 interface LocalJobsResponse extends ApiError {
   jobs: LocalPublishJobSummary[];
+  successAttestationCapabilityAvailable: boolean;
 }
 
 interface PublishJobRecoveryResponse extends ApiError {
@@ -191,6 +192,14 @@ function jobStatusCopy(job: LocalPublishJobSummary | undefined) {
         'The query-free public post is visible. Do not publish again; retry the same verified report to finish Notion backfill.',
     };
   }
+  if (job.status === 'operator_attested') {
+    return {
+      tone: 'warning',
+      title: 'Operator attested success; receipt verification pending',
+      detail:
+        'Dispatch is permanently terminal and the Creator compose slot is released. No note identity has been claimed yet; receipt-only reconciliation remains pending.',
+    };
+  }
   if (job.status === 'failed') {
     return {
       tone: 'error',
@@ -263,6 +272,9 @@ export default function ReadyPostsPanel() {
   const [batches, setBatches] = useState<PublishBatch[]>([]);
   const [batchBusy, setBatchBusy] = useState(false);
   const [recoveryBusyJobId, setRecoveryBusyJobId] = useState('');
+  const [attestationBusyJobId, setAttestationBusyJobId] = useState('');
+  const [successAttestationCapabilityAvailable, setSuccessAttestationCapabilityAvailable] =
+    useState(false);
   const [reconciliations, setReconciliations] = useState<ExternalReconciliationSummary[]>([]);
   const [reconciliationError, setReconciliationError] = useState('');
   const [manualReconciliations, setManualReconciliations] = useState<
@@ -407,6 +419,9 @@ export default function ReadyPostsPanel() {
       const data = await responseJson<LocalJobsResponse>(response, `GET ${path}`);
       if (!response.ok) throw new Error(data.error || 'Failed to load local publish jobs');
       setJobs(data.jobs);
+      setSuccessAttestationCapabilityAvailable(
+        data.successAttestationCapabilityAvailable,
+      );
     } catch (loadError) {
       if (showError) {
         setError(
@@ -628,6 +643,7 @@ export default function ReadyPostsPanel() {
       if (!response.ok) {
         throw new Error(data.error || 'Failed to recover approved publish job');
       }
+
       await Promise.all([loadBatches(), loadJobs()]);
     } catch (recoveryError) {
       setError(
@@ -638,6 +654,47 @@ export default function ReadyPostsPanel() {
       await Promise.all([loadBatches(), loadJobs()]);
     } finally {
       setRecoveryBusyJobId('');
+    }
+  }
+
+  async function attestScheduledAmbiguity(job: LocalPublishJobSummary) {
+    const identity = job.successAttestationEligible;
+    if (!identity || !successAttestationCapabilityAvailable) return;
+    const confirmed = window.confirm(
+      `Confirm the exact scheduled dispatch succeeded for "${selected?.headline || identity.pageId}"?\n\n` +
+      `Job ${identity.jobId}\nBatch ${identity.batchId}\nItem ${identity.itemId}\n` +
+      `Snapshot ${identity.snapshotDigest}\nScheduled ${identity.scheduledAt}\n\n` +
+      'This permanently prevents redispatch, recovery, and requeue and releases the worker compose slot. ' +
+      'It does NOT verify publication and does NOT create a note ID or share URL.',
+    );
+    if (!confirmed) return;
+    setAttestationBusyJobId(job.id);
+    setError('');
+    try {
+      const path = '/admin/api/local-publish-job-success-attestations';
+      const response = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          revision: 'rednote.operator-success-attestation.v1',
+          confirmed: true,
+          identity,
+        }),
+      });
+      const data = await responseJson<ApiError>(response, `POST ${path}`);
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to record operator success attestation');
+      }
+      await Promise.all([loadJobs(true), loadBatches()]);
+    } catch (attestationError) {
+      setError(
+        attestationError instanceof Error
+          ? attestationError.message
+          : 'Failed to record operator success attestation',
+      );
+      await loadJobs();
+    } finally {
+      setAttestationBusyJobId('');
     }
   }
 
@@ -1081,6 +1138,19 @@ export default function ReadyPostsPanel() {
                         Open verified RedNote post
                       </a>
                     )}
+                    {currentJob?.successAttestationEligible &&
+                      successAttestationCapabilityAvailable && (
+                        <button
+                          className={styles.attestationButton}
+                          type="button"
+                          disabled={Boolean(attestationBusyJobId)}
+                          onClick={() => void attestScheduledAmbiguity(currentJob)}
+                        >
+                          {attestationBusyJobId === currentJob.id
+                            ? 'Recording exact attestation…'
+                            : 'Yes, this succeeded — move on'}
+                        </button>
+                      )}
                   </div>
                 )}
 

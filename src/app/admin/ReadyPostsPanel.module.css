@@ -514,6 +514,24 @@
   border: 1px solid currentColor;
 }
 
+.attestationButton {
+  margin-top: 10px;
+  padding: 9px 12px;
+  color: #fff;
+  background: #92400e;
+  border: 1px solid #78350f;
+  font-weight: 700;
+}
+
+.attestationButton:hover:not(:disabled) {
+  background: #78350f;
+}
+
+.attestationButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .jobStatuspending {
   color: #1e3a8a;
   background: #eff6ff;
