@@ -6,6 +6,7 @@ import type {
   ExternalReconciliationSummary,
   LocalPublishJobSummary,
   LocalPublishMediaType,
+  ManualSchedulingAttestationEvidence,
   ManualReconciliationSummary,
   OperatorSuccessAttestationEvidence,
   PublishBatch,
@@ -66,6 +67,10 @@ function manualPublicPostError(value: string) {
 
 interface LocalJobResponse extends ApiError {
   job: LocalPublishJobSummary;
+}
+
+interface ManualSchedulingAttestationResponse extends ApiError {
+  attestation: OperatorSuccessAttestationEvidence;
 }
 
 interface ExternalReconciliationsResponse extends ApiError {
@@ -180,6 +185,14 @@ function jobStatusCopy(job: LocalPublishJobSummary | undefined) {
     };
   }
   if (job.status === 'operator_attested') {
+    if (job.successAttestation?.provenance === 'manual_scheduled') {
+      return {
+        tone: 'warning',
+        title: 'Scheduled · receipt pending',
+        detail:
+          'Manual scheduling is recorded for the exact frozen packet. Dispatch is closed. Add the public URL later to verify identity, backfill Published, and reconcile metrics.',
+      };
+    }
     return {
       tone: 'warning',
       title: 'Scheduled success attested — receipt pending',
@@ -286,6 +299,7 @@ export default function ReadyPostsPanel() {
   const [batchBusy, setBatchBusy] = useState(false);
   const [recoveryBusyJobId, setRecoveryBusyJobId] = useState('');
   const [attestationBusyJobId, setAttestationBusyJobId] = useState('');
+  const [manualSchedulingBusyItemId, setManualSchedulingBusyItemId] = useState('');
   const [receiptBusyJobId, setReceiptBusyJobId] = useState('');
   const [receiptInputs, setReceiptInputs] = useState<Record<string, string>>({});
   const [receiptConfirmed, setReceiptConfirmed] = useState<Record<string, boolean>>({});
@@ -315,6 +329,7 @@ export default function ReadyPostsPanel() {
   const idempotencyKeysRef = useRef<Record<string, string>>({});
   const reconciliationKeysRef = useRef<Record<string, string>>({});
   const attestationKeysRef = useRef<Record<string, string>>({});
+  const manualSchedulingKeysRef = useRef<Record<string, string>>({});
   const receiptKeysRef = useRef<Record<string, string>>({});
 
   const selected = useMemo(
@@ -376,6 +391,35 @@ export default function ReadyPostsPanel() {
     ? displayedLocalPublishJob(jobs, selected.id)
     : undefined;
   const currentJobStatus = jobStatusCopy(currentJob);
+  const manualSchedulingCandidate = useMemo<ManualSchedulingAttestationEvidence | undefined>(
+    () => {
+      if (!selected || selected.candidateKind !== 'packet_ready') return undefined;
+      for (const batch of batches) {
+        if (!['approved', 'partially_approved'].includes(batch.status)) continue;
+        const item = batch.items.find((candidate) =>
+          candidate.notionPageId === selected.id &&
+          ['approved', 'queued'].includes(candidate.state) &&
+          candidate.dispatchMode === 'scheduled' &&
+          candidate.snapshot.notionLastEditedTime === selected.lastEditedTime &&
+          candidate.snapshot.publishAt === selected.publishAt &&
+          (!candidate.localPublishJobId ||
+            (currentJob?.status === 'queued' &&
+              currentJob.id === candidate.localPublishJobId)));
+        if (item?.snapshot.publishAt) {
+          return {
+            batchId: batch.id,
+            manifestHash: batch.manifestHash,
+            itemId: item.id,
+            itemHash: item.itemHash,
+            snapshotRevision: item.snapshot.notionLastEditedTime,
+            requestedPublishAt: item.snapshot.publishAt,
+          };
+        }
+      }
+      return undefined;
+    },
+    [batches, currentJob, selected],
+  );
   const currentManualReconciliation = selected
     ? manualReconciliations.find(
         (reconciliation) => reconciliation.notionPageId === selected.id,
@@ -729,6 +773,71 @@ export default function ReadyPostsPanel() {
       await Promise.all([loadBatches(), loadJobs()]);
     } finally {
       setAttestationBusyJobId('');
+    }
+  }
+
+  async function markManuallyScheduled(
+    candidate: ManualSchedulingAttestationEvidence,
+  ) {
+    if (!selected) return;
+    const scheduledFor = new Intl.DateTimeFormat(undefined, {
+      dateStyle: 'full',
+      timeStyle: 'short',
+      timeZone: 'America/New_York',
+    }).format(new Date(candidate.requestedPublishAt));
+    const confirmed = window.confirm(
+      `Mark this exact post as manually scheduled — receipt pending?\n\n` +
+      `${selected.headline || 'Untitled post'}\nScheduled for ${scheduledFor} ET\n\n` +
+      `Post ${selected.id}\nBatch ${candidate.batchId}\nItem ${candidate.itemId}\n` +
+      `Manifest ${candidate.manifestHash}\nItem hash ${candidate.itemHash}\n` +
+      `Source revision ${candidate.snapshotRevision}\n\n` +
+      'This records an immutable operator assertion and immediately closes dispatch for only ' +
+      'this frozen packet. It does not mark Notion Published, create a URL or note ID, verify ' +
+      'the post, reconcile metrics, or run the worker.',
+    );
+    if (!confirmed) return;
+    const idempotencyKey =
+      manualSchedulingKeysRef.current[candidate.itemId] ?? crypto.randomUUID();
+    manualSchedulingKeysRef.current[candidate.itemId] = idempotencyKey;
+    setManualSchedulingBusyItemId(candidate.itemId);
+    setError('');
+    try {
+      const path = '/admin/api/manual-scheduling-attestations';
+      const response = await fetch(path, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey,
+        },
+        body: JSON.stringify({
+          notionPageId: selected.id,
+          batchId: candidate.batchId,
+          manifestHash: candidate.manifestHash,
+          itemId: candidate.itemId,
+          itemHash: candidate.itemHash,
+          snapshotRevision: candidate.snapshotRevision,
+          requestedPublishAt: candidate.requestedPublishAt,
+          confirmed: true,
+        }),
+      });
+      const data = await responseJson<ManualSchedulingAttestationResponse>(
+        response,
+        `POST ${path}`,
+      );
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to record manual scheduling');
+      }
+      delete manualSchedulingKeysRef.current[candidate.itemId];
+      await Promise.all([loadBatches(), loadJobs(), loadPosts()]);
+    } catch (attestationError) {
+      setError(
+        attestationError instanceof Error
+          ? attestationError.message
+          : 'Failed to record manual scheduling',
+      );
+      await Promise.all([loadBatches(), loadJobs()]);
+    } finally {
+      setManualSchedulingBusyItemId('');
     }
   }
 
@@ -1375,6 +1484,33 @@ export default function ReadyPostsPanel() {
                         Open verified RedNote post
                       </a>
                     )}
+                  </div>
+                )}
+
+                {manualSchedulingCandidate && (
+                  <div className={styles.manualReconciliation}>
+                    <div className={styles.manualReconciliationHeading}>
+                      <div>
+                        <strong>Already scheduled manually?</strong>
+                        <p>
+                          Close dispatch for this exact frozen packet now. Notion stays unchanged
+                          until a public URL is independently verified.
+                        </p>
+                        <small>
+                          Packet <code>{manualSchedulingCandidate.itemHash}</code>
+                        </small>
+                      </div>
+                      <button
+                        className={styles.successAttestationButton}
+                        type="button"
+                        disabled={Boolean(manualSchedulingBusyItemId)}
+                        onClick={() => void markManuallyScheduled(manualSchedulingCandidate)}
+                      >
+                        {manualSchedulingBusyItemId === manualSchedulingCandidate.itemId
+                          ? 'Recording scheduling…'
+                          : 'Mark scheduled — receipt pending'}
+                      </button>
+                    </div>
                   </div>
                 )}
 

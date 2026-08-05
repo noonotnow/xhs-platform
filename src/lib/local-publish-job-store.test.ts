@@ -150,6 +150,7 @@ describe('local publish atomic claim storage', () => {
     expect(query).toContain('dispatch_authorized_at IS NULL');
     expect(query).toContain('external_disposition_request_id IS NULL');
     expect(query).toContain("status IN ('submitted', 'scheduled', 'verification_pending')");
+    expect(query).toContain("attestation.provenance = 'worker_ambiguous'");
     expect(query).toContain('claim_expires_at IS NULL');
     expect(query).toContain('FOR UPDATE SKIP LOCKED');
     expect(query).toContain('claim_token = gen_random_uuid()');

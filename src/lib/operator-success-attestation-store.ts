@@ -7,6 +7,7 @@ import {
   ATTESTATION_RELEASE_CONSUMED_CODE,
   ATTESTATION_RELEASE_CONSUMED_MESSAGE,
   claimTokenDigest,
+  MANUAL_SCHEDULING_ATTESTATION_CONTRACT_REVISION,
   OPERATOR_SUCCESS_ATTESTATION_CONTRACT_REVISION,
   OPERATOR_SUCCESS_ATTESTATION_TIME_ZONE,
   operatorSuccessAttestationEnabled,
@@ -68,8 +69,11 @@ export interface OperatorSuccessAttestationRow extends QueryResultRow {
   item_hash: string;
   snapshot_revision: string;
   snapshot_digest: string;
-  contract_revision: typeof OPERATOR_SUCCESS_ATTESTATION_CONTRACT_REVISION;
-  prior_claim_token_digest: string;
+  provenance: 'worker_ambiguous' | 'manual_scheduled';
+  contract_revision:
+    | typeof OPERATOR_SUCCESS_ATTESTATION_CONTRACT_REVISION
+    | typeof MANUAL_SCHEDULING_ATTESTATION_CONTRACT_REVISION;
+  prior_claim_token_digest: string | null;
   expected_outcome: string;
   requested_publish_at: Date | string;
   attested_by: string;
@@ -127,20 +131,24 @@ function evidence(row: OperatorSuccessCandidateRow): OperatorSuccessAttestationE
 
 function summary(row: OperatorSuccessAttestationRow): OperatorSuccessAttestationSummary {
   const requestedPublishAt = timestamp(row.requested_publish_at);
-  const localReleaseIdentity = {
-    jobId: row.local_publish_job_id,
-    notionPageId: row.notion_page_id,
-    priorClaimTokenDigest: row.prior_claim_token_digest,
-    batchId: row.batch_id,
-    manifestHash: row.manifest_hash,
-    itemHash: row.item_hash,
-    snapshotRevision: row.snapshot_revision,
-    requestedPublishAt,
-    publishMode: 'scheduled' as const,
-  };
+  const localReleaseIdentity = row.provenance === 'worker_ambiguous' &&
+      row.prior_claim_token_digest
+    ? {
+        jobId: row.local_publish_job_id,
+        notionPageId: row.notion_page_id,
+        priorClaimTokenDigest: row.prior_claim_token_digest,
+        batchId: row.batch_id,
+        manifestHash: row.manifest_hash,
+        itemHash: row.item_hash,
+        snapshotRevision: row.snapshot_revision,
+        requestedPublishAt,
+        publishMode: 'scheduled' as const,
+      }
+    : undefined;
   return {
     id: row.id,
     notionPageId: row.notion_page_id,
+    provenance: row.provenance,
     contractRevision: row.contract_revision,
     batchId: row.batch_id,
     manifestHash: row.manifest_hash,
@@ -149,9 +157,12 @@ function summary(row: OperatorSuccessAttestationRow): OperatorSuccessAttestation
     itemHash: row.item_hash,
     snapshotRevision: row.snapshot_revision,
     snapshotDigest: row.snapshot_digest,
-    priorClaimTokenDigest: row.prior_claim_token_digest,
-    releaseRequired: !row.release_acknowledged_at,
-    localReleaseIdentity,
+    ...(row.prior_claim_token_digest
+      ? { priorClaimTokenDigest: row.prior_claim_token_digest }
+      : {}),
+    releaseRequired:
+      row.provenance === 'worker_ambiguous' && !row.release_acknowledged_at,
+    ...(localReleaseIdentity ? { localReleaseIdentity } : {}),
     requestedPublishAt,
     expectedOutcome: {
       kind: 'scheduled',
@@ -172,6 +183,7 @@ export function validateExactOperatorSuccessAttestationReplay(
 ) {
   if (
     row.idempotency_key !== idempotencyKey ||
+    row.provenance !== 'worker_ambiguous' ||
     row.local_publish_job_id !== input.jobId ||
     row.batch_id !== input.batchId ||
     row.batch_item_id !== input.itemId ||
@@ -443,10 +455,11 @@ export async function insertOperatorSuccessAttestation(
          expected_outcome, requested_publish_at,
          prior_job_status, prior_error_code, prior_error_message,
          prior_claim_attempts, prior_staged_at, prior_dispatch_authorized_at,
-         prior_completed_at, attested_by
+         prior_completed_at, attested_by, provenance
        ) VALUES (
          $1::uuid, $2::uuid, $3, $4::uuid, $5::uuid, $6, $7, $8, $9, $10,
-         $11, $12, $13::timestamptz, $14, $15, $16, $17, $18, $19, $20, $21
+         $11, $12, $13::timestamptz, $14, $15, $16, $17, $18, $19, $20, $21,
+         'worker_ambiguous'
        )
        RETURNING *`,
       [

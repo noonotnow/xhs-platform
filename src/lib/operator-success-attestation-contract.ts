@@ -2,6 +2,8 @@ import { createHash } from 'crypto';
 
 export const OPERATOR_SUCCESS_ATTESTATION_CONTRACT_REVISION =
   'operator-success-attestation/v1' as const;
+export const MANUAL_SCHEDULING_ATTESTATION_CONTRACT_REVISION =
+  'manual-scheduling-attestation/v1' as const;
 export const ATTESTATION_RELEASE_CONSUMED_CODE =
   'ATTESTATION_RELEASE_CONSUMED' as const;
 export const ATTESTATION_RELEASE_CONSUMED_MESSAGE =

@@ -89,6 +89,14 @@ async function insertJob(input: {
       input.batchItemId ?? null,
     ],
   );
+  if (input.successAttestationId) {
+    await database.query(
+      `INSERT INTO local_publish_job_success_attestations (id, provenance)
+       VALUES ($1::uuid, 'worker_ambiguous')
+       ON CONFLICT (id) DO NOTHING`,
+      [input.successAttestationId],
+    );
+  }
 }
 
 async function insertAttestedBatchAuthorization(input: {
@@ -123,6 +131,7 @@ function successAttestation(overrides: Record<string, unknown> = {}) {
     id: attestationId,
     notionPageId: snapshot.notionPageId,
     contractRevision: 'operator-success-attestation/v1',
+    provenance: 'worker_ambiguous',
     batchId,
     manifestHash,
     itemId: batchItemId,
@@ -219,6 +228,10 @@ describe('local publish job PostgreSQL execution', () => {
         request_kind text NOT NULL,
         source_local_job_id uuid
       );
+      CREATE TABLE local_publish_job_success_attestations (
+        id uuid PRIMARY KEY,
+        provenance text NOT NULL
+      );
       CREATE TABLE local_publish_job_success_attestation_release_acks (
         success_attestation_id uuid PRIMARY KEY
       );
@@ -231,6 +244,7 @@ describe('local publish job PostgreSQL execution', () => {
     await database.exec(`
       TRUNCATE local_publish_jobs CASCADE;
       TRUNCATE manual_reconciliation_requests;
+      TRUNCATE local_publish_job_success_attestations;
       TRUNCATE local_publish_job_success_attestation_release_acks;
       TRUNCATE rednote_publish_batch_items;
       TRUNCATE rednote_publish_batches CASCADE;
