@@ -87,7 +87,7 @@ describe('external job disposition operator route', () => {
     });
   });
 
-  it.each(['staged', 'submitted', 'scheduled', 'publishing'])(
+  it.each(['staged', 'submitted', 'scheduled', 'publishing', 'Published'])(
     'rejects %s dispatch-shaped input before any store or publish operation',
     async (status) => {
       const response = await POST(request({ ...body, status }));

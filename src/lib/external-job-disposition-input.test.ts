@@ -19,11 +19,36 @@ describe('external job disposition input', () => {
     });
   });
 
+  it('accepts publicPost and strips all query and fragment data', () => {
+    expect(parseExternalJobDispositionInput({
+      confirmed: true,
+      notionPageId: input.notionPageId,
+      localJobId: input.localJobId,
+      publicPost: `${input.shareUrl}?xsec_token=secret&source=share#fragment`,
+    })).toEqual({
+      notionPageId: input.notionPageId,
+      localJobId: input.localJobId,
+      noteId: input.noteId,
+      shareUrl: input.shareUrl,
+    });
+  });
+
   it.each([
     [{ ...input, confirmed: false }, 'CONFIRMATION_REQUIRED'],
     [{ ...input, localJobId: 'job-1' }, 'VALIDATION_ERROR'],
-    [{ ...input, shareUrl: `${input.shareUrl}?xsec_token=secret` }, 'INVALID_REDNOTE_IDENTITY'],
     [{ ...input, shareUrl: 'https://www.rednote.com/explore/other' }, 'INVALID_REDNOTE_IDENTITY'],
+    [{
+      confirmed: true,
+      notionPageId: input.notionPageId,
+      localJobId: input.localJobId,
+      publicPost: 'https://example.com/explore/note_123',
+    }, 'INVALID_REDNOTE_IDENTITY'],
+    [{
+      confirmed: true,
+      notionPageId: input.notionPageId,
+      localJobId: input.localJobId,
+      publicPost: 'https://www.rednote.com/user/note_123',
+    }, 'INVALID_REDNOTE_IDENTITY'],
     [{ ...input, extra: true }, 'VALIDATION_ERROR'],
   ])('rejects unsafe input %#', (value, code) => {
     expect(() => parseExternalJobDispositionInput(value)).toThrow(

@@ -11,3 +11,7 @@ export function displayedLocalPublishJob(
   const matching = jobs.filter((job) => job.notionPageId === notionPageId);
   return matching.find(isActiveLocalPublishJob) ?? matching[0];
 }
+
+export function receiptPendingLocalPublishJobs(jobs: LocalPublishJobSummary[]) {
+  return jobs.filter((job) => job.status === 'operator_attested');
+}

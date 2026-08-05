@@ -123,6 +123,56 @@
   color: #166534;
 }
 
+.receiptReconciliation {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 18px;
+  padding: 16px;
+  color: #3b0764;
+  background: #faf5ff;
+  border: 1px solid #d8b4fe;
+  border-radius: 10px;
+}
+
+.receiptReconciliation h3,
+.receiptReconciliation p {
+  margin: 0;
+}
+
+.receiptReconciliation > div:first-child p {
+  max-width: 68ch;
+  margin-top: 4px;
+  color: #5b4b6b;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.receiptCandidate {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+  padding: 12px;
+  background: #fff;
+  border: 1px solid #e9d5ff;
+  border-radius: 8px;
+}
+
+.receiptCandidate small,
+.receiptCandidate code {
+  overflow-wrap: anywhere;
+}
+
+.receiptBlocker,
+.receiptProgress {
+  padding: 9px 10px;
+  color: #713f12;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 7px;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
 .recoveryBatch p {
   font-size: 0.8125rem;
   line-height: 1.5;

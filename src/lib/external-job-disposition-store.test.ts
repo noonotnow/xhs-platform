@@ -72,6 +72,7 @@ function job(overrides: Record<string, unknown> = {}) {
     completed_at: null,
     batch_item_id: batchItemId,
     external_disposition_request_id: null,
+    success_attestation_id: null,
     ...overrides,
   };
 }
@@ -124,12 +125,17 @@ function queueCreation(options: {
   requests?: unknown[];
   external?: unknown[];
   batch?: unknown[];
+  release?: unknown[];
 } = {}) {
   mocks.query
     .mockResolvedValueOnce(result())
     .mockResolvedValueOnce(result([options.targetJob ?? job()]))
     .mockResolvedValueOnce(result())
-    .mockResolvedValueOnce(result())
+    .mockResolvedValueOnce(result());
+  if (options.targetJob?.status === 'operator_attested') {
+    mocks.query.mockResolvedValueOnce(result(options.release ?? [{ released: 1 }]));
+  }
+  mocks.query
     .mockResolvedValueOnce(result(options.batch ?? [{
       id: batchItemId,
       notion_page_id: input.notionPageId,
@@ -232,6 +238,50 @@ describe('external job disposition persistence', () => {
       .rejects.toMatchObject({ code: 'DISPOSITION_ALREADY_DISPATCHED' });
   });
 
+  it('blocks operator-attested jobs until release ack and accepts exact released ownership', async () => {
+    const targetJob = job({
+      status: 'operator_attested',
+      staged_at: '2026-08-04T12:01:00.000Z',
+      dispatch_authorized_at: '2026-08-04T12:02:00.000Z',
+      success_attestation_id: '77777777-7777-4777-8777-777777777777',
+    });
+    queueCreation({
+      targetJob,
+      release: [],
+      batch: [{
+        id: batchItemId,
+        notion_page_id: input.notionPageId,
+        local_publish_job_id: input.localJobId,
+        state: 'operator_attested',
+      }],
+    });
+    await expect(insertExternalJobDisposition(input, idempotencyKey))
+      .rejects.toMatchObject({
+        code: 'DISPOSITION_RELEASE_REQUIRED',
+        status: 409,
+      });
+
+    vi.clearAllMocks();
+    mocks.query.mockReset();
+    mocks.connect.mockResolvedValue({ query: mocks.query, release: mocks.release });
+    queueCreation({
+      targetJob,
+      release: [{ released: 1 }],
+      batch: [{
+        id: batchItemId,
+        notion_page_id: input.notionPageId,
+        local_publish_job_id: input.localJobId,
+        state: 'operator_attested',
+      }],
+    });
+    mocks.query
+      .mockResolvedValueOnce(result([{ id: requestId }]))
+      .mockResolvedValueOnce(result([{ id: input.localJobId }], 1))
+      .mockResolvedValueOnce(result());
+    await expect(insertExternalJobDisposition(input, idempotencyKey))
+      .resolves.toMatchObject({ created: true });
+  });
+
   it.each([
     ['receipt', { receipts: [{
       notion_page_id: input.notionPageId,
@@ -309,6 +359,10 @@ describe('external job disposition persistence', () => {
       }]))
       .mockResolvedValueOnce(result([], 1))
       .mockResolvedValueOnce(result([{ id: batchItemId }], 1))
+      .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result([], 1))
       .mockResolvedValueOnce(result());
 
     await prepareExternalJobDisposition(requestId, claimToken, {
@@ -321,10 +375,53 @@ describe('external job disposition persistence', () => {
       text.includes("SET status = 'verified'"));
     const verifyBatch = queries.findIndex((text) =>
       text.includes("SET state = 'verified'"));
+    const receipt = queries.findIndex((text) =>
+      text.includes('INSERT INTO xhs_publish_receipts'));
     const commit = queries.findIndex((text) => text === 'COMMIT');
     expect(verifyJob).toBeGreaterThan(-1);
     expect(verifyBatch).toBeGreaterThan(verifyJob);
-    expect(commit).toBeGreaterThan(verifyBatch);
+    expect(receipt).toBeGreaterThan(verifyBatch);
+    expect(commit).toBeGreaterThan(receipt);
+  });
+
+  it('rechecks release ownership before verifying an operator-attested job', async () => {
+    mocks.load.mockResolvedValue(stored({ status: 'verifying' }));
+    mocks.query
+      .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result([{
+        request_kind: 'targeted_local_job',
+        source_local_job_id: input.localJobId,
+      }]))
+      .mockResolvedValueOnce(result([job({
+        status: 'operator_attested',
+        staged_at: '2026-08-04T12:01:00.000Z',
+        dispatch_authorized_at: '2026-08-04T12:02:00.000Z',
+        success_attestation_id: '77777777-7777-4777-8777-777777777777',
+        external_disposition_request_id: requestId,
+      })]))
+      .mockResolvedValueOnce(result([request()]))
+      .mockResolvedValueOnce(result([{ released: 1 }]))
+      .mockResolvedValueOnce(result([{
+        id: batchItemId,
+        notion_page_id: input.notionPageId,
+        local_publish_job_id: input.localJobId,
+        state: 'operator_attested',
+      }]))
+      .mockResolvedValueOnce(result([], 1))
+      .mockResolvedValueOnce(result([{ id: batchItemId }], 1))
+      .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result([], 1))
+      .mockResolvedValueOnce(result());
+
+    await expect(prepareExternalJobDisposition(requestId, claimToken, {
+      noteId: input.noteId,
+      shareUrl: input.shareUrl,
+      ...expected,
+    })).resolves.toMatchObject({ status: 'verifying' });
+    expect(mocks.query.mock.calls.some(([text]) =>
+      String(text).includes('success_attestation_release_acks'))).toBe(true);
   });
 
   it('atomically completes the verified job, batch item, and request', async () => {
@@ -352,6 +449,12 @@ describe('external job disposition persistence', () => {
         local_publish_job_id: input.localJobId,
         state: 'verified',
       }]))
+      .mockResolvedValueOnce(result([{
+        notion_page_id: input.notionPageId,
+        status: 'published',
+        note_id: input.noteId,
+        share_url: input.shareUrl,
+      }]))
       .mockResolvedValueOnce(result([], 1))
       .mockResolvedValueOnce(result([{ id: batchItemId }], 1))
       .mockResolvedValueOnce(result([{ id: requestId }], 1))
@@ -362,6 +465,39 @@ describe('external job disposition persistence', () => {
     expect(queries.some((text) => text.includes("SET status = 'reconciled'"))).toBe(true);
     expect(queries.some((text) => text.includes("SET state = 'reconciled'"))).toBe(true);
     expect(queries.at(-1)).toBe('COMMIT');
+  });
+
+  it('does not complete a verified job without its exact publish receipt', async () => {
+    mocks.query
+      .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result([{
+        request_kind: 'targeted_local_job',
+        source_local_job_id: input.localJobId,
+      }]))
+      .mockResolvedValueOnce(result([job({
+        status: 'verified',
+        note_id: input.noteId,
+        share_url: input.shareUrl,
+        verified_at: '2026-08-04T12:05:00.000Z',
+        external_disposition_request_id: requestId,
+      })]))
+      .mockResolvedValueOnce(result([request()]))
+      .mockResolvedValueOnce(result([{
+        id: batchItemId,
+        notion_page_id: input.notionPageId,
+        local_publish_job_id: input.localJobId,
+        state: 'verified',
+      }]))
+      .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result());
+
+    await expect(completeExternalJobDisposition(
+      requestId,
+      claimToken,
+      externalId,
+    )).rejects.toMatchObject({ code: 'DISPOSITION_RECEIPT_MISSING' });
+    expect(mocks.query.mock.calls.some(([text]) =>
+      String(text).includes("SET status = 'reconciled'"))).toBe(false);
   });
 
   it('requeues only the same safe or verified target after a failed attempt', async () => {
