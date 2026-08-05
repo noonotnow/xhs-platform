@@ -856,6 +856,26 @@ describe('Notion Posts mapping', () => {
 
   it('builds the exact confirmed-success backfill using existing property types', () => {
       const fixture = pageFixture();
+      fixture.properties['Publish packet ready'] = {
+        id: 'packet',
+        type: 'checkbox',
+        checkbox: false,
+      };
+      fixture.properties['Needs media'] = {
+        id: 'needs-media',
+        type: 'checkbox',
+        checkbox: true,
+      };
+      fixture.properties['Needs caption'] = {
+        id: 'needs-caption',
+        type: 'checkbox',
+        checkbox: true,
+      };
+      fixture.properties['Published At'] = {
+        id: 'published-at',
+        type: 'date',
+        date: null,
+      };
       const schemaProperties = Object.fromEntries(
         Object.entries(fixture.properties).map(([name, value]) => {
           if (name === 'Next action') {
@@ -886,17 +906,33 @@ describe('Notion Posts mapping', () => {
         {
           status: 'success',
           noteId: 'note-123',
-          shareUrl: 'https://www.xiaohongshu.com/explore/note-123',
+          shareUrl: 'https://www.xiaohongshu.com/explore/note-123?source=creator',
         },
         '2026-07-31T20:00:00.000Z',
       )).toEqual({
         Status: { status: { name: 'Published' } },
-        'Rednote URL': { url: 'https://www.xiaohongshu.com/explore/note-123' },
+        'Rednote URL': { url: 'https://www.rednote.com/explore/note-123' },
         'Rednote Note ID': {
           rich_text: [{ type: 'text', text: { content: 'note-123' } }],
         },
+        'Publish packet ready': { checkbox: true },
+        'Needs media': { checkbox: false },
+        'Needs caption': { checkbox: false },
+        'Published At': { date: { start: '2026-07-31T20:00:00.000Z' } },
         'Next action': { select: { name: 'Backfill URL/metrics' } },
       });
+      expect(buildPublishedProperties(
+        fixture,
+        resolved,
+        duplicateAliases,
+        schemaProperties,
+        {
+          status: 'success',
+          noteId: 'note-123',
+          shareUrl: 'https://www.rednote.com/explore/note-123',
+        },
+        '2026-07-31T20:00:00.000Z',
+      )).not.toHaveProperty('ScheduledDate');
   });
 
   it('recognizes an identical published result without rewriting published metadata', () => {
@@ -916,6 +952,15 @@ describe('Notion Posts mapping', () => {
           type: 'rich_text',
           rich_text: richText('note-123'),
         };
+        fixture.properties['Next action'] = {
+          id: 'next',
+          type: 'select',
+          select: {
+            id: 'backfill',
+            name: 'Backfill URL/metrics',
+            color: 'blue',
+          },
+        };
         const { resolved, duplicateAliases } = resolvePostsSchema(
           Object.fromEntries(
             Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
@@ -927,6 +972,41 @@ describe('Notion Posts mapping', () => {
           noteId: 'note-123',
           shareUrl: 'https://www.rednote.com/explore/note-123',
         })).toBe('match');
+        fixture.properties['Rednote URL'] = {
+          id: 'share',
+          type: 'url',
+          url: 'https://www.xiaohongshu.com/explore/note-123?source=legacy',
+        };
+        expect(publishedResultState(fixture, resolved, duplicateAliases, {
+          status: 'success',
+          noteId: 'note-123',
+          shareUrl: 'https://www.rednote.com/explore/note-123',
+        })).toBe('unpublished');
+        fixture.properties['Rednote URL'] = {
+          id: 'share',
+          type: 'url',
+          url: null,
+        };
+        fixture.properties['Rednote Note ID'] = {
+          id: 'note-id',
+          type: 'rich_text',
+          rich_text: [],
+        };
+        expect(publishedResultState(fixture, resolved, duplicateAliases, {
+          status: 'success',
+          noteId: 'note-123',
+          shareUrl: 'https://www.rednote.com/explore/note-123',
+        })).toBe('unpublished');
+        fixture.properties['Rednote URL'] = {
+          id: 'share',
+          type: 'url',
+          url: 'https://www.rednote.com/explore/note-123',
+        };
+        fixture.properties['Rednote Note ID'] = {
+          id: 'note-id',
+          type: 'rich_text',
+          rich_text: richText('note-123'),
+        };
         expect(publishedResultState(fixture, resolved, duplicateAliases, {
           status: 'success',
           noteId: 'different-note',
@@ -970,6 +1050,47 @@ describe('Notion Posts mapping', () => {
         select: { options: [{ name: 'Review packet' }] },
       },
     }, 'Next action')).toBeNull();
+  });
+
+  it('preserves No action when publication metrics are already reconciled', () => {
+    const fixture = pageFixture();
+    fixture.properties['Next action'] = {
+      id: 'next',
+      type: 'select',
+      select: { id: 'none', name: 'No action', color: 'gray' },
+    };
+    const schemaProperties = Object.fromEntries(
+      Object.entries(fixture.properties).map(([name, value]) => [
+        name,
+        name === 'Next action'
+          ? {
+              type: value.type,
+              select: {
+                options: [
+                  { name: 'Backfill URL/metrics' },
+                  { name: 'No action' },
+                ],
+              },
+            }
+          : { type: value.type },
+      ]),
+    );
+    const { resolved, duplicateAliases } = resolvePostsSchema(schemaProperties);
+
+    expect(buildPublishedProperties(
+      fixture,
+      resolved,
+      duplicateAliases,
+      schemaProperties,
+      {
+        status: 'success',
+        noteId: 'note-123',
+        shareUrl: 'https://www.rednote.com/explore/note-123',
+      },
+      '2026-07-31T20:00:00.000Z',
+    )).toMatchObject({
+      'Next action': { select: { name: 'No action' } },
+    });
   });
 
   it('accepts only canonical HTTPS MEDIA asset MP4 URLs', () => {

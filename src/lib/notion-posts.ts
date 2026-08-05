@@ -15,6 +15,10 @@ import type {
   UpdatePageParameters,
 } from '@notionhq/client/build/src/api-endpoints';
 import { isMovCompatibilityTrialEligible } from '@/lib/mov-compatibility-trial';
+import {
+  isRednoteNoteId,
+  normalizeRednoteShareUrl,
+} from '@/lib/rednote-publication';
 import type {
   PublishReadyPostResponse,
   ReadyPostCandidateKind,
@@ -725,37 +729,66 @@ export function buildPublishedProperties(
   result: PublishReadyPostResponse,
   publishedAt: string,
 ) {
+  const shareUrl = normalizeRednoteShareUrl(result.noteId, result.shareUrl);
+  if (!isRednoteNoteId(result.noteId) || !shareUrl) {
+    throw new NotionPostsError(
+      'The publication result does not contain a valid RedNote identity',
+      'INVALID_SUCCESS_RESULT',
+      400,
+    );
+  }
   const properties: PropertyUpdates = {};
   const statusName = assertWritable(schema, duplicates, 'status', true);
   const shareUrlName = assertWritable(schema, duplicates, 'xhsShareUrl', true);
   properties[statusName!] = textUpdate(page.properties[statusName!].type, 'Published');
-  properties[shareUrlName!] = textUpdate(page.properties[shareUrlName!].type, result.shareUrl);
+  properties[shareUrlName!] = textUpdate(page.properties[shareUrlName!].type, shareUrl);
 
-  const noteIdName = duplicates.xhsNoteId
-    ? null
-    : assertWritable(schema, duplicates, 'xhsNoteId', false);
-  if (noteIdName) {
-    properties[noteIdName] = textUpdate(page.properties[noteIdName].type, result.noteId);
+  const noteIdName = assertWritable(schema, duplicates, 'xhsNoteId', true);
+  properties[noteIdName] = textUpdate(page.properties[noteIdName].type, result.noteId);
+  for (const [key, value] of [
+    ['publishPacketReady', true],
+    ['needsMedia', false],
+    ['needsCaption', false],
+  ] as const) {
+    const name = assertWritable(schema, duplicates, key, true);
+    properties[name] = checkboxUpdate(page.properties[name].type, value);
   }
-  const publishedAtName = duplicates.publishedAt
-    ? null
-    : assertWritable(schema, duplicates, 'publishedAt', false);
-  if (publishedAtName) {
+  const publishedAtName = assertWritable(
+    schema,
+    duplicates,
+    'publishedAt',
+    false,
+  );
+  if (
+    publishedAtName &&
+    !(date(page.properties[publishedAtName]) || plainText(page.properties[publishedAtName])).trim()
+  ) {
     const type = page.properties[publishedAtName].type;
     properties[publishedAtName] = type === 'date'
       ? { date: { start: publishedAt } }
       : textUpdate(type, publishedAt);
   }
-  if (!duplicates.nextAction) {
-    const nextActionName = schema.nextAction;
-    const nextAction = publishedNextAction(schemaProperties, nextActionName);
-    if (nextActionName && nextAction) {
-      properties[nextActionName] = textUpdate(
-        page.properties[nextActionName].type,
-        nextAction,
-      );
-    }
+  const nextActionName = assertWritable(
+    schema,
+    duplicates,
+    'nextAction',
+    true,
+  );
+  const currentNextAction = plainText(page.properties[nextActionName]);
+  const nextAction = normalized(currentNextAction) === 'no action'
+    ? currentNextAction
+    : publishedNextAction(schemaProperties, nextActionName);
+  if (!nextAction) {
+    throw new NotionPostsError(
+      'Next action has no Backfill URL/metrics or No action option',
+      'NOTION_SCHEMA_ERROR',
+      503,
+    );
   }
+  properties[nextActionName] = textUpdate(
+    page.properties[nextActionName].type,
+    nextAction,
+  );
   return properties;
 }
 
@@ -765,19 +798,50 @@ export function publishedResultState(
   duplicates: Partial<Record<CanonicalProperty, string[]>>,
   result: PublishReadyPostResponse,
 ) {
+  const shareUrl = normalizeRednoteShareUrl(result.noteId, result.shareUrl);
+  if (!shareUrl) return 'conflict' as const;
   const status = normalized(plainText(property(page, schema, 'status')));
   if (status !== 'published') return 'unpublished' as const;
 
-  const shareUrlMatches = plainText(property(page, schema, 'xhsShareUrl')) === result.shareUrl;
+  const storedShareUrl = plainText(property(page, schema, 'xhsShareUrl'));
+  const normalizedStoredShareUrl = normalizeRednoteShareUrl(
+    result.noteId,
+    storedShareUrl,
+  );
   const noteIdName = duplicates.xhsNoteId ? null : schema.xhsNoteId;
-  const noteIdMatches = !noteIdName ||
-    plainText(page.properties[noteIdName]).trim() === result.noteId;
-  return shareUrlMatches && noteIdMatches ? 'match' as const : 'conflict' as const;
+  const storedNoteId = noteIdName
+    ? plainText(page.properties[noteIdName]).trim()
+    : '';
+  if (
+    (storedShareUrl && normalizedStoredShareUrl !== shareUrl) ||
+    (storedNoteId && storedNoteId !== result.noteId)
+  ) {
+    return 'conflict' as const;
+  }
+  if (!storedShareUrl || !storedNoteId) return 'unpublished' as const;
+
+  const flagsMatch =
+    checkbox(property(page, schema, 'publishPacketReady')) &&
+    !checkbox(property(page, schema, 'needsMedia')) &&
+    !checkbox(property(page, schema, 'needsCaption'));
+  const publishedAtMatches = !schema.publishedAt ||
+    Boolean(
+      date(property(page, schema, 'publishedAt')) ||
+      plainText(property(page, schema, 'publishedAt')).trim(),
+    );
+  const nextAction = normalized(plainText(property(page, schema, 'nextAction')));
+  const nextActionMatches = Boolean(schema.nextAction) &&
+    (nextAction === 'backfill url/metrics' || nextAction === 'no action');
+  const canonicalUrlMatches = storedShareUrl === shareUrl;
+  return canonicalUrlMatches && flagsMatch && publishedAtMatches && nextActionMatches
+    ? 'match' as const
+    : 'unpublished' as const;
 }
 
 export async function markXhsPostPublished(
   pageId: string,
   result: PublishReadyPostResponse,
+  publishedAt = new Date().toISOString(),
 ) {
   assertPageId(pageId);
   const client = getClient();
@@ -809,7 +873,7 @@ export async function markXhsPostPublished(
     duplicateAliases,
     schemaProperties,
     result,
-    new Date().toISOString(),
+    publishedAt,
   );
 
   await client.pages.update({ page_id: pageId, properties });

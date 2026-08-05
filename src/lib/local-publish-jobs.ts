@@ -23,6 +23,10 @@ import {
   stageStoredLocalPublishJob,
   type StoredLocalPublishJob,
 } from '@/lib/local-publish-job-store';
+import {
+  isRednoteNoteId,
+  normalizeRednoteShareUrl,
+} from '@/lib/rednote-publication';
 import type { PublishReadyPostResponse, ReadyXhsPost } from '@/types/ready-post';
 import type { LocalPublishWorkLane } from '@/types/local-publish-job';
 import {
@@ -50,7 +54,11 @@ interface ResultDependencies {
   fail: typeof failStoredLocalPublishJob;
   prepareVerification: typeof prepareStoredLocalPublishVerification;
   completeReconciliation: typeof completeStoredLocalPublishReconciliation;
-  backfill: (pageId: string, result: PublishReadyPostResponse) => Promise<void>;
+  backfill: (
+    pageId: string,
+    result: PublishReadyPostResponse,
+    publishedAt?: string,
+  ) => Promise<void>;
 }
 
 const queueDependencies: QueueDependencies = {
@@ -138,18 +146,18 @@ function cleanCode(value: unknown) {
 
 function publicationIdentifiers(body: Record<string, unknown>) {
   const noteId = cleanResultText(body.noteId, 'noteId', 128);
-  if (!/^[A-Za-z0-9_-]+$/.test(noteId)) {
+  if (!isRednoteNoteId(noteId)) {
     throw new LocalPublishJobError(
       'noteId contains unsupported characters',
       'INVALID_SUCCESS_RESULT',
       400,
     );
   }
-  const shareUrl = cleanResultText(body.shareUrl, 'shareUrl', 500);
-  const expectedUrl = `https://www.rednote.com/explore/${noteId}`;
-  if (shareUrl !== expectedUrl) {
+  const suppliedShareUrl = cleanResultText(body.shareUrl, 'shareUrl', 500);
+  const shareUrl = normalizeRednoteShareUrl(noteId, suppliedShareUrl);
+  if (!shareUrl) {
     throw new LocalPublishJobError(
-      'shareUrl must exactly match the query-free RedNote explore URL for noteId',
+      'shareUrl must match the RedNote explore URL for noteId',
       'INVALID_SUCCESS_RESULT',
       400,
     );
@@ -166,9 +174,15 @@ export function parseLocalPublishWorkerResult(value: unknown): LocalPublishWorke
     assertExactKeys(body, ['status']);
     return { status: 'staged' };
   }
-  if (body.status === 'submitted' || body.status === 'scheduled') {
+  if (
+    body.status === 'submitted' ||
+    body.status === 'scheduled'
+  ) {
     assertExactKeys(body, ['noteId', 'shareUrl', 'status']);
-    return { status: body.status, ...publicationIdentifiers(body) };
+    return {
+      status: body.status,
+      ...publicationIdentifiers(body),
+    };
   }
   if (body.status === 'verification_pending') {
     assertExactKeys(body, ['code', 'message', 'noteId', 'shareUrl', 'status']);
@@ -179,7 +193,11 @@ export function parseLocalPublishWorkerResult(value: unknown): LocalPublishWorke
       message: cleanFailureMessage(body.message),
     };
   }
-  if (body.status === 'verified' || body.status === 'succeeded') {
+  if (
+    body.status === 'published' ||
+    body.status === 'verified' ||
+    body.status === 'succeeded'
+  ) {
     assertExactKeys(body, ['noteId', 'shareUrl', 'status']);
     return { status: 'verified', ...publicationIdentifiers(body) };
   }
@@ -192,7 +210,7 @@ export function parseLocalPublishWorkerResult(value: unknown): LocalPublishWorke
     };
   }
   throw new LocalPublishJobError(
-    'status must be staged, submitted, scheduled, verification_pending, verified, or failed',
+    'status must be staged, submitted, scheduled, verification_pending, published, verified, or failed',
     'VALIDATION_ERROR',
     400,
   );
@@ -347,18 +365,21 @@ export async function submitLocalPublishJobResult(
   dependencies: ResultDependencies = resultDependencies,
 ) {
   const result = parseLocalPublishWorkerResult(rawResult);
+  let publishedAt: string | undefined;
   if (result.status === 'staged') {
     return jobSummary(await dependencies.stage(id, claimToken));
   }
   if (result.status === 'submitted' || result.status === 'scheduled') {
-    return jobSummary(await dependencies.recordDispatch(
+    const dispatched = await dependencies.recordDispatch(
       id,
       claimToken,
       result.status,
       result.noteId,
       result.shareUrl,
       verificationBackoffSeconds()[0],
-    ));
+    );
+    if (dispatched.status !== 'submitted') return jobSummary(dispatched);
+    publishedAt = dispatched.dispatchedAt;
   }
   if (result.status === 'verification_pending') {
     return jobSummary(await dependencies.deferVerification(
@@ -380,20 +401,24 @@ export async function submitLocalPublishJobResult(
     ));
   }
 
+  const publicationResult = result as Extract<
+    LocalPublishWorkerResult,
+    { status: 'submitted' | 'verified' }
+  >;
   const prepared = await dependencies.prepareVerification(
     id,
     claimToken,
-    result.noteId,
-    result.shareUrl,
+    publicationResult.noteId,
+    publicationResult.shareUrl,
   );
   if (prepared.status === 'reconciled') return jobSummary(prepared);
 
   try {
     await dependencies.backfill(prepared.notionPageId, {
       status: 'success',
-      noteId: result.noteId,
-      shareUrl: result.shareUrl,
-    });
+      noteId: publicationResult.noteId,
+      shareUrl: publicationResult.shareUrl,
+    }, publishedAt ?? prepared.verifiedAt);
   } catch (error) {
     console.error('Verified local publish result could not be backfilled to Notion', {
       jobId: id,
@@ -409,8 +434,8 @@ export async function submitLocalPublishJobResult(
   return jobSummary(await dependencies.completeReconciliation(
     id,
     claimToken,
-    result.noteId,
-    result.shareUrl,
+    publicationResult.noteId,
+    publicationResult.shareUrl,
   ));
 }
 
