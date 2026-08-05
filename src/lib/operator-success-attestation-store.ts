@@ -86,7 +86,7 @@ function timestamp(value: Date | string) {
 }
 
 export function expectedScheduledOutcome(publishAt: string) {
-  const formatted = new Intl.DateTimeFormat('en-US', {
+  const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: OPERATOR_SUCCESS_ATTESTATION_TIME_ZONE,
     month: 'long',
     day: 'numeric',
@@ -94,7 +94,15 @@ export function expectedScheduledOutcome(publishAt: string) {
     hour: 'numeric',
     minute: '2-digit',
     hour12: true,
-  }).format(new Date(publishAt));
+  }).formatToParts(new Date(publishAt));
+  const part = (type: Intl.DateTimeFormatPartTypes) => {
+    const value = parts.find((candidate) => candidate.type === type)?.value;
+    if (!value) throw new Error(`Scheduled outcome is missing ${type}`);
+    return value;
+  };
+  const formatted =
+    `${part('month')} ${part('day')}, ${part('year')} at ` +
+    `${part('hour')}:${part('minute')} ${part('dayPeriod').toUpperCase()}`;
   return {
     kind: 'scheduled' as const,
     publishAt,
@@ -675,10 +683,19 @@ export async function listOperatorSuccessAttestationEvidence() {
     ORDER BY job.created_at DESC
     LIMIT 20
   `;
-  return result.rows.map((row) => {
-    const candidate = evidence(row);
-    validateOperatorSuccessCandidate(row, candidate);
-    return candidate;
+  return result.rows.flatMap((row) => {
+    try {
+      const candidate = evidence(row);
+      validateOperatorSuccessCandidate(row, candidate);
+      return [candidate];
+    } catch (error) {
+      console.warn('Ignoring invalid operator success attestation candidate', {
+        jobId: row.job_id,
+        itemId: row.item_id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return [];
+    }
   });
 }
 

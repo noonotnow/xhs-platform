@@ -17,6 +17,7 @@ import {
   acknowledgeOperatorSuccessAttestationRelease,
   insertOperatorSuccessAttestation,
   expectedScheduledOutcome,
+  listOperatorSuccessAttestationEvidence,
   type OperatorSuccessAttestationRow,
   validateExactOperatorSuccessAttestationReplay,
   validateOperatorSuccessCandidate,
@@ -108,6 +109,25 @@ describe('operator success attestation store', () => {
     expect(claimTokenDigest('abc')).toBe(
       'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
     );
+  });
+
+  it('skips an invalid candidate without hiding valid admin actions', async () => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    mocks.sql.mockResolvedValue({
+      rows: [
+        candidate({ job_snapshot: { ...snapshot, publishAt: undefined } }),
+        candidate(),
+      ],
+    });
+
+    const evidence = await listOperatorSuccessAttestationEvidence();
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0]).toMatchObject(input);
+    expect(warning).toHaveBeenCalledWith(
+      'Ignoring invalid operator success attestation candidate',
+      expect.objectContaining({ jobId: input.jobId, itemId: input.itemId }),
+    );
+    warning.mockRestore();
   });
 
   it('requires exact schedule and rejects definitive failures', () => {
