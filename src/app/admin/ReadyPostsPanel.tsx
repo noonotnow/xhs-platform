@@ -64,7 +64,7 @@ function manualPublicPostError(value: string) {
     if (
       url.protocol !== 'https:' ||
       !['www.rednote.com', 'www.xiaohongshu.com'].includes(url.hostname) ||
-      !/^\/explore\/[A-Za-z0-9_-]{1,128}$/.test(url.pathname)
+      !/^\/explore\/[A-Za-z0-9_-]{1,128}\/?$/.test(url.pathname)
     ) {
       return 'Use a public https://www.rednote.com/explore/NOTE_ID URL or bare note ID.';
     }
