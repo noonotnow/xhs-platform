@@ -14,6 +14,10 @@ import type {
   QueryDatabaseResponse,
   UpdatePageParameters,
 } from '@notionhq/client/build/src/api-endpoints';
+import {
+  canonicalEditorialInstant,
+  compareReadyPostsBySchedule,
+} from '@/lib/editorial-schedule';
 import { isMovCompatibilityTrialEligible } from '@/lib/mov-compatibility-trial';
 import {
   isRednoteNoteId,
@@ -188,41 +192,8 @@ function date(value: PageProperty | undefined): string {
   return value?.type === 'date' ? value.date?.start ?? '' : '';
 }
 
-const ISO_DATETIME_WITH_TIMEZONE =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|([+-])(\d{2}):(\d{2}))$/;
-
 export function canonicalPublishAt(value: string) {
-  const candidate = value.trim();
-  const parts = candidate.match(ISO_DATETIME_WITH_TIMEZONE);
-  if (!parts) return undefined;
-  const [, yearText, monthText, dayText, hourText, minuteText, secondText, , offsetHourText, offsetMinuteText] =
-    parts;
-  const year = Number(yearText);
-  const month = Number(monthText);
-  const day = Number(dayText);
-  const hour = Number(hourText);
-  const minute = Number(minuteText);
-  const second = Number(secondText ?? '0');
-  const offsetHour = Number(offsetHourText ?? '0');
-  const offsetMinute = Number(offsetMinuteText ?? '0');
-  const daysInMonth = month >= 1 && month <= 12
-    ? new Date(Date.UTC(year, month, 0)).getUTCDate()
-    : 0;
-  if (
-    year < 1 ||
-    day < 1 ||
-    day > daysInMonth ||
-    hour > 23 ||
-    minute > 59 ||
-    second > 59 ||
-    offsetHour > 14 ||
-    offsetMinute > 59 ||
-    (offsetHour === 14 && offsetMinute !== 0)
-  ) {
-    return undefined;
-  }
-  const timestamp = new Date(candidate);
-  return Number.isNaN(timestamp.getTime()) ? undefined : timestamp.toISOString();
+  return canonicalEditorialInstant(value);
 }
 
 export function extractLegacyTrailingHashtags(caption: string) {
@@ -358,6 +329,7 @@ export function mapReadyXhsPost(
     thumbnailUrl: urls(property(page, schema, 'thumbnail'))[0] ?? '',
     tags,
     tagsSource,
+    scheduledDate: scheduledDate || null,
     ...(publishAt ? { publishAt } : {}),
     lastEditedTime: page.last_edited_time,
     publishBlockers: mappedBlockers(
@@ -625,7 +597,7 @@ export async function listReadyXhsPosts(
       includePublishedCandidates,
     );
     return post ? [post] : [];
-  });
+  }).sort(compareReadyPostsBySchedule);
   return { posts, warnings };
 }
 

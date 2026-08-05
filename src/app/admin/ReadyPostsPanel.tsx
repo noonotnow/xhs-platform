@@ -15,6 +15,10 @@ import type { ReadyXhsPost, ReadyXhsPostsResponse } from '@/types/ready-post';
 import styles from './ReadyPostsPanel.module.css';
 import { responseJson } from '@/lib/response-json';
 import {
+  getEditorialScheduleDisplay,
+  type EditorialScheduleStatus,
+} from '@/lib/editorial-schedule';
+import {
   copyHandoffText,
   formatTags,
   getCanonicalVideoUrl,
@@ -84,6 +88,15 @@ type CopyStatus = {
   message: string;
 };
 
+function scheduleStatusClass(status: EditorialScheduleStatus) {
+  return {
+    overdue: styles.scheduleOverdue,
+    due: styles.scheduleDue,
+    upcoming: styles.scheduleUpcoming,
+    unscheduled: styles.scheduleUnscheduled,
+  }[status];
+}
+
 type MediaChoice = {
   type: LocalPublishMediaType;
   index: number;
@@ -99,26 +112,26 @@ function tagsFromInput(value: string) {
 }
 
 function publishTiming(post: ReadyXhsPost) {
+  const schedule = getEditorialScheduleDisplay(post.scheduledDate);
   if (post.publishBlockers.includes(
     'ScheduledDate must include a valid publish time and timezone',
   )) {
     return {
       label: 'Invalid ScheduledDate',
-      detail: 'Set an exact publish time with timezone in Notion before queueing.',
+      detail: 'Set an exact publish time with timezone in Notion before queueing. The editorial display remains advisory.',
     };
   }
   if (!post.publishAt) {
     return {
-      label: 'Needs publish time',
-      detail: 'Set an exact ScheduledDate instant with timezone before batch approval.',
+      label: schedule.statusLabel,
+      detail: schedule.china
+        ? `${schedule.et} · ${schedule.china}`
+        : `${schedule.et}. Set an exact instant with timezone before batch approval.`,
     };
   }
   return {
-    label: new Intl.DateTimeFormat(undefined, {
-      dateStyle: 'medium',
-      timeStyle: 'long',
-    }).format(new Date(post.publishAt)),
-    detail: post.publishAt,
+    label: schedule.statusLabel,
+    detail: `${schedule.et} · ${schedule.china}`,
   };
 }
 
@@ -363,6 +376,9 @@ export default function ReadyPostsPanel() {
   const missingTags = getMissingTags(reviewedTags, finalCaption);
   const showTitleCopy = shouldOfferTitleCopy(finalTitle, finalCaption);
   const timing = selected ? publishTiming(selected) : null;
+  const selectedSchedule = selected
+    ? getEditorialScheduleDisplay(selected.scheduledDate)
+    : null;
   selectedPostIdRef.current = selected?.id;
 
   const loadPosts = useCallback(async () => {
@@ -742,6 +758,7 @@ export default function ReadyPostsPanel() {
     const trustedAssetCount = post.videoUrls.length +
       (post.compatibilityTrialVideoUrls?.length ?? 0) +
       post.imageUrls.length;
+    const schedule = getEditorialScheduleDisplay(post.scheduledDate);
     return (
       <button
         className={`${styles.postButton} ${
@@ -767,6 +784,17 @@ export default function ReadyPostsPanel() {
                     ? 'Needs batch approval'
                     : 'Not ready'
                   : 'Needs publish time'}
+        </span>
+        <span className={styles.scheduleRow}>
+          <span
+            className={`${styles.scheduleBadge} ${scheduleStatusClass(schedule.status)}`}
+          >
+            {schedule.statusLabel}
+          </span>
+          <span className={styles.scheduleTimes}>
+            <span>{schedule.et}</span>
+            {schedule.china && <span>{schedule.china}</span>}
+          </span>
         </span>
         <span className={styles.postMeta}>
           {job ? `Local job: ${job.status}` : post.status || 'No status'} ·{' '}
@@ -1014,6 +1042,27 @@ export default function ReadyPostsPanel() {
                 </span>
               </div>
               <p className={styles.muted}>Notion status: {selected.status || 'Not set'}</p>
+              {selectedSchedule && (
+                <div className={styles.scheduleSummary}>
+                  <div className={styles.scheduleSummaryHeading}>
+                    <strong>Editorial schedule</strong>
+                    <span
+                      className={`${styles.scheduleBadge} ${
+                        scheduleStatusClass(selectedSchedule.status)
+                      }`}
+                    >
+                      {selectedSchedule.statusLabel}
+                    </span>
+                  </div>
+                  <p>
+                    {selectedSchedule.et}
+                    {selectedSchedule.china && ` · ${selectedSchedule.china}`}
+                  </p>
+                  <p className={styles.scheduleAdvisory}>
+                    Advisory display only. Operator review and approval remain authoritative.
+                  </p>
+                </div>
+              )}
 
               {selectedMedia?.type === 'video' && (
                 <video

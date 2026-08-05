@@ -621,9 +621,26 @@ describe('Notion Posts mapping', () => {
       ],
       tags: ['BTS', 'BehindTheScenes'],
       tagsSource: 'final-tags',
+      scheduledDate: '2026-08-04T09:30:00-04:00',
       publishAt: '2026-08-04T13:30:00.000Z',
       publishBlockers: [],
     });
+  });
+
+  it('preserves a legacy date-only ScheduledDate without inventing a time', () => {
+    const fixture = pageFixture();
+    fixture.properties.ScheduledDate = {
+      id: 'scheduled-date',
+      type: 'date',
+      date: { start: '2026-08-04', end: null, time_zone: null },
+    };
+    const { resolved, duplicateAliases } = resolvePostsSchema(
+      Object.fromEntries(
+        Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
+      ),
+    );
+
+    expect(mapReadyXhsPost(fixture, resolved, duplicateAliases).scheduledDate).toBe('2026-08-04');
   });
 
   it('prefers Caption over temporary legacy aliases', () => {

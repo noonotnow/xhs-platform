@@ -287,10 +287,89 @@
   color: #92400e;
 }
 
+.scheduleRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 4px 0 6px;
+}
+
+.scheduleTimes {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+  color: #475569;
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
+.scheduleBadge {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-height: 21px;
+  padding: 2px 6px;
+  border: 1px solid;
+  border-radius: 999px;
+  font-size: 0.6875rem;
+  font-weight: 700;
+}
+
+.scheduleOverdue {
+  color: #9f1239;
+  background: #fff1f2;
+  border-color: #fecdd3;
+}
+
+.scheduleDue {
+  color: #92400e;
+  background: #fffbeb;
+  border-color: #fde68a;
+}
+
+.scheduleUpcoming {
+  color: #1e40af;
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+
+.scheduleUnscheduled {
+  color: #475569;
+  background: #f8fafc;
+  border-color: #cbd5e1;
+}
+
 .detail {
   min-width: 0;
   padding-left: 16px;
   border-left: 1px solid #e2e8f0;
+}
+
+.scheduleSummary {
+  margin: 10px 0 14px;
+  padding: 11px 12px;
+  color: #334155;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.scheduleSummaryHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.scheduleSummary p {
+  margin: 5px 0 0;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+.scheduleSummary .scheduleAdvisory {
+  color: #64748b;
 }
 
 .detailTitle {
