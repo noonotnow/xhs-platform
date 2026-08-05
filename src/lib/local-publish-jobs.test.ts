@@ -63,6 +63,7 @@ function readyPost(): ReadyXhsPost {
     thumbnailUrl: '',
     tags: snapshot.tags,
     publishAt: snapshot.publishAt,
+    scheduledDate: null,
     lastEditedTime: snapshot.notionLastEditedTime,
     publishBlockers: [],
   };

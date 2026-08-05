@@ -23,6 +23,7 @@ function readyPost(overrides: Partial<ReadyXhsPost> = {}): ReadyXhsPost {
     thumbnailUrl: 'https://images.xhs.justlikekatie.com/uploads/thumb.jpg',
     tags: ['Notion'],
     publishAt: '2026-08-04T13:30:00.000Z',
+    scheduledDate: null,
     lastEditedTime: '2026-08-01T12:00:00.000Z',
     publishBlockers: [],
     ...overrides,
