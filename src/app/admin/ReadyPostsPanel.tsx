@@ -19,6 +19,7 @@ import {
   getEditorialScheduleDisplay,
   type EditorialScheduleStatus,
 } from '@/lib/editorial-schedule';
+import { normalizeRednotePublicIdentity } from '@/lib/rednote-publication';
 import {
   copyHandoffText,
   formatTags,
@@ -58,20 +59,9 @@ interface PublishJobRecoveryResponse extends ApiError {
 function manualPublicPostError(value: string) {
   const candidate = value.trim();
   if (!candidate) return '';
-  if (/^[A-Za-z0-9_-]{1,128}$/.test(candidate)) return '';
-  try {
-    const url = new URL(candidate);
-    if (
-      url.protocol !== 'https:' ||
-      !['www.rednote.com', 'www.xiaohongshu.com'].includes(url.hostname) ||
-      !/^\/explore\/[A-Za-z0-9_-]{1,128}\/?$/.test(url.pathname)
-    ) {
-      return 'Use a public https://www.rednote.com/explore/NOTE_ID URL or bare note ID.';
-    }
-  } catch {
-    return 'Use a public https://www.rednote.com/explore/NOTE_ID URL or bare note ID.';
-  }
-  return '';
+  return normalizeRednotePublicIdentity(candidate)
+    ? ''
+    : 'Use a public https://www.rednote.com/explore/NOTE_ID URL or bare note ID.';
 }
 
 interface LocalJobResponse extends ApiError {
