@@ -5,9 +5,14 @@ let pool: Pool | null = null;
 export function getPool() {
   if (pool) return pool;
 
-  const connectionString = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+  const connectionString = process.env.XHS_DATABASE_URL
+    || process.env.XHS_DATABASE_POSTGRES_URL
+    || process.env.DATABASE_URL
+    || process.env.POSTGRES_URL;
   if (!connectionString) {
-    throw new Error('DATABASE_URL or POSTGRES_URL is not configured');
+    throw new Error(
+      'XHS_DATABASE_URL, XHS_DATABASE_POSTGRES_URL, DATABASE_URL, or POSTGRES_URL is not configured',
+    );
   }
   pool = new Pool({
     connectionString,

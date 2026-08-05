@@ -57,7 +57,16 @@ describe('editorial schedule display', () => {
   });
 
   it('treats missing, invalid, and offset-free datetimes as unscheduled', () => {
-    for (const value of [null, '', 'not-a-date', '2026-02-30', '2026-08-01T15:30:00']) {
+    for (const value of [
+      null,
+      '',
+      'not-a-date',
+      '2026-02-30',
+      '2026-08-01T15:30:00',
+      '2026-02-30T09:30:00-04:00',
+      '2026-08-04T24:00:00-04:00',
+      '2026-08-04T09:30:00+14:30',
+    ]) {
       expect(parseEditorialSchedule(value)).toEqual({ kind: 'unscheduled' });
       expect(getEditorialScheduleDisplay(value).status).toBe('unscheduled');
     }

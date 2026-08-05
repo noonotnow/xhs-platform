@@ -1,4 +1,9 @@
-export interface ReadyXhsPost {
+export type ReadyPostCandidateKind =
+  | 'packet_ready'
+  | 'mov_compatibility_trial'
+  | 'active_unpublished';
+
+export interface XhsPost {
   id: string;
   pageUrl: string;
   headline: string;
@@ -11,11 +16,18 @@ export interface ReadyXhsPost {
   mediaUrls: string[];
   imageUrls: string[];
   videoUrls: string[];
+  compatibilityTrialVideoUrls?: string[];
   thumbnailUrl: string;
   tags: string[];
+  tagsSource?: 'final-tags' | 'legacy-caption' | 'none';
   scheduledDate: string | null;
+  publishAt?: string;
   lastEditedTime: string;
   publishBlockers: string[];
+}
+
+export interface ReadyXhsPost extends XhsPost {
+  candidateKind: ReadyPostCandidateKind;
 }
 
 export interface ReadyXhsPostsResponse {

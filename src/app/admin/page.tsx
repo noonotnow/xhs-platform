@@ -3,7 +3,11 @@
 import { useState, useRef, useCallback } from 'react';
 import ReadyPostsPanel from './ReadyPostsPanel';
 import { responseJson } from '@/lib/response-json';
-import { CREATOR_QR_UNAVAILABLE_DETAIL } from '@/lib/xhs-creator-login';
+import {
+  CREATOR_COOKIE_COPY_VALUE_INSTRUCTION,
+  CREATOR_COOKIE_COPY_WARNING,
+  CREATOR_QR_UNAVAILABLE_DETAIL,
+} from '@/lib/xhs-creator-login';
 import {
   creatorCookieFailureMessage,
   creatorSessionStatusPresentation,
@@ -411,15 +415,16 @@ export default function AdminPage() {
           <a href="https://creator.rednote.com/login" target="_blank" rel="noreferrer">
             creator.rednote.com/login
           </a>
-          . In DevTools Network, select a fresh authenticated creator/webapi request
-          and copy only Request Headers → Cookie in{' '}
-          <code>name=value; name=value</code> format.
+          . {CREATOR_COOKIE_COPY_VALUE_INSTRUCTION}
+        </p>
+        <p style={{ fontSize: 13, color: '#7a2e0b', marginTop: 0, marginBottom: 8 }}>
+          <strong>{CREATOR_COOKIE_COPY_WARNING}</strong>
         </p>
         <textarea
-          aria-label="Fresh authenticated Request Headers Cookie value"
+          aria-label="Cookie request-header value copied from a newly authenticated request"
           autoComplete="off"
           spellCheck={false}
-          placeholder="name=value; name=value"
+          placeholder="Paste the copied cookie request-header value"
           value={cookieStr}
           onChange={e => setCookieStr(e.target.value)}
           style={{ width: '100%', padding: 8, marginBottom: 8, minHeight: 60, fontSize: 12 }}
@@ -437,7 +442,7 @@ export default function AdminPage() {
         </p>
       </section>
 
-      <ReadyPostsPanel sessionValid={sessionValid} />
+      <ReadyPostsPanel />
 
       {/* Publish */}
       <section style={{ marginBottom: 24, padding: 20, background: '#fff', borderRadius: 12, border: '1px solid #e0e0e0' }}>

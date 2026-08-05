@@ -2,7 +2,8 @@ const OPERATOR_TIME_ZONE = 'America/New_York';
 const CHINA_TIME_ZONE = 'Asia/Shanghai';
 const DUE_WINDOW_MS = 30 * 60 * 1000;
 const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-const OFFSET_DATETIME_PATTERN = /T.*(?:Z|[+-]\d{2}:\d{2})$/i;
+const ISO_DATETIME_WITH_TIMEZONE =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|([+-])(\d{2}):(\d{2}))$/;
 
 export type EditorialScheduleStatus = 'overdue' | 'due' | 'upcoming' | 'unscheduled';
 
@@ -37,10 +38,55 @@ export function parseEditorialSchedule(value: string | null | undefined): Parsed
   const normalized = value?.trim();
   if (!normalized) return { kind: 'unscheduled' };
   if (isValidDateOnly(normalized)) return { kind: 'date', date: normalized };
-  if (!OFFSET_DATETIME_PATTERN.test(normalized)) return { kind: 'unscheduled' };
 
-  const instantMs = Date.parse(normalized);
-  return Number.isNaN(instantMs) ? { kind: 'unscheduled' } : { kind: 'instant', instantMs };
+  const canonicalInstant = canonicalEditorialInstant(normalized);
+  return canonicalInstant
+    ? { kind: 'instant', instantMs: Date.parse(canonicalInstant) }
+    : { kind: 'unscheduled' };
+}
+
+export function canonicalEditorialInstant(value: string) {
+  const candidate = value.trim();
+  const parts = candidate.match(ISO_DATETIME_WITH_TIMEZONE);
+  if (!parts) return undefined;
+  const [
+    ,
+    yearText,
+    monthText,
+    dayText,
+    hourText,
+    minuteText,
+    secondText,
+    ,
+    offsetHourText,
+    offsetMinuteText,
+  ] = parts;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText ?? '0');
+  const offsetHour = Number(offsetHourText ?? '0');
+  const offsetMinute = Number(offsetMinuteText ?? '0');
+  const daysInMonth = month >= 1 && month <= 12
+    ? new Date(Date.UTC(year, month, 0)).getUTCDate()
+    : 0;
+  if (
+    year < 1 ||
+    day < 1 ||
+    day > daysInMonth ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 59 ||
+    offsetHour > 14 ||
+    offsetMinute > 59 ||
+    (offsetHour === 14 && offsetMinute !== 0)
+  ) {
+    return undefined;
+  }
+  const timestamp = new Date(candidate);
+  return Number.isNaN(timestamp.getTime()) ? undefined : timestamp.toISOString();
 }
 
 function formatDateOnly(value: string) {
