@@ -20,6 +20,7 @@ export interface XhsPost {
   thumbnailUrl: string;
   tags: string[];
   tagsSource?: 'final-tags' | 'legacy-caption' | 'none';
+  scheduledDate: string | null;
   publishAt?: string;
   lastEditedTime: string;
   publishBlockers: string[];

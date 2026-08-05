@@ -23,6 +23,7 @@ function readyPost(overrides: Partial<ReadyXhsPost> = {}): ReadyXhsPost {
     videoUrls: ['https://images.xhs.justlikekatie.com/videos/assets/micropost.mp4'],
     thumbnailUrl: '',
     tags: ['BTS'],
+    scheduledDate: null,
     lastEditedTime: '2026-07-31T01:00:00.000Z',
     publishBlockers: [],
     ...overrides,
@@ -78,6 +79,19 @@ describe('ready post publishing', () => {
     });
     expect(deps.backfill).toHaveBeenCalledWith(post.id, result);
     expect(deps.record).toHaveBeenCalledWith(post.id, result);
+  });
+
+  it('allows deliberate operator publishing before the editorial schedule', async () => {
+    const post = readyPost({ scheduledDate: '2099-08-01T15:30:00-04:00' });
+    const deps = dependencies(post);
+
+    await expect(publishReadyPost(
+      post.id,
+      { confirmed: true, lastEditedTime: post.lastEditedTime },
+      deps,
+    )).resolves.toMatchObject({ status: 'success' });
+    expect(deps.claim).toHaveBeenCalledWith(post.id);
+    expect(deps.publish).toHaveBeenCalledOnce();
   });
 
   it('rejects a concurrent or repeated publish before calling the microservice', async () => {
