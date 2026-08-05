@@ -124,7 +124,7 @@ function pageFixture(): PageObjectResponse {
         type: 'status',
         status: { id: 'ready', name: 'Ready', color: 'green' },
       },
-      'Weibo text': {
+      Caption: {
         id: 'caption',
         type: 'rich_text',
         rich_text: richText('Hot take: the BTS is often the best part of the drama.'),
@@ -287,7 +287,10 @@ describe('Notion Posts mapping', () => {
       type: 'checkbox',
       checkbox: false,
     };
-    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toBeNull();
+    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toMatchObject({
+      candidateKind: 'active_unpublished',
+      publishBlockers: ['Needs media is still checked'],
+    });
 
     fixture.properties['Has video'] = {
       id: 'has-video',
@@ -303,10 +306,13 @@ describe('Notion Posts mapping', () => {
         'https://images.xhs.justlikekatie.com/uploads/live-trial-cover.jpg',
       ].join('\n')),
     };
-    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toBeNull();
+    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toMatchObject({
+      candidateKind: 'active_unpublished',
+      publishPacketReady: false,
+    });
   });
 
-  it('excludes packet-false non-MOV records and MOV records with unrelated blockers', () => {
+  it('keeps incomplete packet-false records visible without making them approvable', () => {
     const fixture = pageFixture();
     fixture.properties['Publish packet ready'] = {
       id: 'packet',
@@ -317,7 +323,10 @@ describe('Notion Posts mapping', () => {
       Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
     );
     const { resolved, duplicateAliases } = resolvePostsSchema(schemaProperties);
-    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toBeNull();
+    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toMatchObject({
+      candidateKind: 'active_unpublished',
+      publishPacketReady: false,
+    });
 
     fixture.properties['Image URLs'] = {
       id: 'media',
@@ -336,7 +345,10 @@ describe('Notion Posts mapping', () => {
       type: 'checkbox',
       checkbox: true,
     };
-    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toBeNull();
+    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toMatchObject({
+      candidateKind: 'active_unpublished',
+      publishBlockers: expect.arrayContaining(['Needs caption is still checked']),
+    });
   });
 
   it('fails closed for MOV trials when packet readiness is missing or ambiguous', () => {
@@ -485,7 +497,7 @@ describe('Notion Posts mapping', () => {
       status: 'Status',
       thumbnail: 'Thumbnail',
       mediaUrls: 'Image URLs',
-      caption: 'Weibo text',
+      caption: 'Caption',
       publishPacketReady: 'Publish packet ready',
       hasVideo: 'Has video',
       needsMedia: 'Needs media',
@@ -498,7 +510,7 @@ describe('Notion Posts mapping', () => {
       scheduledDate: 'ScheduledDate',
     } as const;
 
-    it('queries the precise OR candidate set without any Notion mutation', async () => {
+    it('queries a bounded active-record set without any Notion mutation', async () => {
       const query = vi.fn().mockResolvedValue({ results: [], has_more: false });
       const update = vi.fn();
       const client = { databases: { query }, pages: { update } } as unknown as Client;
@@ -506,19 +518,66 @@ describe('Notion Posts mapping', () => {
       await expect(queryReadyCandidatePages(client, schema, {
         'Publish packet ready': { type: 'checkbox' },
         'Image URLs': { type: 'rich_text' },
+        Status: { type: 'status' },
       }, 'database')).resolves.toEqual([]);
 
       expect(query).toHaveBeenCalledWith(expect.objectContaining({
         database_id: 'database',
         page_size: 100,
+      }));
+      expect(query.mock.calls[0][0]).toMatchObject({
+        filter: {
+          property: 'Status',
+          status: { does_not_equal: 'Published' },
+        },
+      });
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    it('includes only candidate-shaped Published rows for batch reporting', async () => {
+      const query = vi.fn().mockResolvedValue({ results: [], has_more: false });
+      const client = { databases: { query } } as unknown as Client;
+
+      await queryReadyCandidatePages(client, schema, {
+        'Publish packet ready': { type: 'checkbox' },
+        'Image URLs': { type: 'rich_text' },
+        Status: { type: 'status' },
+      }, 'database', true);
+
+      expect(query.mock.calls[0][0]).toMatchObject({
         filter: {
           or: [
-            { property: 'Publish packet ready', checkbox: { equals: true } },
-            { property: 'Image URLs', rich_text: { contains: '.mov' } },
+            {
+              property: 'Status',
+              status: { does_not_equal: 'Published' },
+            },
+            {
+              and: [
+                {
+                  property: 'Status',
+                  status: { equals: 'Published' },
+                },
+                {
+                  property: 'Publish packet ready',
+                  checkbox: { equals: true },
+                },
+              ],
+            },
+            {
+              and: [
+                {
+                  property: 'Status',
+                  status: { equals: 'Published' },
+                },
+                {
+                  property: 'Image URLs',
+                  rich_text: { contains: '.mov' },
+                },
+              ],
+            },
           ],
         },
-      }));
-      expect(update).not.toHaveBeenCalled();
+      });
     });
 
     it('fails explicitly when a fallback scan exceeds its safe cap', async () => {
@@ -547,6 +606,7 @@ describe('Notion Posts mapping', () => {
     expect(resolved.xhsShareUrl).toBe('Rednote URL');
     expect(resolved.xhsNoteId).toBe('Rednote Note ID');
     expect(resolved.tags).toBe('Final Tags');
+    expect(resolved.caption).toBe('Caption');
     expect(resolved.scheduledDate).toBe('ScheduledDate');
     expect(mapReadyXhsPost(fixture, resolved, duplicateAliases)).toMatchObject({
       headline: 'Hot take: BTS is often the best part of the drama',
@@ -566,10 +626,91 @@ describe('Notion Posts mapping', () => {
     });
   });
 
-  it('uses only trailing Weibo hashtags as an explicit legacy tags fallback', () => {
+  it('prefers Caption over temporary legacy aliases', () => {
+    const fixture = pageFixture();
+    fixture.properties['Caption text'] = {
+      id: 'caption-text',
+      type: 'rich_text',
+      rich_text: richText('Caption text fallback'),
+    };
+    fixture.properties['Weibo text'] = {
+      id: 'weibo-text',
+      type: 'rich_text',
+      rich_text: richText('Weibo text fallback'),
+    };
+    fixture.properties['Weibo Text'] = {
+      id: 'weibo-text-case',
+      type: 'rich_text',
+      rich_text: richText('Weibo Text fallback'),
+    };
+    fixture.properties.Weibo = {
+      id: 'weibo',
+      type: 'rich_text',
+      rich_text: richText('Weibo fallback'),
+    };
+    const { resolved, duplicateAliases } = resolvePostsSchema(
+      Object.fromEntries(
+        Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
+      ),
+    );
+
+    expect(resolved.caption).toBe('Caption');
+    expect(duplicateAliases.caption).toEqual([
+      'Caption',
+      'Caption text',
+      'Weibo text',
+      'Weibo Text',
+      'Weibo',
+    ]);
+    expect(mapReadyXhsPost(fixture, resolved, duplicateAliases).caption).toBe(
+      'Hot take: the BTS is often the best part of the drama.',
+    );
+  });
+
+  it.each([
+    ['Caption text', 'Caption text fallback'],
+    ['Weibo text', 'Weibo text fallback'],
+    ['Weibo Text', 'Weibo Text fallback'],
+    ['Weibo', 'Weibo fallback'],
+  ])('reads the temporary %s alias when Caption is absent', (alias, copy) => {
+    const fixture = pageFixture();
+    delete fixture.properties.Caption;
+    fixture.properties[alias] = {
+      id: 'legacy-caption',
+      type: 'rich_text',
+      rich_text: richText(copy),
+    };
+    const { resolved, duplicateAliases } = resolvePostsSchema(
+      Object.fromEntries(
+        Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
+      ),
+    );
+
+    expect(resolved.caption).toBe(alias);
+    expect(mapReadyXhsPost(fixture, resolved, duplicateAliases).caption).toBe(copy);
+  });
+
+  it('keeps an empty Caption behind the existing publish gate', () => {
+    const fixture = pageFixture();
+    fixture.properties.Caption = {
+      id: 'caption',
+      type: 'rich_text',
+      rich_text: [],
+    };
+    const { resolved, duplicateAliases } = resolvePostsSchema(
+      Object.fromEntries(
+        Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
+      ),
+    );
+
+    expect(mapReadyXhsPost(fixture, resolved, duplicateAliases).publishBlockers)
+      .toContain('Caption is empty');
+  });
+
+  it('uses only trailing Caption hashtags as an explicit legacy tags fallback', () => {
     const fixture = pageFixture();
     delete fixture.properties['Final Tags'];
-    fixture.properties['Weibo text'] = {
+    fixture.properties.Caption = {
       id: 'caption',
       type: 'rich_text',
       rich_text: richText('Keep #inline in the body.\n\n#Legacy #旧标签'),
@@ -594,6 +735,7 @@ describe('Notion Posts mapping', () => {
       type: 'multi_select',
       multi_select: [],
     };
+    delete fixture.properties.Caption;
     fixture.properties['Weibo text'] = {
       id: 'caption',
       type: 'rich_text',
@@ -614,7 +756,7 @@ describe('Notion Posts mapping', () => {
 
   it('does not strip trailing hashtags when Final Tags is populated', () => {
     const fixture = pageFixture();
-    fixture.properties['Weibo text'] = {
+    fixture.properties.Caption = {
       id: 'caption',
       type: 'rich_text',
       rich_text: richText('Canonical body #stays'),
@@ -639,7 +781,7 @@ describe('Notion Posts mapping', () => {
       type: 'rich_text',
       rich_text: richText('New Tag, Another Tag'),
     };
-    fixture.properties['Weibo text'] = {
+    fixture.properties.Caption = {
       id: 'caption',
       type: 'rich_text',
       rich_text: richText('Legacy body\n\n#Legacy #Fallback'),

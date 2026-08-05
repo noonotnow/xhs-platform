@@ -46,7 +46,7 @@ const PROPERTY_ALIASES = {
   status: ['Status'],
   thumbnail: ['Thumbnail', 'Thumbnail URL'],
   mediaUrls: ['Image URLs', 'Image URL', 'Images'],
-  caption: ['Weibo text', 'Weibo Text', 'Weibo', 'Caption'],
+  caption: ['Caption', 'Caption text', 'Weibo text', 'Weibo Text', 'Weibo'],
   publishPacketReady: ['Publish packet ready', 'Publish Packet Ready', 'Packet ready'],
   hasVideo: ['Has video', 'Has Video'],
   needsMedia: ['Needs media', 'Needs Media'],
@@ -306,7 +306,7 @@ function mappedBlockers(
     if (duplicates[key]) blockers.push(`${key} has multiple aliases in the Posts DB`);
   }
   if (!plainText(property(page, schema, 'headline')).trim()) blockers.push('Headline is empty');
-  if (!caption) blockers.push('Weibo text is empty');
+  if (!caption) blockers.push('Caption is empty');
   if (hasInvalidScheduledDate) {
     blockers.push('ScheduledDate must include a valid publish time and timezone');
   }
@@ -381,18 +381,31 @@ function isUnpublishedRednotePost(page: PageObjectResponse, schema: ResolvedSche
   return isRednote && normalized(plainText(property(page, schema, 'status'))) !== 'published';
 }
 
-export function classifyReadyPostCandidate(post: XhsPost): ReadyPostCandidateKind | null {
+export function classifyReadyPostCandidate(post: XhsPost): ReadyPostCandidateKind {
   if (post.publishPacketReady) return 'packet_ready';
   if (isMovCompatibilityTrialEligible(post)) return 'mov_compatibility_trial';
-  return null;
+  return 'active_unpublished';
 }
 
 export function toReadyPostCandidate(
   page: PageObjectResponse,
   schema: ResolvedSchema,
   duplicates: Partial<Record<CanonicalProperty, string[]>>,
+  includePublished = false,
 ): ReadyXhsPost | null {
-  if (!isUnpublishedRednotePost(page, schema)) return null;
+  const isPublished = normalized(plainText(property(page, schema, 'status'))) === 'published';
+  if (
+    !isUnpublishedRednotePost(page, schema) &&
+    !(includePublished && isPublished && values(property(page, schema, 'platform'))
+      .map(normalized)
+      .some((platform) =>
+        platform === 'xhs' ||
+        platform.includes('rednote') ||
+        platform.includes('xiaohongshu') ||
+        platform.includes('小红书')))
+  ) {
+    return null;
+  }
   const post = mapReadyXhsPost(page, schema, duplicates);
   const candidateKind = classifyReadyPostCandidate(post);
   if (
@@ -401,7 +414,7 @@ export function toReadyPostCandidate(
   ) {
     return null;
   }
-  return candidateKind ? { ...post, candidateKind } : null;
+  return { ...post, candidateKind };
 }
 
 function assertPageId(pageId: string) {
@@ -465,15 +478,83 @@ export async function queryReadyCandidatePages(
   schema: ResolvedSchema,
   properties: PropertyMap,
   databaseId = getDatabaseId(),
+  includePublishedCandidates = false,
 ) {
-  const filter = buildReadyPostCandidatesQueryFilter(
-    schema.publishPacketReady,
-    schema.publishPacketReady
-      ? properties[schema.publishPacketReady]?.type
-      : undefined,
-    schema.mediaUrls,
-    schema.mediaUrls ? properties[schema.mediaUrls]?.type : undefined,
-  );
+  const statusType = schema.status ? properties[schema.status]?.type : undefined;
+  const unpublishedFilter: DatabaseFilter | undefined = schema.status && statusType === 'status'
+    ? { property: schema.status, status: { does_not_equal: 'Published' } }
+    : schema.status && statusType === 'select'
+      ? { property: schema.status, select: { does_not_equal: 'Published' } }
+      : undefined;
+  const supportsServerCandidateFilter =
+    schema.publishPacketReady &&
+    properties[schema.publishPacketReady]?.type === 'checkbox' &&
+    schema.mediaUrls &&
+    properties[schema.mediaUrls]?.type === 'rich_text';
+  const filter: DatabaseFilter | undefined =
+    includePublishedCandidates &&
+      schema.status &&
+      statusType === 'status' &&
+      supportsServerCandidateFilter
+      ? {
+          or: [
+            {
+              property: schema.status,
+              status: { does_not_equal: 'Published' },
+            },
+            {
+              and: [
+                { property: schema.status, status: { equals: 'Published' } },
+                {
+                  property: schema.publishPacketReady!,
+                  checkbox: { equals: true },
+                },
+              ],
+            },
+            {
+              and: [
+                { property: schema.status, status: { equals: 'Published' } },
+                {
+                  property: schema.mediaUrls!,
+                  rich_text: { contains: '.mov' },
+                },
+              ],
+            },
+          ],
+        }
+      : includePublishedCandidates &&
+          schema.status &&
+          statusType === 'select' &&
+          supportsServerCandidateFilter
+        ? {
+            or: [
+              {
+                property: schema.status,
+                select: { does_not_equal: 'Published' },
+              },
+              {
+                and: [
+                  { property: schema.status, select: { equals: 'Published' } },
+                  {
+                    property: schema.publishPacketReady!,
+                    checkbox: { equals: true },
+                  },
+                ],
+              },
+              {
+                and: [
+                  { property: schema.status, select: { equals: 'Published' } },
+                  {
+                    property: schema.mediaUrls!,
+                    rich_text: { contains: '.mov' },
+                  },
+                ],
+              },
+            ],
+          }
+        : includePublishedCandidates
+          ? undefined
+          : unpublishedFilter;
   const response: QueryDatabaseResponse = await client.databases.query({
     database_id: databaseId,
     page_size: 100,
@@ -482,10 +563,7 @@ export async function queryReadyCandidatePages(
   });
   if (response.has_more) {
     throw new NotionPostsError(
-      filter
-        ? 'More than 100 ready or MOV trial candidates were found; reduce the queue before retrying'
-        : 'The Posts schema requires a bounded candidate scan, but more than 100 records matched; ' +
-          'restore checkbox/rich-text query fields or reduce the database before retrying',
+      'More than 100 active Posts records were found; reduce or archive the database before retrying',
       'READY_POSTS_LIMIT_EXCEEDED',
       503,
     );
@@ -520,15 +598,32 @@ async function notionBoundary<T>(
 }
 
 export async function listReadyXhsPosts(
-  { requestId = crypto.randomUUID() }: { requestId?: string } = {},
+  {
+    requestId = crypto.randomUUID(),
+    includePublishedCandidates = false,
+  }: {
+    requestId?: string;
+    includePublishedCandidates?: boolean;
+  } = {},
 ) {
   const client = getClient();
   const schema = await notionBoundary('schema', requestId, () => loadSchema(client));
   const { resolved, duplicateAliases, warnings, properties } = schema;
   const pages = await notionBoundary('query', requestId, () =>
-    queryReadyCandidatePages(client, resolved, properties));
+    queryReadyCandidatePages(
+      client,
+      resolved,
+      properties,
+      getDatabaseId(),
+      includePublishedCandidates,
+    ));
   const posts = pages.flatMap((page) => {
-    const post = toReadyPostCandidate(page, resolved, duplicateAliases);
+    const post = toReadyPostCandidate(
+      page,
+      resolved,
+      duplicateAliases,
+      includePublishedCandidates,
+    );
     return post ? [post] : [];
   });
   return { posts, warnings };

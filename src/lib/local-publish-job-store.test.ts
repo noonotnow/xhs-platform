@@ -9,10 +9,12 @@ vi.mock('@/lib/db', () => ({ sql: mocks.sql }));
 import {
   claimNextStoredLocalPublishJob,
   completeStoredLocalPublishReconciliation,
+  consumeStoredDispatchAuthorization,
   deferStoredLocalPublishVerification,
   failStoredLocalPublishJob,
   insertLocalPublishJob,
   listLocalPublishJobs,
+  listPublishOwningLocalJobs,
   normalizeStoredLocalPublishSnapshot,
   prepareStoredLocalPublishVerification,
   recordStoredLocalPublishDispatch,
@@ -32,6 +34,30 @@ const snapshot: LocalPublishSnapshot = {
   mediaUrl: 'https://images.xhs.justlikekatie.com/videos/assets/post.mp4',
   notionLastEditedTime: '2026-08-01T12:00:00.000Z',
 };
+
+describe('publish ownership lookup', () => {
+  it('keeps active and post-dispatch failures while allowing pre-dispatch retry', async () => {
+    mocks.sql.mockResolvedValue({
+      rows: [
+        { ...claimedRow(), id: 'active', status: 'scheduled' },
+        {
+          ...claimedRow(),
+          id: 'dispatch-authorized-failure',
+          status: 'failed',
+          dispatch_authorized_at: '2026-08-01T12:59:00.000Z',
+        },
+        { ...claimedRow(), id: 'pre-dispatch-failure', status: 'failed' },
+      ],
+      rowCount: 3,
+    });
+
+    await expect(listPublishOwningLocalJobs([snapshot.notionPageId]))
+      .resolves.toEqual([
+        expect.objectContaining({ id: 'active', status: 'scheduled' }),
+        expect.objectContaining({ id: 'dispatch-authorized-failure', status: 'failed' }),
+      ]);
+  });
+});
 
 function claimedRow() {
   return {
@@ -112,7 +138,8 @@ describe('local publish atomic claim storage', () => {
 
     expect(query).toContain("status = 'queued'");
     expect(query).toContain("status = 'claimed' AND claim_expires_at <= CURRENT_TIMESTAMP");
-    expect(query).toContain("status = 'staged' AND claim_expires_at <= CURRENT_TIMESTAMP");
+    expect(query).toContain("status = 'staged'");
+    expect(query).toContain('dispatch_authorized_at IS NULL');
     expect(query).toContain("status IN ('submitted', 'scheduled', 'verification_pending')");
     expect(query).toContain('claim_expires_at IS NULL');
     expect(query).toContain('FOR UPDATE SKIP LOCKED');
@@ -126,6 +153,28 @@ describe('local publish atomic claim storage', () => {
       mediaUrl: snapshot.mediaUrl,
     });
     expect(claimed).not.toHaveProperty('notionLastEditedTime');
+    expect(claimed).not.toHaveProperty('snapshotRevision');
+  });
+
+  it('durably consumes a staged dispatch permit before the publish click', async () => {
+    mocks.sql.mockResolvedValue({
+      rows: [{
+        ...claimedRow(),
+        status: 'staged',
+        dispatch_authorized_at: '2026-08-01T12:06:00.000Z',
+      }],
+      rowCount: 1,
+    });
+
+    await expect(consumeStoredDispatchAuthorization(
+      claimedRow().id,
+      claimedRow().claim_token,
+    )).resolves.toMatchObject({ id: claimedRow().id, status: 'staged' });
+
+    const query = (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
+    expect(query).toContain('dispatch_authorized_at = COALESCE');
+    expect(query).toContain("status = 'staged'");
+    expect(query).toContain('claim_expires_at > CURRENT_TIMESTAMP');
   });
 
   it('preserves post-dispatch state and returns verification-only work', async () => {
@@ -211,6 +260,69 @@ describe('local publish atomic claim storage', () => {
     const claimed = await claimNextStoredLocalPublishJob(7_200);
     expect(claimed).toMatchObject({ publishAt: '2026-08-04T13:30:00.000Z' });
     expect(claimed).not.toHaveProperty('scheduledDate');
+  });
+
+  it('serializes the exact legacy combined-tag shape as strict worker tags', async () => {
+    mocks.sql.mockResolvedValue({
+      rows: [{
+        ...claimedRow(),
+        id: '52b6bee8-cd9d-44da-8da0-0883f17862bb',
+        notion_page_id: 'f7d2a66f-6a77-41d5-9999-41894d7c6250',
+        snapshot: {
+          ...snapshot,
+          notionPageId: 'f7d2a66f-6a77-41d5-9999-41894d7c6250',
+          headline: 'Day 3｜回来吧回来吧回来吧',
+          title: 'Day 3｜回来吧回来吧回来吧',
+          tags: ['好视频扶持计划 ##念无双 ##刘学义 ##源仲 ##古装剧'],
+          publishAt: '2026-08-04T11:30:00.000Z',
+        },
+      }],
+      rowCount: 1,
+    });
+
+    await expect(claimNextStoredLocalPublishJob(7_200, 'dispatch')).resolves.toMatchObject({
+      id: '52b6bee8-cd9d-44da-8da0-0883f17862bb',
+      notionPageId: 'f7d2a66f-6a77-41d5-9999-41894d7c6250',
+      tags: ['好视频扶持计划', '念无双', '刘学义', '源仲', '古装剧'],
+      publishAt: '2026-08-04T11:30:00.000Z',
+    });
+  });
+
+  it('retains exact bounded batch tags and emits strict authorization', async () => {
+    const batchRow = {
+      ...claimedRow(),
+      batch_item_id: '55555555-5555-4555-8555-555555555555',
+      snapshot: {
+        ...snapshot,
+        tags: ['FrozenTag'],
+        publishAt: '2026-08-04T13:30:00.000Z',
+      },
+    };
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [batchRow], rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [{
+          batch_id: '66666666-6666-4666-8666-666666666666',
+          batch_item_id: batchRow.batch_item_id,
+          manifest_hash: 'a'.repeat(64),
+          item_hash: 'b'.repeat(64),
+          approved_at: '2026-08-04T12:00:00.000Z',
+          dispatch_mode: 'scheduled',
+        }],
+        rowCount: 1,
+      });
+
+    await expect(claimNextStoredLocalPublishJob(7_200, 'dispatch')).resolves.toMatchObject({
+      tags: ['FrozenTag'],
+      publishAt: '2026-08-04T13:30:00.000Z',
+      batchAuthorization: {
+        batchId: '66666666-6666-4666-8666-666666666666',
+        manifestHash: 'a'.repeat(64),
+        itemHash: 'b'.repeat(64),
+        approvedState: 'approved',
+        lateAction: 'schedule',
+      },
+    });
   });
 
   it('returns the original job for an identical idempotency key', async () => {
@@ -318,7 +430,6 @@ describe('local publish atomic claim storage', () => {
     expect(query).toContain('next_verification_at <= claimed_at');
     expect(query).toContain('claim_expires_at = CURRENT_TIMESTAMP');
     expect(mocks.sql.mock.calls[0]).toEqual(expect.arrayContaining([
-      900,
       3_600,
       21_600,
       86_400,

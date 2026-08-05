@@ -7,6 +7,91 @@
   border-radius: 12px;
 }
 
+.batchApproval {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 18px;
+  padding: 16px;
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+}
+
+.batchApproval h3,
+.batchApproval p {
+  margin: 0;
+}
+
+.manifestHash {
+  overflow-wrap: anywhere;
+  color: #475569;
+  font-size: 0.8125rem;
+}
+
+.batchItems {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding-left: 24px;
+}
+
+.batchItems li {
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.batchItems span,
+.batchItems small,
+.batchItems code {
+  overflow-wrap: anywhere;
+  color: #64748b;
+  font-size: 0.75rem;
+}
+
+.blockedBatchHeading {
+  margin: 4px 0 0;
+  color: #713f12;
+  font-size: 0.875rem;
+}
+
+.blockedBatchItems li {
+  background: #fffbeb;
+  border-color: #f59e0b;
+}
+
+.blockedBatchItems small {
+  color: #713f12;
+}
+
+.supersededBatch {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  color: #713f12;
+  background: #fffbeb;
+  border: 1px solid #f59e0b;
+  border-radius: 8px;
+}
+
+.recoveryBatch {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  color: #7c2d12;
+  background: #fff7ed;
+  border: 1px solid #fb923c;
+  border-radius: 8px;
+}
+
+.recoveryBatch p {
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
 .headingRow,
 .statusRow,
 .actionRow {
@@ -53,7 +138,8 @@
 
 .reconcileButton,
 .retryButton,
-.reconcileSubmit {
+.reconcileSubmit,
+.recoveryButton {
   min-height: 40px;
   border-radius: 8px;
   font: inherit;
@@ -82,9 +168,24 @@
 .reconcileButton:focus-visible,
 .retryButton:focus-visible,
 .reconcileSubmit:focus-visible,
+.recoveryButton:focus-visible,
 .experimental summary:focus-visible {
   outline: 3px solid rgba(124, 58, 237, 0.28);
   outline-offset: 2px;
+}
+
+.recoveryButton {
+  justify-self: start;
+  margin-top: 6px;
+  padding: 8px 12px;
+  color: #fff;
+  background: #c2410c;
+  border: 1px solid #9a3412;
+}
+
+.recoveryButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
 }
 
 .workspace {

@@ -177,6 +177,7 @@ caching.
 | `GET /api/local-publish-jobs/next?lane=verification` | Atomic single claim only when verification or reconciliation is due |
 | `GET /api/local-publish-jobs/next` | Backward-compatible combined lane |
 | `POST /api/local-publish-jobs/:id/result` | Per-job token result; preserves staging, human approval, verification, and reconciliation gates |
+| `POST /admin/api/publish-job-recoveries` | Cloudflare Access operator action that requeues the same exact approved job only for a pre-dispatch `BOUNDED_BATCH_BYPASS_DISABLED` terminal claim generation and writes one append-only audit per generation |
 | `GET /api/rednote-metrics/due?limit=20` | Bounded metrics batch with a distinct token and lease per post |
 | `POST /api/rednote-metrics/observations` | Consolidated observations and one coalesced run summary |
 

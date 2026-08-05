@@ -18,6 +18,7 @@ const snapshot: LocalPublishSnapshot = {
   mediaType: 'video',
   mediaIndex: 0,
   mediaUrl: 'https://images.xhs.justlikekatie.com/videos/assets/post.mp4',
+  publishAt: '2026-08-04T13:30:00.000Z',
   notionLastEditedTime: '2026-08-01T12:00:00.000Z',
 };
 
@@ -61,6 +62,7 @@ function readyPost(): ReadyXhsPost {
     videoUrls: [snapshot.mediaUrl],
     thumbnailUrl: '',
     tags: snapshot.tags,
+    publishAt: snapshot.publishAt,
     lastEditedTime: snapshot.notionLastEditedTime,
     publishBlockers: [],
   };
