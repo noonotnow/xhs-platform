@@ -34,6 +34,10 @@ const attestedJobId = '22222222-2222-4222-8222-222222222222';
 const ineligibleJobId = '33333333-3333-4333-8333-333333333333';
 const attestationId = '44444444-4444-4444-8444-444444444444';
 const claimToken = '55555555-5555-4555-8555-555555555555';
+const batchId = '77777777-7777-4777-8777-777777777777';
+const batchItemId = '88888888-8888-4888-8888-888888888888';
+const manifestHash = 'a'.repeat(64);
+const itemHash = 'b'.repeat(64);
 
 const snapshot = {
   notionPageId: '66666666-6666-4666-8666-666666666666',
@@ -57,17 +61,18 @@ async function insertJob(input: {
   claimed?: boolean;
   noteId?: string;
   shareUrl?: string;
+  batchItemId?: string;
 }) {
   await database.query(
     `INSERT INTO local_publish_jobs (
        id, notion_page_id, snapshot, status, idempotency_key, claim_token,
        claimed_at, claim_expires_at, next_verification_at, note_id, share_url,
-       success_attestation_id, created_at, updated_at
+       success_attestation_id, batch_item_id, created_at, updated_at
      ) VALUES (
        $1::uuid, $2, $3::jsonb, $4, gen_random_uuid(), $5::uuid,
        CASE WHEN $5::uuid IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END,
        CASE WHEN $5::uuid IS NULL THEN NULL ELSE CURRENT_TIMESTAMP + INTERVAL '1 hour' END,
-       CURRENT_TIMESTAMP + $6::interval, $7, $8, $9::uuid,
+       CURRENT_TIMESTAMP + $6::interval, $7, $8, $9::uuid, $10::uuid,
        CURRENT_TIMESTAMP + $6::interval, CURRENT_TIMESTAMP
      )`,
     [
@@ -80,8 +85,74 @@ async function insertJob(input: {
       input.noteId ?? null,
       input.shareUrl ?? null,
       input.successAttestationId ?? null,
+      input.batchItemId ?? null,
     ],
   );
+}
+
+async function insertAttestedBatchAuthorization(input: {
+  state?: string;
+  storedManifestHash?: string;
+}) {
+  await database.query(
+    `INSERT INTO rednote_publish_batches (
+       id, manifest_hash, approved_at
+     ) VALUES ($1::uuid, $2, CURRENT_TIMESTAMP)`,
+    [batchId, input.storedManifestHash ?? manifestHash],
+  );
+  await database.query(
+    `INSERT INTO rednote_publish_batch_items (
+       id, batch_id, notion_page_id, snapshot, item_hash, state, dispatch_mode,
+       local_publish_job_id
+     ) VALUES ($1::uuid, $2::uuid, $3, $4::jsonb, $5, $6, 'scheduled', NULL)`,
+    [
+      batchItemId,
+      batchId,
+      snapshot.notionPageId,
+      JSON.stringify(snapshot),
+      itemHash,
+      input.state ?? 'operator_attested',
+    ],
+  );
+}
+
+function successAttestation(overrides: Record<string, unknown> = {}) {
+  const requestedPublishAt = snapshot.publishAt;
+  return {
+    id: attestationId,
+    notionPageId: snapshot.notionPageId,
+    contractRevision: 'operator-success-attestation/v1',
+    batchId,
+    manifestHash,
+    itemId: batchItemId,
+    jobId: attestedJobId,
+    itemHash,
+    snapshotRevision: snapshot.notionLastEditedTime,
+    snapshotDigest: itemHash,
+    priorClaimTokenDigest: 'c'.repeat(64),
+    releaseRequired: true,
+    localReleaseIdentity: {
+      jobId: attestedJobId,
+      notionPageId: snapshot.notionPageId,
+      priorClaimTokenDigest: 'c'.repeat(64),
+      batchId,
+      manifestHash,
+      itemHash,
+      snapshotRevision: snapshot.notionLastEditedTime,
+      requestedPublishAt,
+      publishMode: 'scheduled',
+    },
+    requestedPublishAt,
+    expectedOutcome: {
+      kind: 'scheduled',
+      publishAt: requestedPublishAt,
+      timeZone: 'America/New_York',
+      text: 'Successfully scheduled for August 5, 2026 at 11:00 AM ET',
+    },
+    attestedBy: 'operator@example.com',
+    attestedAt: '2026-08-05T15:30:00.000Z',
+    ...overrides,
+  };
 }
 
 async function claimState() {
@@ -128,6 +199,21 @@ describe('local publish job PostgreSQL execution', () => {
         success_attestation_id uuid,
         external_disposition_request_id uuid
       );
+      CREATE TABLE rednote_publish_batches (
+         id uuid PRIMARY KEY,
+         manifest_hash text NOT NULL,
+         approved_at timestamptz
+      );
+      CREATE TABLE rednote_publish_batch_items (
+         id uuid PRIMARY KEY,
+         batch_id uuid NOT NULL REFERENCES rednote_publish_batches(id),
+         notion_page_id text NOT NULL,
+         snapshot jsonb NOT NULL,
+         item_hash text NOT NULL,
+         state text NOT NULL,
+         dispatch_mode text NOT NULL,
+         local_publish_job_id uuid
+      );
       CREATE TABLE manual_reconciliation_requests (
         request_kind text NOT NULL,
         source_local_job_id uuid
@@ -142,9 +228,11 @@ describe('local publish job PostgreSQL execution', () => {
     mocks.loadAttestation.mockReset();
     mocks.acknowledgeRelease.mockReset();
     await database.exec(`
-      TRUNCATE local_publish_jobs;
+      TRUNCATE local_publish_jobs CASCADE;
       TRUNCATE manual_reconciliation_requests;
       TRUNCATE local_publish_job_success_attestation_release_acks;
+      TRUNCATE rednote_publish_batch_items;
+      TRUNCATE rednote_publish_batches CASCADE;
     `);
   });
 
@@ -153,6 +241,7 @@ describe('local publish job PostgreSQL execution', () => {
   });
 
   it('claims an exact unacknowledged attested release ahead of older verification work', async () => {
+    await insertAttestedBatchAuthorization({});
     await insertJob({
       id: scheduledJobId,
       status: 'scheduled',
@@ -165,13 +254,15 @@ describe('local publish job PostgreSQL execution', () => {
       status: 'operator_attested',
       dueOffset: '-1 day',
       successAttestationId: attestationId,
+      batchItemId,
     });
-    mocks.loadAttestation.mockResolvedValue({
-      id: attestationId,
-      jobId: attestedJobId,
-      releaseRequired: true,
-      contractRevision: 'operator-success-attestation/v1',
-    });
+    await database.query(
+      `UPDATE rednote_publish_batch_items
+       SET local_publish_job_id = $1::uuid
+       WHERE id = $2::uuid`,
+      [attestedJobId, batchItemId],
+    );
+    mocks.loadAttestation.mockResolvedValue(successAttestation());
 
     const claimed = await claimNextStoredLocalPublishJob(
       7_200,
@@ -179,19 +270,153 @@ describe('local publish job PostgreSQL execution', () => {
       attestedJobId,
     );
 
-    expect(claimed).toMatchObject({
+    expect(JSON.parse(JSON.stringify(claimed))).toStrictEqual({
       id: attestedJobId,
       status: 'operator_attested',
-      successAttestation: {
-        jobId: attestedJobId,
-        releaseRequired: true,
-        contractRevision: 'operator-success-attestation/v1',
+      notionPageId: snapshot.notionPageId,
+      headline: snapshot.headline,
+      title: snapshot.title,
+      caption: snapshot.caption,
+      tags: snapshot.tags,
+      platform: snapshot.platform,
+      mediaType: snapshot.mediaType,
+      mediaUrl: snapshot.mediaUrl,
+      publishAt: snapshot.publishAt,
+      claimToken: expect.any(String),
+      claimExpiresAt: expect.any(String),
+      verificationAttempts: 0,
+      nextVerificationAt: expect.any(String),
+      batchAuthorization: {
+        batchId,
+        manifestHash,
+        itemHash,
+        snapshotRevision: snapshot.notionLastEditedTime,
+        approvedState: 'approved',
+        approvedAt: expect.any(String),
+        media: {
+          url: snapshot.mediaUrl,
+          type: snapshot.mediaType,
+          identity: expect.any(String),
+        },
+        publishAt: snapshot.publishAt,
+        lateAction: 'schedule',
       },
+      successAttestation: successAttestation(),
+    });
+    if (!claimed || claimed.status !== 'operator_attested') {
+      throw new Error('Expected an operator-attested claim');
+    }
+    expect(claimed.batchAuthorization).toMatchObject({
+      batchId: claimed.successAttestation.batchId,
+      manifestHash: claimed.successAttestation.manifestHash,
+      itemHash: claimed.successAttestation.itemHash,
+      snapshotRevision: claimed.successAttestation.snapshotRevision,
+      publishAt: claimed.successAttestation.requestedPublishAt,
+      lateAction: 'schedule',
     });
     expect((await claimState()).rows).toEqual([
       { id: scheduledJobId, claim_attempts: 0, claim_token: null },
       expect.objectContaining({ id: attestedJobId, claim_attempts: 1 }),
     ]);
+  });
+
+  it('rejects a targeted attested release with missing authorization without fallback', async () => {
+    await insertJob({
+      id: scheduledJobId,
+      status: 'scheduled',
+      dueOffset: '-2 days',
+      noteId: 'note_older',
+      shareUrl: 'https://www.rednote.com/explore/note_older',
+    });
+    await insertJob({
+      id: attestedJobId,
+      status: 'operator_attested',
+      dueOffset: '-1 day',
+      successAttestationId: attestationId,
+      batchItemId,
+    });
+    mocks.loadAttestation.mockResolvedValue(successAttestation());
+
+    await expect(claimNextStoredLocalPublishJob(
+      7_200,
+      'verification',
+      attestedJobId,
+    )).rejects.toMatchObject({
+      code: 'INVALID_BATCH_AUTHORIZATION',
+      status: 409,
+    });
+    expect((await claimState()).rows).toEqual([
+      { id: scheduledJobId, claim_attempts: 0, claim_token: null },
+      expect.objectContaining({ id: attestedJobId, claim_attempts: 1 }),
+    ]);
+    expect(mocks.loadAttestation).not.toHaveBeenCalled();
+  });
+
+  it('rejects mismatched attestation authorization without fallback', async () => {
+    await insertAttestedBatchAuthorization({});
+    await insertJob({
+      id: scheduledJobId,
+      status: 'scheduled',
+      dueOffset: '-2 days',
+      noteId: 'note_older',
+      shareUrl: 'https://www.rednote.com/explore/note_older',
+    });
+    await insertJob({
+      id: attestedJobId,
+      status: 'operator_attested',
+      dueOffset: '-1 day',
+      successAttestationId: attestationId,
+      batchItemId,
+    });
+    mocks.loadAttestation.mockResolvedValue(successAttestation({
+      manifestHash: 'd'.repeat(64),
+    }));
+
+    await expect(claimNextStoredLocalPublishJob(
+      7_200,
+      'verification',
+      attestedJobId,
+    )).rejects.toMatchObject({
+      code: 'INVALID_OPERATOR_ATTESTED_JOB',
+      status: 500,
+    });
+    expect((await claimState()).rows).toEqual([
+      { id: scheduledJobId, claim_attempts: 0, claim_token: null },
+      expect.objectContaining({ id: attestedJobId, claim_attempts: 1 }),
+    ]);
+  });
+
+  it('rejects an attested claim whose batch item is not operator-attested', async () => {
+    await insertAttestedBatchAuthorization({ state: 'scheduled' });
+    await insertJob({
+      id: scheduledJobId,
+      status: 'scheduled',
+      dueOffset: '-2 days',
+      noteId: 'note_older',
+      shareUrl: 'https://www.rednote.com/explore/note_older',
+    });
+    await insertJob({
+      id: attestedJobId,
+      status: 'operator_attested',
+      dueOffset: '-1 day',
+      successAttestationId: attestationId,
+      batchItemId,
+    });
+    mocks.loadAttestation.mockResolvedValue(successAttestation());
+
+    await expect(claimNextStoredLocalPublishJob(
+      7_200,
+      'verification',
+      attestedJobId,
+    )).rejects.toMatchObject({
+      code: 'INVALID_BATCH_AUTHORIZATION',
+      status: 409,
+    });
+    expect((await claimState()).rows).toEqual([
+      { id: scheduledJobId, claim_attempts: 0, claim_token: null },
+      expect.objectContaining({ id: attestedJobId, claim_attempts: 1 }),
+    ]);
+    expect(mocks.loadAttestation).not.toHaveBeenCalled();
   });
 
   it('retains oldest-due ordering for an untargeted verification claim', async () => {

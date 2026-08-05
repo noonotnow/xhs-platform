@@ -433,7 +433,7 @@ async function claimedResponse(row: LocalPublishJobRow): Promise<ClaimedLocalPub
     );
   }
   const job = mapRow(row);
-  if (row.batch_item_id && job.status !== 'operator_attested') {
+  if (row.batch_item_id) {
     const authorization = await sql<{
       batch_id: string;
       batch_item_id: string;
@@ -452,9 +452,15 @@ async function claimedResponse(row: LocalPublishJobRow): Promise<ClaimedLocalPub
       FROM rednote_publish_batch_items AS item
       JOIN rednote_publish_batches AS batch ON batch.id = item.batch_id
       WHERE item.id = ${row.batch_item_id}::uuid
-        AND item.state IN (
-          'queued', 'claimed', 'staged', 'submitted', 'scheduled',
-          'verification_pending', 'verified'
+        AND (
+          (${job.status} = 'operator_attested' AND item.state = 'operator_attested')
+          OR (
+            ${job.status} <> 'operator_attested'
+            AND item.state IN (
+              'queued', 'claimed', 'staged', 'submitted', 'scheduled',
+              'verification_pending', 'verified'
+            )
+          )
         )
         AND batch.approved_at IS NOT NULL
       LIMIT 1
@@ -527,6 +533,23 @@ async function claimedResponse(row: LocalPublishJobRow): Promise<ClaimedLocalPub
     if (!attestation || attestation.jobId !== job.id) {
       throw new LocalPublishJobError(
         'The operator attestation does not match its local job',
+        'INVALID_OPERATOR_ATTESTED_JOB',
+        500,
+      );
+    }
+    if (
+      !job.batchAuthorization ||
+      row.batch_item_id !== attestation.itemId ||
+      job.snapshot.notionPageId !== attestation.notionPageId ||
+      job.batchAuthorization.batchId !== attestation.batchId ||
+      job.batchAuthorization.manifestHash !== attestation.manifestHash ||
+      job.batchAuthorization.itemHash !== attestation.itemHash ||
+      job.batchAuthorization.snapshotRevision !== attestation.snapshotRevision ||
+      job.batchAuthorization.publishAt !== attestation.requestedPublishAt ||
+      job.batchAuthorization.lateAction !== 'schedule'
+    ) {
+      throw new LocalPublishJobError(
+        'The bounded batch authorization does not match its operator attestation',
         'INVALID_OPERATOR_ATTESTED_JOB',
         500,
       );
