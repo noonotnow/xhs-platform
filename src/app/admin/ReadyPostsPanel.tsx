@@ -41,6 +41,8 @@ import {
 } from '@/lib/local-publish-job-display';
 import { manualSchedulingProvenanceMismatch } from '@/lib/manual-scheduling-provenance';
 
+const SHOW_LEGACY_EXECUTION_AUDITS = false;
+
 interface ApiError {
   error?: string;
   code?: string;
@@ -222,9 +224,9 @@ function jobStatusCopy(
     }
     return {
       tone: 'warning',
-      title: 'Scheduled success attested — receipt pending',
+      title: 'Scheduled · receipt pending',
       detail:
-        'Dispatch and recovery are permanently closed, and the local staging release remains eligible even if Notion says Published. Published is only a cue until an exact public receipt is endorsed.',
+        'Dispatch and recovery are permanently closed. Add the public URL after it is live so the existing post can be verified.',
     };
   }
   if (job.status === 'verification_pending') {
@@ -268,7 +270,7 @@ function dashboardState(job: LocalPublishJobSummary | undefined) {
   if (job.status === 'queued') return 'Queued';
   if (job.status === 'claimed' || job.status === 'staged') return 'Scheduling';
   if (job.status === 'submitted' || job.status === 'scheduled') return 'Scheduled/Submitted';
-  if (job.status === 'operator_attested') return 'Attested/Verifying';
+  if (job.status === 'operator_attested') return 'Scheduled/Verifying';
   if (job.status === 'verification_pending' || job.status === 'verified') return 'Verifying';
   if (job.status === 'reconciled') return 'Reconciled';
   return 'Failed';
@@ -1087,7 +1089,7 @@ export default function ReadyPostsPanel() {
         <p className={styles.muted}>Schema notices: {warnings.join(' · ')}</p>
       )}
 
-      {successAttestationCandidates.length > 0 && (
+      {SHOW_LEGACY_EXECUTION_AUDITS && successAttestationCandidates.length > 0 && (
         <section className={styles.successAttestation} aria-labelledby="success-attestation-heading">
           <div>
             <h3 id="success-attestation-heading">Attest scheduled success</h3>
@@ -1123,7 +1125,7 @@ export default function ReadyPostsPanel() {
           aria-labelledby="receipt-reconciliation-heading"
         >
           <div>
-            <h3 id="receipt-reconciliation-heading">Reconcile public URL</h3>
+            <h3 id="receipt-reconciliation-heading">Add public URL</h3>
             <p>
               These exact attempts were scheduled successfully but still lack a verified public
               receipt. A Posts status of Published is only a cue and does not complete this step.
@@ -1202,7 +1204,7 @@ export default function ReadyPostsPanel() {
                         Boolean(inputError)
                       }
                     >
-                      {isBusy ? 'Queueing verification…' : 'Reconcile public URL'}
+                      {isBusy ? 'Queueing verification…' : 'Add public URL'}
                     </button>
                   </>
                 )}
@@ -1215,6 +1217,7 @@ export default function ReadyPostsPanel() {
         </section>
       )}
 
+      {SHOW_LEGACY_EXECUTION_AUDITS && (
       <section className={styles.batchApproval} aria-labelledby="batch-approval-heading">
         <div className={styles.queueHeading}>
           <div>
@@ -1381,6 +1384,7 @@ export default function ReadyPostsPanel() {
           </div>
         ))}
       </section>
+      )}
 
       {loading && posts.length === 0 ? (
         <p className={styles.empty}>Loading publish-ready posts…</p>
@@ -1530,7 +1534,7 @@ export default function ReadyPostsPanel() {
                   </div>
                 )}
 
-                {manualSchedulingCandidate && (
+                {SHOW_LEGACY_EXECUTION_AUDITS && manualSchedulingCandidate && (
                   <div className={styles.manualReconciliation}>
                     <div className={styles.manualReconciliationHeading}>
                       <div>

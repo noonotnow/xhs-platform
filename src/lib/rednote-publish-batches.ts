@@ -16,6 +16,7 @@ import {
   listStoredPublishBatches,
   type NewPublishBatchItem,
 } from '@/lib/rednote-publish-batch-store';
+import { listPlanOperatorScheduledPageIds } from '@/lib/plan-operator-scheduled-store';
 import type {
   LocalPublishSnapshot,
   LocalPublishJobSummary,
@@ -246,9 +247,11 @@ export function buildBatchCandidateAccounting(
 
 export async function createPublishBatch(kind: PublishBatchKind, now = new Date()) {
   const { posts } = await listReadyXhsPosts({ includePublishedCandidates: true });
-  const jobs = await listPublishOwningLocalJobs(posts.map((post) => post.id));
+  const handled = await listPlanOperatorScheduledPageIds(posts.map((post) => post.id));
+  const dispatchablePosts = posts.filter((post) => !handled.has(post.id));
+  const jobs = await listPublishOwningLocalJobs(dispatchablePosts.map((post) => post.id));
   const { items, blockedCandidates } = buildBatchCandidateAccounting(
-    posts,
+    dispatchablePosts,
     kind,
     now,
     jobs.map(jobSummary),

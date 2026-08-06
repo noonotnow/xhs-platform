@@ -149,6 +149,8 @@ describe('local publish atomic claim storage', () => {
     expect(query).toContain("status = 'staged'");
     expect(query).toContain('dispatch_authorized_at IS NULL');
     expect(query).toContain('external_disposition_request_id IS NULL');
+    expect(query).toContain('plan_operator_scheduled_posts');
+    expect(query).toContain('operator_scheduled.reconciled_at IS NULL');
     expect(query).toContain("status IN ('submitted', 'scheduled', 'verification_pending')");
     expect(query).toContain("attestation.provenance = 'worker_ambiguous'");
     expect(query).toContain('claim_expires_at IS NULL');
@@ -390,6 +392,7 @@ describe('local publish atomic claim storage', () => {
 
   it('prevents a second active job for the same Notion page', async () => {
     mocks.sql
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
       .mockResolvedValueOnce({ rows: [], rowCount: 0 })
       .mockResolvedValueOnce({ rows: [], rowCount: 0 })
       .mockResolvedValueOnce({ rows: [claimedRow()], rowCount: 1 });

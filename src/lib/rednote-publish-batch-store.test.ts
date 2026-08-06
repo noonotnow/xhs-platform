@@ -187,6 +187,7 @@ describe('stored RedNote bootstrap replacement', () => {
       expect.stringContaining("hashtextextended('rednote-bootstrap-batch', 0)"),
       expect.stringContaining('FOR UPDATE'),
       expect.stringContaining('INSERT INTO local_publish_jobs'),
+      expect.stringContaining('plan_operator_scheduled_posts'),
       'COMMIT',
     ]));
   });

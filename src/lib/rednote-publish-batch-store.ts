@@ -267,14 +267,36 @@ export async function createStoredPublishBatch(input: {
            ORDER BY notion_page_id, created_at DESC`,
           [pageIds],
         );
+    const operatorScheduled = pageIds.length === 0
+      ? { rows: [] as Array<{ notion_page_id: string }> }
+      : await client.query<{ notion_page_id: string }>(
+         `SELECT notion_page_id
+          FROM plan_operator_scheduled_posts
+          WHERE notion_page_id = ANY($1::text[])
+            AND reconciled_at IS NULL`,
+         [pageIds],
+        );
+    const operatorScheduledPages = new Set(
+      operatorScheduled.rows.map((row) => row.notion_page_id),
+    );
     const ownershipByPage = new Map(
       owningJobs.rows.map((job) => [job.notion_page_id, job]),
     );
-    const items = input.items.filter((item) => !ownershipByPage.has(item.notionPageId));
+    const items = input.items.filter((item) =>
+      !ownershipByPage.has(item.notionPageId) &&
+      !operatorScheduledPages.has(item.notionPageId));
     const blockedCandidates = [
       ...input.blockedCandidates,
       ...input.items.flatMap((item): PublishBatchBlockedCandidate[] => {
         const job = ownershipByPage.get(item.notionPageId);
+        if (operatorScheduledPages.has(item.notionPageId)) {
+          return [{
+            notionPageId: item.notionPageId,
+            headline: item.snapshot.headline,
+            ...(item.snapshot.publishAt ? { publishAt: item.snapshot.publishAt } : {}),
+            reason: 'PLAN recorded operator scheduling; automatic dispatch is closed.',
+          }];
+        }
         return job
           ? [{
               notionPageId: item.notionPageId,
@@ -534,6 +556,13 @@ export async function approveStoredPublishBatch(
         WHERE id = $1::uuid
           AND batch_id = $2::uuid
           AND state = 'needs_approval'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM plan_operator_scheduled_posts operator_scheduled
+            WHERE operator_scheduled.notion_page_id =
+              rednote_publish_batch_items.notion_page_id
+              AND operator_scheduled.reconciled_at IS NULL
+          )
         RETURNING *
       ), page_lock AS (
         SELECT approved_item.*,
@@ -550,6 +579,12 @@ export async function approveStoredPublishBatch(
           id
         FROM page_lock
         WHERE NOT EXISTS (
+          SELECT 1
+          FROM plan_operator_scheduled_posts operator_scheduled
+          WHERE operator_scheduled.notion_page_id = page_lock.notion_page_id
+            AND operator_scheduled.reconciled_at IS NULL
+        )
+          AND NOT EXISTS (
           SELECT 1
           FROM local_publish_jobs existing
           WHERE existing.notion_page_id = page_lock.notion_page_id
@@ -588,7 +623,7 @@ export async function approveStoredPublishBatch(
           updated_at = CURRENT_TIMESTAMP
       WHERE id = $1::uuid
         AND batch_id = $2::uuid
-        AND state = 'approved'
+        AND state IN ('needs_approval', 'approved')
         AND local_publish_job_id IS NULL
         `,
         [decision.itemId, batchId],

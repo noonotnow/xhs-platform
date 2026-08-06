@@ -13,6 +13,7 @@ vi.mock('@/lib/db', () => ({
 
 import {
   claimDueManualReconciliations,
+  completeManualReconciliation,
   deferManualReconciliation,
   failManualReconciliation,
   insertManualReconciliation,
@@ -161,6 +162,19 @@ describe('manual reconciliation persistence', () => {
     expect(query).toContain('claim_token = gen_random_uuid()');
     expect(query).toContain('claim_attempts >= 12');
     expect(query).toContain('RECONCILIATION_WORKER_UNAVAILABLE');
+  });
+
+  it('completes the durable operator-scheduled marker after verified reconciliation', async () => {
+    mocks.sql.mockResolvedValue({ rows: [row('reconciled')] });
+    await expect(completeManualReconciliation(
+      row('verifying').id,
+      row('verifying').claim_token!,
+      '55555555-5555-4555-8555-555555555555',
+    )).resolves.toMatchObject({ status: 'reconciled' });
+    const query = (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
+    expect(query).toContain('UPDATE plan_operator_scheduled_posts');
+    expect(query).toContain('SET reconciled_at = CURRENT_TIMESTAMP');
+    expect(query).toContain('operator_scheduled.notion_page_id = reconciled.notion_page_id');
   });
 
   it('requeues retryable failures and makes the fourth attempt terminal', async () => {

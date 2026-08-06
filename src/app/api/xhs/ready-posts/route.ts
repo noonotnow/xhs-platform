@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { listReadyXhsPosts, normalizeNotionPostsError } from '@/lib/notion-posts';
 import { requireXhsOperator } from '@/lib/xhs-operator-auth';
+import { listPlanOperatorScheduledPageIds } from '@/lib/plan-operator-scheduled-store';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -30,6 +31,10 @@ export async function GET(request: NextRequest) {
       requestId,
       includePublishedCandidates: true,
     });
+    const handled = await listPlanOperatorScheduledPageIds(
+      result.posts.map((post) => post.id),
+    );
+    result.posts = result.posts.filter((post) => !handled.has(post.id));
     console.info('Ready posts request completed', {
       requestId,
       postCount: result.posts.length,
