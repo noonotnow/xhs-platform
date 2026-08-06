@@ -33,8 +33,10 @@ import {
 } from '@/lib/manual-rednote-handoff';
 import { isMovCompatibilityTrialEligible } from '@/lib/mov-compatibility-trial';
 import {
+  directManualSchedulingCandidate,
   displayedLocalPublishJob,
   isActiveLocalPublishJob,
+  publicationOperationalTruth,
   receiptPendingLocalPublishJobs,
 } from '@/lib/local-publish-job-display';
 import { manualSchedulingProvenanceMismatch } from '@/lib/manual-scheduling-provenance';
@@ -362,8 +364,14 @@ export default function ReadyPostsPanel() {
     [posts, selectedId],
   );
   const activeUnpublishedPosts = useMemo(
-    () => posts.filter((post) => post.candidateKind === 'active_unpublished'),
-    [posts],
+    () => posts.filter((post) =>
+      post.candidateKind === 'active_unpublished' &&
+      publicationOperationalTruth(
+        post,
+        displayedLocalPublishJob(jobs, post.id),
+        manualReconciliations.find((item) => item.notionPageId === post.id),
+      ).state !== 'published'),
+    [jobs, manualReconciliations, posts],
   );
   const pendingBatch = batches.find((batch) =>
     batch.kind === 'bootstrap' && batch.status === 'pending_approval');
@@ -374,8 +382,23 @@ export default function ReadyPostsPanel() {
     batch.items.some((item) => item.recoveryEvidence));
   const manualUrlError = manualPublicPostError(manualPublicPost);
   const packetReadyPosts = useMemo(
-    () => posts.filter((post) => post.candidateKind === 'packet_ready'),
-    [posts],
+    () => posts.filter((post) =>
+      post.candidateKind === 'packet_ready' &&
+      publicationOperationalTruth(
+        post,
+        displayedLocalPublishJob(jobs, post.id),
+        manualReconciliations.find((item) => item.notionPageId === post.id),
+      ).state !== 'published'),
+    [jobs, manualReconciliations, posts],
+  );
+  const publishedPosts = useMemo(
+    () => posts.filter((post) =>
+      publicationOperationalTruth(
+        post,
+        displayedLocalPublishJob(jobs, post.id),
+        manualReconciliations.find((item) => item.notionPageId === post.id),
+      ).state === 'published'),
+    [jobs, manualReconciliations, posts],
   );
   const movTrialPosts = useMemo(
     () => posts.filter((post) => post.candidateKind === 'mov_compatibility_trial'),
@@ -417,40 +440,8 @@ export default function ReadyPostsPanel() {
     : undefined;
   const currentJobStatus = jobStatusCopy(currentJob, selected);
   const manualSchedulingCandidate = useMemo<ManualSchedulingAttestationEvidence | undefined>(
-    () => {
-      if (
-        !selected ||
-        selected.candidateKind !== 'packet_ready' ||
-        !selected.scheduledDate ||
-        !selected.publishAt
-      ) {
-        return undefined;
-      }
-      for (const batch of batches) {
-        if (!['approved', 'partially_approved'].includes(batch.status)) continue;
-        const item = batch.items.find((candidate) =>
-          candidate.notionPageId === selected.id &&
-          ['approved', 'queued'].includes(candidate.state) &&
-          candidate.dispatchMode === 'scheduled' &&
-          candidate.snapshot.notionLastEditedTime === selected.lastEditedTime &&
-          candidate.snapshot.publishAt === selected.publishAt &&
-          (!candidate.localPublishJobId ||
-            (currentJob?.status === 'queued' &&
-              currentJob.id === candidate.localPublishJobId)));
-        if (item?.snapshot.publishAt) {
-          return {
-            batchId: batch.id,
-            manifestHash: batch.manifestHash,
-            itemId: item.id,
-            itemHash: item.itemHash,
-            snapshotRevision: item.snapshot.notionLastEditedTime,
-            requestedPublishAt: item.snapshot.publishAt,
-          };
-        }
-      }
-      return undefined;
-    },
-    [batches, currentJob, selected],
+    () => directManualSchedulingCandidate(selected, batches, jobs),
+    [batches, jobs, selected],
   );
   const currentManualReconciliation = selected
     ? manualReconciliations.find(
@@ -460,6 +451,10 @@ export default function ReadyPostsPanel() {
   const currentManualStatus = manualReconciliationStatusCopy(
     currentManualReconciliation,
   );
+  const currentTruth = selected
+    ? publicationOperationalTruth(selected, currentJob, currentManualReconciliation)
+    : undefined;
+  const selectedIsPublished = currentTruth?.state === 'published';
   const hasActiveManualReconciliation = Boolean(
     currentManualReconciliation &&
       (currentManualReconciliation.status === 'queued' ||
@@ -467,7 +462,7 @@ export default function ReadyPostsPanel() {
   );
   const hasActiveJob = Boolean(currentJob && isActiveLocalPublishJob(currentJob));
   const canStartManualReconciliation =
-    !currentJob || currentJob.status === 'failed';
+    !currentJob || currentJob.status === 'failed' || currentJob.status === 'queued';
   const reviewedTags = tagsFromInput(finalTags);
   const missingTags = getMissingTags(reviewedTags, finalCaption);
   const showTitleCopy = shouldOfferTitleCopy(finalTitle, finalCaption);
@@ -1009,7 +1004,11 @@ export default function ReadyPostsPanel() {
   }
 
   function postButton(post: ReadyXhsPost) {
-    const job = jobs.find((candidate) => candidate.notionPageId === post.id);
+    const job = displayedLocalPublishJob(jobs, post.id);
+    const reconciliation = manualReconciliations.find(
+      (candidate) => candidate.notionPageId === post.id,
+    );
+    const truth = publicationOperationalTruth(post, job, reconciliation);
     const isTrialOnly = post.candidateKind === 'mov_compatibility_trial';
     const batchItem = batches.flatMap((batch) => batch.items)
       .find((item) => item.notionPageId === post.id);
@@ -1033,9 +1032,11 @@ export default function ReadyPostsPanel() {
         <span className={isTrialOnly ? styles.trialRowLabel : styles.readyRowLabel}>
           {isTrialOnly
             ? 'MOV staging trial only'
-            : job
-              ? dashboardState(job)
-              : batchItem?.state === 'approved'
+            : truth.state !== 'not_published'
+              ? truth.label
+              : job
+                ? dashboardState(job)
+                : batchItem?.state === 'approved'
                 ? 'Approved'
                 : post.publishAt
                   ? post.candidateKind === 'packet_ready'
@@ -1068,8 +1069,8 @@ export default function ReadyPostsPanel() {
         <div>
           <h2 className={styles.heading} id="ready-posts-heading">4. Ready from CREATE</h2>
           <p className={styles.intro}>
-            Review the final RedNote copy and queue a trusted packet for the Mac-local browser
-            worker. Only a verified RedNote post is backfilled as Published.
+            Post or schedule manually first. The worker only stages, verifies, and reconciles
+            operator-owned truth; it never gates manual publishing.
           </p>
         </div>
         <button className={styles.refresh} type="button" onClick={() => {
@@ -1411,6 +1412,13 @@ export default function ReadyPostsPanel() {
                 {activeUnpublishedPosts.map(postButton)}
               </section>
             )}
+            {publishedPosts.length > 0 && (
+              <section className={styles.candidateGroup} aria-labelledby="published-group">
+                <h3 id="published-group">Published</h3>
+                <p>Canonical or verified published records; never dispatch these again.</p>
+                {publishedPosts.map(postButton)}
+              </section>
+            )}
           </div>
 
           {selected && (
@@ -1428,6 +1436,9 @@ export default function ReadyPostsPanel() {
                 </span>
               </div>
               <p className={styles.muted}>Notion status: {selected.status || 'Not set'}</p>
+              {currentTruth && (
+                <p className={styles.muted}>Operational truth: {currentTruth.label}</p>
+              )}
               {selectedSchedule && (
                 <div className={styles.scheduleSummary}>
                   <div className={styles.scheduleSummaryHeading}>
@@ -1497,7 +1508,7 @@ export default function ReadyPostsPanel() {
                       packet and cannot be replaced by a client-provided URL.
                     </p>
                   </div>
-                  <span className={styles.primaryPath}>Primary path</span>
+                  <span className={styles.primaryPath}>Support path</span>
                 </div>
 
                 {currentJobStatus && (
@@ -1580,15 +1591,15 @@ export default function ReadyPostsPanel() {
 
                 {selected.candidateKind === 'packet_ready' &&
                   !currentManualReconciliation &&
-                  !hasActiveJob &&
+                  !selectedIsPublished &&
                   canStartManualReconciliation && (
                   <div className={styles.manualReconciliation}>
                     <div className={styles.manualReconciliationHeading}>
                       <div>
                         <strong>Reconcile public URL</strong>
                         <p>
-                          Verify an existing public post and backfill this canonical row.
-                          This action never publishes.
+                          Attest an existing public post, close only an untouched queued dispatch,
+                          then verify and backfill this canonical row. This action never publishes.
                         </p>
                       </div>
                       <button
@@ -1667,7 +1678,7 @@ export default function ReadyPostsPanel() {
                       maxLength={100}
                       value={finalTitle}
                       onChange={(event) => setFinalTitle(event.target.value)}
-                      disabled={hasActiveJob || hasActiveManualReconciliation}
+                      disabled={hasActiveJob || hasActiveManualReconciliation || selectedIsPublished}
                     />
                   </label>
                   <label className={styles.reviewField}>
@@ -1677,7 +1688,7 @@ export default function ReadyPostsPanel() {
                       rows={7}
                       value={finalCaption}
                       onChange={(event) => setFinalCaption(event.target.value)}
-                      disabled={hasActiveJob || hasActiveManualReconciliation}
+                      disabled={hasActiveJob || hasActiveManualReconciliation || selectedIsPublished}
                     />
                     <small>
                       Prefilled from Caption. Trailing hashtags are removed only when Final Tags
@@ -1691,7 +1702,7 @@ export default function ReadyPostsPanel() {
                       value={finalTags}
                       onChange={(event) => setFinalTags(event.target.value)}
                       placeholder="Comma-separated tags"
-                      disabled={hasActiveJob || hasActiveManualReconciliation}
+                      disabled={hasActiveJob || hasActiveManualReconciliation || selectedIsPublished}
                     />
                     <small>
                       {selected.tagsSource === 'legacy-caption'
@@ -1714,7 +1725,7 @@ export default function ReadyPostsPanel() {
                         ? `${selectedMedia.compatibilityTrial ?? selectedMedia.type}:${selectedMedia.index}`
                         : ''}
                       onChange={(event) => setMediaKey(event.target.value)}
-                      disabled={hasActiveJob || hasActiveManualReconciliation}
+                      disabled={hasActiveJob || hasActiveManualReconciliation || selectedIsPublished}
                     >
                       {mediaChoices.map((choice) => (
                         <option
@@ -1740,6 +1751,7 @@ export default function ReadyPostsPanel() {
                   onClick={queueSelected}
                   disabled={
                     queueing ||
+                    selectedIsPublished ||
                     hasActiveJob ||
                     hasActiveManualReconciliation ||
                     (isMovCompatibilityTrial

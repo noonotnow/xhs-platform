@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from 'util';
 import type { QueryResultRow } from 'pg';
-import { sql } from '@/lib/db';
+import { getPool, sql } from '@/lib/db';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
 import type {
   ClaimedManualReconciliation,
@@ -161,52 +161,128 @@ export async function insertManualReconciliation(input: {
   expected: ManualReconciliationExpectedSnapshot;
   idempotencyKey: string;
 }) {
-  const inserted = await sql<ManualReconciliationRow>`
-    WITH page_lock AS (
-      SELECT pg_advisory_xact_lock(hashtextextended(${input.notionPageId}, 0))
-    ),
-    source_job AS (
-      SELECT id
-      FROM local_publish_jobs
-      WHERE notion_page_id = ${input.notionPageId}
-        AND status = 'failed'
-      ORDER BY created_at DESC
-      LIMIT 1
-    )
-    INSERT INTO manual_reconciliation_requests (
-      notion_page_id,
-      source_local_job_id,
-      requested_note_id,
-      requested_share_url,
-      expected_snapshot,
-      idempotency_key
-    )
-    SELECT
-      ${input.notionPageId},
-      source_job.id,
-      ${input.noteId},
-      ${input.shareUrl},
-      ${JSON.stringify(input.expected)}::jsonb,
-      ${input.idempotencyKey}::uuid
-    FROM page_lock
-    LEFT JOIN source_job ON TRUE
-    WHERE NOT EXISTS (
-      SELECT 1
-      FROM local_publish_jobs
-      WHERE notion_page_id = ${input.notionPageId}
-        AND status NOT IN ('reconciled', 'succeeded', 'failed')
-    )
-      AND NOT EXISTS (
-        SELECT 1
-        FROM manual_reconciliation_requests
-        WHERE notion_page_id = ${input.notionPageId}
-          AND status IN ('queued', 'verifying')
-      )
-    ON CONFLICT DO NOTHING
-    RETURNING *
-  `;
-  if (inserted.rows[0]) {
-    return { request: mapRow(inserted.rows[0]), created: true };
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+      [input.notionPageId],
+    );
+    const jobs = await client.query<{
+      id: string;
+      status: string;
+      claim_token: string | null;
+      claimed_at: Date | string | null;
+      staged_at: Date | string | null;
+      dispatch_authorized_at: Date | string | null;
+      dispatched_at: Date | string | null;
+      note_id: string | null;
+      share_url: string | null;
+      verified_at: Date | string | null;
+      reconciled_at: Date | string | null;
+      success_attestation_id: string | null;
+      external_disposition_request_id: string | null;
+    }>(
+      `SELECT id, status, claim_token, claimed_at, staged_at,
+              dispatch_authorized_at, dispatched_at, note_id, share_url,
+              verified_at, reconciled_at, success_attestation_id,
+              external_disposition_request_id
+       FROM local_publish_jobs
+       WHERE notion_page_id = $1
+       ORDER BY created_at DESC
+       FOR UPDATE`,
+      [input.notionPageId],
+    );
+    const active = jobs.rows.filter((job) =>
+      !['reconciled', 'succeeded', 'failed'].includes(job.status));
+    if (active.length > 1) {
+      throw new LocalPublishJobError(
+        'This post has multiple active local publish jobs and needs review',
+        'ACTIVE_JOB_EXISTS',
+        409,
+      );
+    }
+    const source = active[0] ?? jobs.rows.find((job) => job.status === 'failed');
+    if (source && source.status !== 'failed') {
+      const pristineQueued =
+        source.status === 'queued' &&
+        !source.claim_token &&
+        !source.claimed_at &&
+        !source.staged_at &&
+        !source.dispatch_authorized_at &&
+        !source.dispatched_at &&
+        !source.note_id &&
+        !source.share_url &&
+        !source.verified_at &&
+        !source.reconciled_at &&
+        !source.success_attestation_id &&
+        !source.external_disposition_request_id;
+      if (!pristineQueued) {
+        throw new LocalPublishJobError(
+          'A worker already owns or advanced this local publish job',
+          'ACTIVE_JOB_EXISTS',
+          409,
+        );
+      }
+    }
+    const inserted = await client.query<ManualReconciliationRow>(
+      `INSERT INTO manual_reconciliation_requests (
+         notion_page_id, source_local_job_id, requested_note_id,
+         requested_share_url, expected_snapshot, idempotency_key
+       ) VALUES ($1, $2::uuid, $3, $4, $5::jsonb, $6::uuid)
+       ON CONFLICT DO NOTHING
+       RETURNING *`,
+      [
+        input.notionPageId,
+        source?.id ?? null,
+        input.noteId,
+        input.shareUrl,
+        JSON.stringify(input.expected),
+        input.idempotencyKey,
+      ],
+    );
+    if (inserted.rows[0]) {
+      if (source?.status === 'queued') {
+        const stopped = await client.query(
+          `UPDATE local_publish_jobs
+           SET status = 'failed',
+               error_code = 'MANUAL_PUBLICATION_ATTESTED',
+               error_message = 'Operator reported an existing public post; dispatch is closed pending verification',
+               completed_at = CURRENT_TIMESTAMP,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = $1::uuid
+             AND status = 'queued'
+             AND claim_token IS NULL
+             AND claimed_at IS NULL
+             AND staged_at IS NULL
+             AND dispatch_authorized_at IS NULL
+             AND dispatched_at IS NULL
+             AND note_id IS NULL
+             AND share_url IS NULL
+             AND verified_at IS NULL
+             AND reconciled_at IS NULL
+             AND success_attestation_id IS NULL
+             AND external_disposition_request_id IS NULL
+           RETURNING id`,
+          [source.id],
+        );
+        if (stopped.rowCount !== 1) {
+          throw new LocalPublishJobError(
+            'The local publish job changed before dispatch could be closed',
+            'ACTIVE_JOB_EXISTS',
+            409,
+          );
+        }
+      }
+      await client.query('COMMIT');
+      return { request: mapRow(inserted.rows[0]), created: true };
+    }
+    await client.query('ROLLBACK');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
 
   const existingKey = await findManualReconciliationByIdempotencyKey(
