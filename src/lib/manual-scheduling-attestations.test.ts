@@ -37,6 +37,8 @@ const post = {
   publishAt: '2026-08-06T14:30:00.000Z',
   lastEditedTime: '2026-08-04T13:12:00.000Z',
   publishBlockers: [],
+  automationBlockers: [],
+  manualWarnings: [],
   candidateKind: 'packet_ready' as const,
 };
 const snapshot = {

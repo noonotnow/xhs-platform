@@ -14,6 +14,10 @@ import type {
   RednotePublishJobRecoveryEvidence,
 } from '@/types/local-publish-job';
 import type { ReadyXhsPost, ReadyXhsPostsResponse } from '@/types/ready-post';
+import type {
+  ManualHandlingMode,
+  ManualPostHandlingResponse,
+} from '@/types/manual-post-handling';
 import styles from './ReadyPostsPanel.module.css';
 import { responseJson } from '@/lib/response-json';
 import {
@@ -35,6 +39,7 @@ import { isMovCompatibilityTrialEligible } from '@/lib/mov-compatibility-trial';
 import {
   directManualSchedulingCandidate,
   displayedLocalPublishJob,
+  hasLiveUnsafeAutomationOwnership,
   isActiveLocalPublishJob,
   publicationOperationalTruth,
   receiptPendingLocalPublishJobs,
@@ -120,7 +125,7 @@ function tagsFromInput(value: string) {
 
 function publishTiming(post: ReadyXhsPost) {
   const schedule = getEditorialScheduleDisplay(post.scheduledDate);
-  if (post.publishBlockers.includes(
+  if (post.automationBlockers.includes(
     'ScheduledDate must include a valid publish time and timezone',
   )) {
     return {
@@ -296,7 +301,7 @@ function manualReconciliationStatusCopy(
       tone: 'pending',
       title: 'Verifying the existing RedNote post',
       detail:
-        'The worker is checking the exact note ID, public URL, title, caption, and media type. Do not publish again.',
+        'The worker is checking the exact public identity and the canonical metadata available at handoff. Do not publish again.',
     };
   }
   if (reconciliation.status === 'failed') {
@@ -343,6 +348,9 @@ export default function ReadyPostsPanel() {
   const [manualPublicPost, setManualPublicPost] = useState('');
   const [manualConfirmed, setManualConfirmed] = useState(false);
   const [manualSubmitting, setManualSubmitting] = useState(false);
+  const [manualHandlingMode, setManualHandlingMode] =
+    useState<ManualHandlingMode>('scheduled');
+  const [manualHandlingSubmitting, setManualHandlingSubmitting] = useState(false);
   const [selectedId, setSelectedId] = useState('');
   const [loading, setLoading] = useState(true);
   const [queueing, setQueueing] = useState(false);
@@ -360,6 +368,7 @@ export default function ReadyPostsPanel() {
   const attestationKeysRef = useRef<Record<string, string>>({});
   const manualSchedulingKeysRef = useRef<Record<string, string>>({});
   const receiptKeysRef = useRef<Record<string, string>>({});
+  const manualHandlingKeysRef = useRef<Record<string, string>>({});
 
   const selected = useMemo(
     () => posts.find((post) => post.id === selectedId) ?? posts[0],
@@ -453,6 +462,7 @@ export default function ReadyPostsPanel() {
   const currentManualStatus = manualReconciliationStatusCopy(
     currentManualReconciliation,
   );
+  const currentManualHandling = selected?.manualHandling;
   const currentTruth = selected
     ? publicationOperationalTruth(selected, currentJob, currentManualReconciliation)
     : undefined;
@@ -463,8 +473,12 @@ export default function ReadyPostsPanel() {
         currentManualReconciliation.status === 'verifying'),
   );
   const hasActiveJob = Boolean(currentJob && isActiveLocalPublishJob(currentJob));
+  const hasLiveManualOwnership = hasLiveUnsafeAutomationOwnership(currentJob);
   const canStartManualReconciliation =
-    !currentJob || currentJob.status === 'failed' || currentJob.status === 'queued';
+    Boolean(
+      currentManualHandling?.receiptStatus === 'pending'
+      && (!currentJob || currentJob.status === 'failed' || currentJob.status === 'queued'),
+    );
   const reviewedTags = tagsFromInput(finalTags);
   const missingTags = getMissingTags(reviewedTags, finalCaption);
   const showTitleCopy = shouldOfferTitleCopy(finalTitle, finalCaption);
@@ -606,7 +620,53 @@ export default function ReadyPostsPanel() {
     setShowManualReconciliation(false);
     setManualPublicPost('');
     setManualConfirmed(false);
+    setManualHandlingMode('scheduled');
   }, [selected]);
+
+  async function markSelectedHandledManually() {
+    if (!selected || currentManualHandling || selectedIsPublished) return;
+    const idempotencyKey =
+      manualHandlingKeysRef.current[selected.id] ?? crypto.randomUUID();
+    manualHandlingKeysRef.current[selected.id] = idempotencyKey;
+    setManualHandlingSubmitting(true);
+    setError('');
+    try {
+      const path = '/admin/api/manual-post-handlings';
+      const response = await fetch(path, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey,
+        },
+        body: JSON.stringify({
+          notionPageId: selected.id,
+          expectedLastEditedTime: selected.lastEditedTime,
+          mode: manualHandlingMode,
+        }),
+      });
+      const data = await responseJson<ManualPostHandlingResponse & ApiError>(
+        response,
+        `POST ${path}`,
+      );
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to record manual handling');
+      }
+      delete manualHandlingKeysRef.current[selected.id];
+      setPosts((current) => current.map((post) =>
+        post.id === selected.id
+          ? { ...post, manualHandling: data.handling }
+          : post));
+      await loadJobs();
+    } catch (handlingError) {
+      setError(
+        handlingError instanceof Error
+          ? handlingError.message
+          : 'Failed to record manual handling',
+      );
+    } finally {
+      setManualHandlingSubmitting(false);
+    }
+  }
 
   async function queueSelected() {
     if (!selected || selected.candidateKind !== 'packet_ready' || !selectedMedia) return;
@@ -671,7 +731,11 @@ export default function ReadyPostsPanel() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(action === 'create'
-            ? { action, kind: 'bootstrap' }
+            ? {
+                action,
+                kind: 'bootstrap',
+                notionPageIds: selected ? [selected.id] : [],
+              }
             : {
                 action,
                 batchId: pendingBatch?.id,
@@ -1487,10 +1551,13 @@ export default function ReadyPostsPanel() {
                 </div>
               )}
 
-              {selected.publishBlockers.length > 0 && (
-                <ul className={styles.blockers}>
-                  {selected.publishBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}
-                </ul>
+              {selected.manualWarnings.length > 0 && (
+                <div className={styles.manualWarnings} role="note">
+                  <strong>Manual handoff warnings</strong>
+                  <ul className={styles.blockers}>
+                    {selected.manualWarnings.map((warning) => <li key={warning}>{warning}</li>)}
+                  </ul>
+                </div>
               )}
 
               {(selected.compatibilityTrialVideoUrls?.length ?? 0) > 0 && (
@@ -1503,7 +1570,19 @@ export default function ReadyPostsPanel() {
                 </div>
               )}
 
-              <section className={styles.localQueue} aria-labelledby="local-queue-heading">
+              <details className={styles.automation}>
+                <summary>Explicit automation · legacy Mac worker</summary>
+                {selected.automationBlockers.length > 0 && (
+                  <div className={styles.automationBlockers} role="note">
+                    <strong>Automation blockers</strong>
+                    <ul className={styles.blockers}>
+                      {selected.automationBlockers.map((blocker) => (
+                        <li key={blocker}>{blocker}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                <section className={styles.localQueue} aria-labelledby="local-queue-heading">
                 <div className={styles.queueHeading}>
                   <div>
                     <h4 id="local-queue-heading">Local RedNote browser queue</h4>
@@ -1512,7 +1591,7 @@ export default function ReadyPostsPanel() {
                       packet and cannot be replaced by a client-provided URL.
                     </p>
                   </div>
-                  <span className={styles.primaryPath}>Support path</span>
+                  <span className={styles.primaryPath}>Explicit automation</span>
                 </div>
 
                 {currentJobStatus && (
@@ -1561,118 +1640,6 @@ export default function ReadyPostsPanel() {
                       </button>
                     </div>
                   </div>
-                )}
-
-                {selected.candidateKind === 'packet_ready' && currentManualStatus && (
-                  <div
-                    className={`${styles.jobStatus} ${
-                      styles[`jobStatus${currentManualStatus.tone}`]
-                    }`}
-                    role="status"
-                  >
-                    <strong>{currentManualStatus.title}</strong>
-                    <p>{currentManualStatus.detail}</p>
-                    {currentManualReconciliation?.status === 'failed' && (
-                      <button
-                        className={styles.retryButton}
-                        type="button"
-                        onClick={retryManualReconciliation}
-                        disabled={manualSubmitting || hasActiveJob}
-                      >
-                        {manualSubmitting ? 'Retrying…' : 'Retry verification'}
-                      </button>
-                    )}
-                    {currentManualReconciliation?.status === 'reconciled' && (
-                      <a
-                        href={currentManualReconciliation.shareUrl}
-                        {...SAFE_EXTERNAL_LINK_PROPS}
-                      >
-                        Open reconciled RedNote post
-                      </a>
-                    )}
-                  </div>
-                )}
-
-                {selected.candidateKind === 'packet_ready' &&
-                  !currentManualReconciliation &&
-                  !selectedIsPublished &&
-                  canStartManualReconciliation && (
-                  <div className={styles.manualReconciliation}>
-                    <div className={styles.manualReconciliationHeading}>
-                      <div>
-                        <strong>Reconcile public URL</strong>
-                        <p>
-                          Attest an existing public post, close only an untouched queued dispatch,
-                          then verify and backfill this canonical row. This action never publishes.
-                        </p>
-                      </div>
-                      <button
-                        className={styles.reconcileButton}
-                        type="button"
-                        onClick={() => setShowManualReconciliation((current) => !current)}
-                        aria-expanded={showManualReconciliation}
-                      >
-                        {showManualReconciliation ? 'Cancel' : 'Reconcile'}
-                      </button>
-                    </div>
-                    {showManualReconciliation && (
-                      <div className={styles.manualReconciliationForm}>
-                        <label className={styles.reviewField}>
-                          <span>Public RedNote URL or note ID</span>
-                          <input
-                            autoComplete="off"
-                            maxLength={500}
-                            placeholder="https://www.rednote.com/explore/…"
-                            value={manualPublicPost}
-                            onChange={(event) => setManualPublicPost(event.target.value)}
-                            disabled={manualSubmitting}
-                          />
-                          <small>
-                            Paste the public URL or bare note ID. Query and fragment data is
-                            discarded; the worker verifies canonical title, caption, and media.
-                          </small>
-                          {manualUrlError && (
-                            <small className={styles.inlineError} role="alert">
-                              {manualUrlError}
-                            </small>
-                          )}
-                        </label>
-                        <label className={styles.confirmation}>
-                          <input
-                            type="checkbox"
-                            checked={manualConfirmed}
-                            onChange={(event) => setManualConfirmed(event.target.checked)}
-                            disabled={manualSubmitting}
-                          />
-                          <span>
-                            I confirm this post is already public and should be verified, not
-                            published again.
-                          </span>
-                        </label>
-                        <button
-                          className={styles.reconcileSubmit}
-                          type="button"
-                          onClick={reconcileSelected}
-                          disabled={
-                            manualSubmitting ||
-                            !manualConfirmed ||
-                            !manualPublicPost.trim() ||
-                            Boolean(manualUrlError)
-                          }
-                        >
-                          {manualSubmitting
-                            ? 'Queueing verification…'
-                            : 'Queue existing-post verification'}
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {selected.candidateKind === 'packet_ready' && manualReconciliationError && (
-                  <p className={styles.inlineError} role="alert">
-                    {manualReconciliationError}
-                  </p>
                 )}
 
                 <div className={styles.reviewFields}>
@@ -1761,7 +1728,7 @@ export default function ReadyPostsPanel() {
                     (isMovCompatibilityTrial
                       ? !movTrialIsEligible
                       : selected.candidateKind !== 'packet_ready' ||
-                        selected.publishBlockers.length > 0 ||
+                        selected.automationBlockers.length > 0 ||
                         !selected.publishAt) ||
                     !selectedMedia ||
                     !finalTitle.trim() ||
@@ -1786,15 +1753,189 @@ export default function ReadyPostsPanel() {
                   sequentially without per-job approval. Legacy and MOV trial jobs still require
                   exact per-job approval.
                 </p>
-              </section>
+                </section>
+              </details>
 
-              {selected.candidateKind === 'packet_ready' ? (
-                <details className={styles.handoff}>
-                <summary>Manual handoff and download controls</summary>
+              <section className={styles.handoff} aria-labelledby="manual-handoff-heading">
+                <div className={styles.handoffHeading}>
+                  <div>
+                    <h4 id="manual-handoff-heading">Manual RedNote handoff</h4>
+                    <p>Default path · operator-controlled Creator publishing and durable receipt.</p>
+                  </div>
+                  <span className={styles.primaryPath}>Default</span>
+                </div>
                 <p>
-                  Use these controls if the local worker is unavailable. Nothing is sent to
-                  RedNote until you publish in the Creator tab.
+                  Nothing is sent to RedNote until you act in Creator. Warnings stay visible but do
+                  not prevent recording what the operator actually did.
                 </p>
+
+                {currentManualHandling ? (
+                  <div
+                    className={`${styles.jobStatus} ${
+                      currentManualHandling.receiptStatus === 'reconciled'
+                        ? styles.jobStatussuccess
+                        : styles.jobStatuswarning
+                    }`}
+                    role="status"
+                  >
+                    <strong>
+                      {currentManualHandling.receiptStatus === 'reconciled'
+                        ? 'Published · verified manual receipt'
+                        : 'Approved · operator handled · receipt pending'}
+                    </strong>
+                    <p>
+                      {currentManualHandling.receiptStatus === 'reconciled'
+                        ? `Reconciled note ${currentManualHandling.noteId}.`
+                        : `${currentManualHandling.mode === 'scheduled' ? 'Scheduled' : 'Published'} was recorded as durable operator truth. Automatic dispatch is closed.`}
+                    </p>
+                    {currentManualHandling.shareUrl && (
+                      <a
+                        href={currentManualHandling.shareUrl}
+                        {...SAFE_EXTERNAL_LINK_PROPS}
+                      >
+                        Open reconciled RedNote post
+                      </a>
+                    )}
+                  </div>
+                ) : !selectedIsPublished && (
+                  <div className={styles.manualHandlingAction}>
+                    <label className={styles.reviewField}>
+                      <span>What did you do in Creator?</span>
+                      <select
+                        value={manualHandlingMode}
+                        onChange={(event) =>
+                          setManualHandlingMode(event.target.value as ManualHandlingMode)}
+                        disabled={manualHandlingSubmitting || hasLiveManualOwnership}
+                      >
+                        <option value="scheduled">Scheduled in Creator</option>
+                        <option value="published">Published in Creator</option>
+                      </select>
+                    </label>
+                    <button
+                      className={styles.reconcileSubmit}
+                      type="button"
+                      onClick={markSelectedHandledManually}
+                      disabled={
+                        manualHandlingSubmitting
+                        || hasLiveManualOwnership
+                        || selected.status.trim().toLowerCase() !== 'approved'
+                      }
+                    >
+                      {manualHandlingSubmitting ? 'Recording…' : 'Mark handled manually'}
+                    </button>
+                  </div>
+                )}
+
+                {currentManualStatus && (
+                  <div
+                    className={`${styles.jobStatus} ${
+                      styles[`jobStatus${currentManualStatus.tone}`]
+                    }`}
+                    role="status"
+                  >
+                    <strong>{currentManualStatus.title}</strong>
+                    <p>{currentManualStatus.detail}</p>
+                    {currentManualReconciliation?.status === 'failed' && (
+                      <button
+                        className={styles.retryButton}
+                        type="button"
+                        onClick={retryManualReconciliation}
+                        disabled={manualSubmitting || hasActiveJob}
+                      >
+                        {manualSubmitting ? 'Retrying…' : 'Retry verification'}
+                      </button>
+                    )}
+                    {currentManualReconciliation?.status === 'reconciled' && (
+                      <a
+                        href={currentManualReconciliation.shareUrl}
+                        {...SAFE_EXTERNAL_LINK_PROPS}
+                      >
+                        Open reconciled RedNote post
+                      </a>
+                    )}
+                  </div>
+                )}
+
+                {!currentManualReconciliation &&
+                  !selectedIsPublished &&
+                  canStartManualReconciliation && (
+                  <div className={styles.manualReconciliation}>
+                    <div className={styles.manualReconciliationHeading}>
+                      <div>
+                        <strong>Verify public identity</strong>
+                        <p>
+                          Paste the live URL or note ID after the post is public. Verification never
+                          clicks Publish and Notion stays Approved until it succeeds.
+                        </p>
+                      </div>
+                      <button
+                        className={styles.reconcileButton}
+                        type="button"
+                        onClick={() => setShowManualReconciliation((current) => !current)}
+                        aria-expanded={showManualReconciliation}
+                      >
+                        {showManualReconciliation ? 'Cancel' : 'Paste URL / note ID'}
+                      </button>
+                    </div>
+                    {showManualReconciliation && (
+                      <div className={styles.manualReconciliationForm}>
+                        <label className={styles.reviewField}>
+                          <span>Public RedNote URL or note ID</span>
+                          <input
+                            autoComplete="off"
+                            maxLength={500}
+                            placeholder="https://www.rednote.com/explore/…"
+                            value={manualPublicPost}
+                            onChange={(event) => setManualPublicPost(event.target.value)}
+                            disabled={manualSubmitting}
+                          />
+                          <small>
+                            Query and fragment data is discarded. The exact public identity is
+                            verified before any Notion backfill.
+                          </small>
+                          {manualUrlError && (
+                            <small className={styles.inlineError} role="alert">
+                              {manualUrlError}
+                            </small>
+                          )}
+                        </label>
+                        <label className={styles.confirmation}>
+                          <input
+                            type="checkbox"
+                            checked={manualConfirmed}
+                            onChange={(event) => setManualConfirmed(event.target.checked)}
+                            disabled={manualSubmitting}
+                          />
+                          <span>
+                            I confirm this post is already public and must be verified, not
+                            published again.
+                          </span>
+                        </label>
+                        <button
+                          className={styles.reconcileSubmit}
+                          type="button"
+                          onClick={reconcileSelected}
+                          disabled={
+                            manualSubmitting
+                            || !manualConfirmed
+                            || !manualPublicPost.trim()
+                            || Boolean(manualUrlError)
+                          }
+                        >
+                          {manualSubmitting
+                            ? 'Queueing verification…'
+                            : 'Queue public verification'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {manualReconciliationError && (
+                  <p className={styles.inlineError} role="alert">
+                    {manualReconciliationError}
+                  </p>
+                )}
 
                 <div className={styles.assetAction}>
                   <div>
@@ -1890,16 +2031,11 @@ export default function ReadyPostsPanel() {
                   </a>
                 </div>
                 <p className={styles.backfillNotice}>
-                  Manual publishing is not backfilled automatically. Leave Notion unchanged until
-                  the exact published RedNote URL and note ID are reconciled.
+                  Leave Notion Approved until the exact public URL and note ID are verified.
+                  Successful verification backfills the receipt and moves the canonical row to
+                  Published without rewriting packet, copy, media, or needs flags.
                 </p>
-                </details>
-              ) : (
-                <p className={styles.trialManualHandoffDisabled}>
-                  Manual Creator handoff is disabled for unverified MOV trials. Use the staging
-                  queue above so the worker enforces the separate publish approval.
-                </p>
-              )}
+              </section>
 
               <details className={styles.experimental}>
                 <summary>Legacy cloud cookie publisher — retired</summary>

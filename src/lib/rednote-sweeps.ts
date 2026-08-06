@@ -67,7 +67,13 @@ export async function runDueRednoteSweeps(now = new Date()) {
     if (!runId) continue;
     try {
       const recoveredReceipts = await recoverKnownReceipts();
-      const batch = await createPublishBatch(cadence === 'weekly' ? 'weekly' : 'catch_up', now);
+      // Sweeps recover receipts and cadence records only. Publishing manifests
+      // require explicit operator-selected page IDs.
+      const batch = await createPublishBatch(
+        cadence === 'weekly' ? 'weekly' : 'catch_up',
+        [],
+        now,
+      );
       await sql`
         UPDATE rednote_sweep_runs
         SET completed_at = CURRENT_TIMESTAMP,

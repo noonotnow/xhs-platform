@@ -62,11 +62,15 @@ export async function reconcileVerifiedExternalPost(input: {
   idempotencyKey: string;
   targetNotionPageId?: string;
   targetDispositionId?: string;
+  manualHandling?: { expectedNotionVersion: string };
+  source?: 'automation' | 'manual' | 'recovery';
 }) {
   const started = await beginExternalReconciliation(
     input.snapshot,
     input.idempotencyKey,
     input.targetDispositionId,
+    input.source ?? (input.manualHandling ? 'manual' : 'automation'),
+    input.targetNotionPageId,
   );
   if (!started.acquired) {
     return completedResult(started.record, input.targetNotionPageId);
@@ -78,6 +82,7 @@ export async function reconcileVerifiedExternalPost(input: {
           input.snapshot,
           started.record.createdAt,
           input.targetNotionPageId,
+          input.manualHandling,
         )
       : await reconcileExternalXhsPost(
           input.snapshot,

@@ -180,14 +180,17 @@ caching.
 | `POST /api/local-publish-jobs/:id/result` | Per-job token result; preserves staging, human approval, verification, and reconciliation gates |
 | `POST /admin/api/local-publish-job-success-attestations` | Access-authenticated exact scheduled-success attestation; immutable receipt, dispatch quarantine, and immediate worker release handshake |
 | `POST /admin/api/publish-job-recoveries` | Cloudflare Access operator action that requeues the same exact approved job only for a pre-dispatch `BOUNDED_BATCH_BYPASS_DISABLED` terminal claim generation and writes one append-only audit per generation |
+| `GET /admin/api/manual-post-handlings` | Access-authenticated durable manual handling state for Admin |
+| `POST /admin/api/manual-post-handlings` | Access-authenticated exact Approved-revision marker; warnings do not block operator truth |
 | `GET /api/rednote-metrics/due?limit=20` | Bounded metrics batch with a distinct token and lease per post |
 | `POST /api/rednote-metrics/observations` | Consolidated observations and one coalesced run summary |
 
 Metrics cadence is 6-hourly through 48 hours, daily through day 14, weekly
 through day 90, and manual afterward. The server stores a performance snapshot
 only for changed metrics or a scheduled checkpoint. Empty scans and exact
-retries do not write. Metrics storage references the canonical Posts page ID
-and never mutates Notion or CONNECT-owned records.
+retries do not write. Metrics storage references the canonical Posts page ID and exactly one
+publication provenance source: a reconciled local job or verified manual
+handling receipt. It never mutates Notion or CONNECT-owned records.
 
 Lane claims return HTTP 204 with no body when empty. Metrics due-list requests
 always return HTTP 200 with `{items,summary}`, including `items: []` when empty.

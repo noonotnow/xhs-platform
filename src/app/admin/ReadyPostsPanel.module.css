@@ -451,6 +451,8 @@
 }
 
 .detail {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   padding-left: 16px;
   border-left: 1px solid #e2e8f0;
@@ -543,14 +545,31 @@
 }
 
 .blockers {
-  margin: 10px 0 14px;
+  margin: 6px 0 0;
   padding-left: 20px;
   font-size: 0.8125rem;
   line-height: 1.6;
 }
 
-.blockers {
+.manualWarnings,
+.automationBlockers {
+  margin: 10px 0 14px;
+  padding: 11px 12px;
+  border: 1px solid;
+  border-radius: 8px;
+  font-size: 0.8125rem;
+}
+
+.manualWarnings {
+  color: #713f12;
+  background: #fffbeb;
+  border-color: #fde68a;
+}
+
+.automationBlockers {
   color: #9f1239;
+  background: #fff1f2;
+  border-color: #fecdd3;
 }
 
 .compatibilityTrialWarning,
@@ -630,7 +649,7 @@
 }
 
 .localQueue {
-  margin-top: 18px;
+  margin-top: 12px;
   padding: 18px;
   background: #faf8ff;
   border: 1px solid #c4b5fd;
@@ -926,21 +945,32 @@
 }
 
 .handoff {
+  order: 1;
   margin-top: 18px;
   padding: 18px;
-  background: #fff;
-  border: 1px solid #dfe3ea;
+  background: #faf8ff;
+  border: 1px solid #c4b5fd;
   border-radius: 10px;
 }
 
-.handoff > summary {
+.automation {
+  order: 2;
+  margin-top: 18px;
+  padding: 14px 16px;
+  color: #475569;
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+}
+
+.automation > summary {
   cursor: pointer;
   color: #334155;
   font-size: 0.875rem;
   font-weight: 700;
 }
 
-.handoff > summary:focus-visible {
+.automation > summary:focus-visible {
   outline: 3px solid rgba(124, 58, 237, 0.2);
   outline-offset: 3px;
 }
@@ -950,6 +980,18 @@
   color: #64748b;
   font-size: 0.8125rem;
   line-height: 1.55;
+}
+
+.manualHandlingAction {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 12px;
+  background: #fff;
+  border: 1px solid #ddd6fe;
+  border-radius: 8px;
 }
 
 .handoffHeading,
@@ -1117,6 +1159,7 @@
 }
 
 .experimental {
+  order: 3;
   margin-top: 14px;
   padding: 12px 14px;
   color: #475569;
@@ -1310,6 +1353,10 @@
 
   .handoff {
     padding: 14px;
+  }
+
+  .manualHandlingAction {
+    grid-template-columns: 1fr;
   }
 
   .recommended,

@@ -16,6 +16,7 @@ interface ExternalReconciliationRow extends QueryResultRow {
   note_id: string;
   share_url: string;
   snapshot: ExternalPostSnapshot;
+  source?: 'automation' | 'manual' | 'recovery';
   status: ExternalReconciliationStatus;
   idempotency_key: string;
   outcome: ExternalReconciliationOutcome | null;
@@ -32,6 +33,7 @@ export interface StoredExternalReconciliation {
   noteId: string;
   shareUrl: string;
   snapshot: ExternalPostSnapshot;
+  source?: 'automation' | 'manual' | 'recovery';
   status: ExternalReconciliationStatus;
   outcome?: ExternalReconciliationOutcome;
   notionPageId?: string;
@@ -52,6 +54,7 @@ function mapRow(row: ExternalReconciliationRow): StoredExternalReconciliation {
     noteId: row.note_id,
     shareUrl: row.share_url,
     snapshot: row.snapshot,
+    ...(row.source ? { source: row.source } : {}),
     status: row.status,
     ...(row.outcome ? { outcome: row.outcome } : {}),
     ...(row.notion_page_id ? { notionPageId: row.notion_page_id } : {}),
@@ -72,6 +75,7 @@ export function externalReconciliationSummary(
     shareUrl: record.shareUrl,
     title: record.snapshot.title,
     mediaType: record.snapshot.mediaType,
+    ...(record.source ? { source: record.source } : {}),
     status: record.status,
     ...(record.outcome ? { outcome: record.outcome } : {}),
     ...(record.notionPageId ? { notionPageId: record.notionPageId } : {}),
@@ -104,6 +108,8 @@ export async function beginExternalReconciliation(
   snapshot: ExternalPostSnapshot,
   idempotencyKey: string,
   targetDispositionId?: string,
+  source: 'automation' | 'manual' | 'recovery' = 'automation',
+  targetNotionPageId?: string,
 ) {
   const client = await getPool().connect();
   try {
@@ -118,9 +124,22 @@ export async function beginExternalReconciliation(
          note_id,
          share_url,
          snapshot,
-         idempotency_key
+        idempotency_key,
+        source,
+        manual_handling_id
        )
-       SELECT $1, $2, $3::jsonb, $4::uuid
+       SELECT
+         $1,
+         $2,
+         $3::jsonb,
+         $4::uuid,
+         $6,
+         (
+           SELECT id
+           FROM plan_operator_scheduled_posts
+           WHERE notion_page_id = $7
+           LIMIT 1
+         )
        WHERE NOT EXISTS (
          SELECT 1
          FROM manual_reconciliation_requests AS disposition
@@ -144,6 +163,8 @@ export async function beginExternalReconciliation(
         JSON.stringify(snapshot),
         idempotencyKey,
         targetDispositionId ?? null,
+        source,
+        targetNotionPageId ?? null,
       ],
     );
     if (inserted.rows[0]) {

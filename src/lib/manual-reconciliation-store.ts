@@ -465,12 +465,16 @@ export async function assertManualVerifiedSnapshot(
       409,
     );
   }
-  const expectedSnapshot: ExternalPostSnapshot = {
-    noteId: request.noteId,
-    shareUrl: request.shareUrl,
-    ...request.expected,
-  };
-  if (!isDeepStrictEqual(snapshot, expectedSnapshot)) {
+  const matchFields = request.expected.matchFields ?? [
+    'title',
+    'caption',
+    'mediaType',
+  ];
+  const mismatch =
+    snapshot.noteId !== request.noteId
+    || snapshot.shareUrl !== request.shareUrl
+    || matchFields.some((field) => snapshot[field] !== request.expected[field]);
+  if (mismatch) {
     throw new LocalPublishJobError(
       'The verified RedNote snapshot does not match the durable reconciliation request',
       'VERIFIED_POST_MISMATCH',
@@ -580,45 +584,173 @@ export async function completeManualReconciliation(
   claimToken: string,
   externalReconciliationId: string,
 ) {
-  const result = await sql<ManualReconciliationRow>`
-    WITH reconciled AS (
-      UPDATE manual_reconciliation_requests
-      SET status = 'reconciled',
-          external_reconciliation_id = ${externalReconciliationId}::uuid,
-          error_code = NULL,
-          error_message = NULL,
-          claim_expires_at = CURRENT_TIMESTAMP,
-          completed_at = CURRENT_TIMESTAMP,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = ${id}::uuid
-        AND status = 'verifying'
-        AND claim_token = ${claimToken}::uuid
-        AND claim_expires_at > CURRENT_TIMESTAMP
-      RETURNING *
-    ), completed_operator_schedule AS (
-      UPDATE plan_operator_scheduled_posts AS operator_scheduled
-      SET reconciled_at = CURRENT_TIMESTAMP
-      FROM reconciled
-      WHERE operator_scheduled.notion_page_id = reconciled.notion_page_id
-        AND operator_scheduled.reconciled_at IS NULL
-      RETURNING operator_scheduled.id
-    )
-    SELECT * FROM reconciled
-  `;
-  if (result.rows[0]) return mapRow(result.rows[0]);
-  const request = await loadManualReconciliation(id);
-  if (
-    request.status === 'reconciled' &&
-    request.externalReconciliationId === externalReconciliationId
-  ) {
-    return request;
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const requestResult = await client.query<ManualReconciliationRow>(
+      `SELECT *
+       FROM manual_reconciliation_requests
+       WHERE id = $1::uuid
+       FOR UPDATE`,
+      [id],
+    );
+    if (!requestResult.rows[0]) {
+      throw new LocalPublishJobError(
+        'Manual reconciliation request was not found',
+        'RECONCILIATION_NOT_FOUND',
+        404,
+      );
+    }
+    const request = mapRow(requestResult.rows[0]);
+    if (
+      request.status === 'reconciled'
+      && request.externalReconciliationId === externalReconciliationId
+    ) {
+      await client.query('COMMIT');
+      return request;
+    }
+    assertCurrentClaim(request, claimToken);
+    if (request.status !== 'verifying') {
+      throw new LocalPublishJobError(
+        'The manual reconciliation is not currently claimed',
+        'INVALID_RECONCILIATION_TRANSITION',
+        409,
+      );
+    }
+
+    const external = await client.query<{
+      note_id: string;
+      share_url: string;
+      completed_at: Date | string;
+      notion_page_id: string;
+    }>(
+      `SELECT note_id, share_url, completed_at, notion_page_id
+       FROM external_post_reconciliations
+       WHERE id = $1::uuid
+         AND status = 'succeeded'
+       FOR UPDATE`,
+      [externalReconciliationId],
+    );
+    const receipt = external.rows[0];
+    if (
+      !receipt
+      || receipt.note_id !== request.noteId
+      || receipt.share_url !== request.shareUrl
+      || receipt.notion_page_id !== request.notionPageId
+    ) {
+      throw new LocalPublishJobError(
+        'The exact verified publication receipt does not match this request',
+        'RECONCILIATION_CONFLICT',
+        409,
+      );
+    }
+
+    const handling = await client.query<{ id: string; receipt_status: string }>(
+      `SELECT id, receipt_status
+       FROM plan_operator_scheduled_posts
+       WHERE notion_page_id = $1
+       FOR UPDATE`,
+      [request.notionPageId],
+    );
+    if (handling.rows[0]?.receipt_status === 'reconciled') {
+      throw new LocalPublishJobError(
+        'The manual handling is already reconciled to another request',
+        'RECONCILIATION_CONFLICT',
+        409,
+      );
+    }
+
+    const publishedReceipt = await client.query(
+      `INSERT INTO xhs_publish_receipts (
+         notion_page_id,
+         status,
+         note_id,
+         share_url,
+         source,
+         manual_handling_id,
+         updated_at
+       ) VALUES ($1, 'published', $2, $3, 'manual', $4::uuid, CURRENT_TIMESTAMP)
+       ON CONFLICT (notion_page_id) DO UPDATE
+       SET status = 'published',
+           note_id = EXCLUDED.note_id,
+           share_url = EXCLUDED.share_url,
+           source = 'manual',
+           manual_handling_id = EXCLUDED.manual_handling_id,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE (
+         xhs_publish_receipts.note_id IS NULL
+         OR xhs_publish_receipts.note_id = EXCLUDED.note_id
+       )
+         AND (
+           xhs_publish_receipts.share_url IS NULL
+           OR xhs_publish_receipts.share_url = EXCLUDED.share_url
+         )
+       RETURNING notion_page_id`,
+      [
+        request.notionPageId,
+        request.noteId,
+        request.shareUrl,
+        handling.rows[0]?.id ?? null,
+      ],
+    );
+    if (publishedReceipt.rowCount !== 1) {
+      throw new LocalPublishJobError(
+        'A different exact publication receipt already owns this post',
+        'RECONCILIATION_CONFLICT',
+        409,
+      );
+    }
+
+    if (handling.rows[0]) {
+      const reconciledHandling = await client.query(
+        `UPDATE plan_operator_scheduled_posts
+         SET receipt_status = 'reconciled',
+             manual_reconciliation_id = $2::uuid,
+             note_id = $3,
+             share_url = $4,
+             published_at = $5::timestamptz,
+             reconciled_at = CURRENT_TIMESTAMP,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1::uuid
+           AND receipt_status = 'pending'`,
+        [
+          handling.rows[0].id,
+          request.id,
+          request.noteId,
+          request.shareUrl,
+          timestamp(receipt.completed_at),
+        ],
+      );
+      if (reconciledHandling.rowCount !== 1) {
+        throw new LocalPublishJobError(
+          'The durable manual handling changed before reconciliation completed',
+          'RECONCILIATION_CONFLICT',
+          409,
+        );
+      }
+    }
+
+    const completed = await client.query<ManualReconciliationRow>(
+      `UPDATE manual_reconciliation_requests
+       SET status = 'reconciled',
+           external_reconciliation_id = $2::uuid,
+           error_code = NULL,
+           error_message = NULL,
+           claim_expires_at = CURRENT_TIMESTAMP,
+           completed_at = CURRENT_TIMESTAMP,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1::uuid
+       RETURNING *`,
+      [request.id, externalReconciliationId],
+    );
+    await client.query('COMMIT');
+    return mapRow(completed.rows[0]);
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
-  assertCurrentClaim(request, claimToken);
-  throw new LocalPublishJobError(
-    'The manual reconciliation could not be completed',
-    'INVALID_RECONCILIATION_TRANSITION',
-    409,
-  );
 }
 
 export async function retryManualReconciliation(

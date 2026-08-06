@@ -18,8 +18,12 @@ import {
   retryManualReconciliation,
 } from '@/lib/manual-reconciliation-store';
 import { reconcileVerifiedExternalPost } from '@/lib/external-post-reconciliations';
-import { getReadyXhsPost } from '@/lib/notion-posts';
+import {
+  getReadyXhsPost,
+  getXhsPostForManualHandling,
+} from '@/lib/notion-posts';
 import { normalizeLocalPublishJobError } from '@/lib/local-publish-jobs';
+import { loadManualPostHandlingByPage } from '@/lib/manual-post-handling-store';
 import {
   reconcileExternalJobDisposition,
   retryFailedExternalJobDisposition,
@@ -30,11 +34,26 @@ const MIN_LEASE_SECONDS = 60;
 const MAX_LEASE_SECONDS = 2 * 60 * 60;
 const DEFAULT_BACKOFF_SECONDS = [15 * 60, 60 * 60, 6 * 60 * 60, 24 * 60 * 60] as const;
 
-function expectedSnapshot(post: Awaited<ReturnType<typeof getReadyXhsPost>>) {
+function expectedSnapshot(
+  post: Awaited<ReturnType<typeof getXhsPostForManualHandling>>,
+  manualHandled: boolean,
+) {
+  const matchFields: Array<'title' | 'caption' | 'mediaType'> = [];
+  if (post.headline.trim()) matchFields.push('title');
+  if (post.caption) matchFields.push('caption');
+  if (
+    !post.manualWarnings.some((warning) =>
+      /media|capcut|needs media/i.test(warning))
+  ) {
+    matchFields.push('mediaType');
+  }
   return {
     title: post.headline.trim(),
     caption: post.caption,
     mediaType: post.hasVideo ? 'video' as const : 'image' as const,
+    ...(manualHandled
+      ? { notionVersion: post.lastEditedTime, matchFields }
+      : {}),
   };
 }
 
@@ -94,11 +113,28 @@ export async function createManualReconciliation(
       created: false,
     };
   }
-  const post = await getReadyXhsPost(input.notionPageId);
-  assertManualReconciliationCandidate(post);
+  const handling = await loadManualPostHandlingByPage(input.notionPageId);
+  const post = handling
+    ? await getXhsPostForManualHandling(input.notionPageId)
+    : await getReadyXhsPost(input.notionPageId);
+  if (handling) {
+    if (
+      handling.receiptStatus !== 'pending'
+      || post.status.trim().toLowerCase() !== 'approved'
+      || post.lastEditedTime !== handling.notionVersion
+    ) {
+      throw new LocalPublishJobError(
+        'The manually handled post changed or is no longer canonical Approved',
+        'MANUAL_RECONCILIATION_NOT_ALLOWED',
+        409,
+      );
+    }
+  } else {
+    assertManualReconciliationCandidate(post);
+  }
   const result = await insertManualReconciliation({
     ...input,
-    expected: expectedSnapshot(post),
+    expected: expectedSnapshot(post, Boolean(handling)),
     idempotencyKey,
   });
   return {
@@ -123,10 +159,27 @@ export async function retryFailedManualReconciliation(
   if (existing.kind === 'targeted_local_job') {
     return retryFailedExternalJobDisposition(id);
   }
-  const post = await getReadyXhsPost(existing.notionPageId);
-  assertManualReconciliationCandidate(post);
+  const handling = await loadManualPostHandlingByPage(existing.notionPageId);
+  const post = handling
+    ? await getXhsPostForManualHandling(existing.notionPageId)
+    : await getReadyXhsPost(existing.notionPageId);
+  if (handling) {
+    if (
+      handling.receiptStatus !== 'pending'
+      || post.status.trim().toLowerCase() !== 'approved'
+      || post.lastEditedTime !== handling.notionVersion
+    ) {
+      throw new LocalPublishJobError(
+        'The manually handled post changed or is no longer canonical Approved',
+        'MANUAL_RECONCILIATION_NOT_ALLOWED',
+        409,
+      );
+    }
+  } else {
+    assertManualReconciliationCandidate(post);
+  }
   return manualReconciliationSummary(
-    await retryManualReconciliation(id, expectedSnapshot(post)),
+    await retryManualReconciliation(id, expectedSnapshot(post, Boolean(handling))),
   );
 }
 
@@ -201,6 +254,14 @@ export async function submitManualReconciliationResult(
       snapshot: result.snapshot,
       idempotencyKey: request.id,
       targetNotionPageId: request.notionPageId,
+      source: 'manual',
+      ...(request.expected.notionVersion
+        ? {
+            manualHandling: {
+              expectedNotionVersion: request.expected.notionVersion,
+            },
+          }
+        : {}),
     });
     return manualReconciliationSummary(await completeManualReconciliation(
       id,

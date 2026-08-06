@@ -56,7 +56,11 @@ describe('RedNote metric work storage', () => {
     expect(query).toContain('state.next_due_at <= CURRENT_TIMESTAMP');
     expect(query).toContain("snapshot->>'publishAt'");
     expect(query).toContain("snapshot->>'scheduledDate'");
-    expect(query).toContain('FOR UPDATE OF job SKIP LOCKED');
+    expect(query).toContain('FROM plan_operator_scheduled_posts AS handling');
+    expect(query).toContain("handling.receipt_status = 'reconciled'");
+    expect(query).toContain('manual_handling_id');
+    expect(query).toContain('ON CONFLICT (notion_page_id) DO UPDATE');
+    expect(query).toContain('claim_expires_at <= CURRENT_TIMESTAMP');
     expect(query).toContain('LIMIT ?');
     expect(query).toContain('gen_random_uuid()');
     expect(mocks.sql.mock.calls[0]).toContain(20);

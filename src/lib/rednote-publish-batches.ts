@@ -60,7 +60,7 @@ export function buildBatchSnapshot(post: ReadyXhsPost): LocalPublishSnapshot | n
   if (
     post.status.trim().toLowerCase() === 'published' ||
     post.candidateKind !== 'packet_ready' ||
-    post.publishBlockers.length > 0 ||
+    post.automationBlockers.length > 0 ||
     !post.publishAt
   ) {
     return null;
@@ -230,8 +230,8 @@ export function buildBatchCandidateAccounting(
     ) {
       reason =
         'Canonical MOV media is present, but no authoritative RedNote-compatible verdict is available. Attach canonical MP4 media or obtain authoritative RedNote compatibility certification; extension or container alone is not evidence, and no batch bypass is allowed.';
-    } else if (post.publishBlockers.length > 0) {
-      reason = post.publishBlockers.join(' · ');
+    } else if (post.automationBlockers.length > 0) {
+      reason = post.automationBlockers.join(' · ');
     } else {
       reason = 'The post is not currently eligible for an immutable publish snapshot.';
     }
@@ -245,10 +245,19 @@ export function buildBatchCandidateAccounting(
   return { items, blockedCandidates };
 }
 
-export async function createPublishBatch(kind: PublishBatchKind, now = new Date()) {
+export async function createPublishBatch(
+  kind: PublishBatchKind,
+  notionPageIds: string[],
+  now = new Date(),
+) {
+  const selectedPageIds = new Set(notionPageIds);
+  if (selectedPageIds.size === 0) return null;
   const { posts } = await listReadyXhsPosts({ includePublishedCandidates: true });
-  const handled = await listPlanOperatorScheduledPageIds(posts.map((post) => post.id));
-  const dispatchablePosts = posts.filter((post) => !handled.has(post.id));
+  const selectedPosts = posts.filter((post) => selectedPageIds.has(post.id));
+  const handled = await listPlanOperatorScheduledPageIds(
+    selectedPosts.map((post) => post.id),
+  );
+  const dispatchablePosts = selectedPosts.filter((post) => !handled.has(post.id));
   const jobs = await listPublishOwningLocalJobs(dispatchablePosts.map((post) => post.id));
   const { items, blockedCandidates } = buildBatchCandidateAccounting(
     dispatchablePosts,

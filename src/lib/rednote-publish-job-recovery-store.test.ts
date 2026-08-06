@@ -144,8 +144,9 @@ describe('stored approved publish job recovery', () => {
     expect(statements.some((value) =>
       value.includes('UPDATE rednote_publish_batches'))).toBe(false);
     expect(statements.some((value) =>
-      value.includes('plan_operator_scheduled_posts') &&
-      value.includes('reconciled_at IS NULL'))).toBe(true);
+      value.includes('plan_operator_scheduled_posts'))).toBe(true);
+    expect(statements.some((value) =>
+      value.includes('operator_scheduled.reconciled_at IS NULL'))).toBe(false);
     const update = statements.find((value) => value.includes('UPDATE local_publish_jobs'))!;
     expect(update).toContain("SET status = 'queued'");
     expect(update.split('WHERE')[0]).not.toContain('claim_attempts');

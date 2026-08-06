@@ -398,55 +398,68 @@ export default function AdminPage() {
     <div style={{ maxWidth: 600, margin: '40px auto', padding: 20, fontFamily: 'system-ui' }}>
       <h1>XHS Admin</h1>
 
-      {/* Cloudflare Access authenticates the operator before this route renders. */}
-      <section style={{ marginBottom: 24 }}>
-        <h2>1. XHS Session</h2>
-        <button onClick={checkSession}>
-          Check XHS Session
-        </button>
-        <p>XHS Session: {sessionValid === null ? '—' : sessionValid ? '✅ Valid' : '❌ Expired'}</p>
-      </section>
+      <details style={{ marginBottom: 24, padding: 16, background: '#f7f7f5', borderRadius: 10, border: '1px solid #d8d8d3' }}>
+        <summary style={{ cursor: 'pointer', fontWeight: 700 }}>
+          Legacy / explicit automation — xhs-microservice session setup
+        </summary>
+        <p style={{ fontSize: 13, color: '#555' }}>
+          Only needed for explicit microservice publishing. It is not part of the manual Creator receipt workflow.
+        </p>
 
-      {/* Cookie Login (manual) */}
-      <section style={{ marginBottom: 24, padding: 16, background: '#f9f9f9', borderRadius: 8, border: '1px solid #e0e0e0' }}>
-        <h2>2. Manual Rednote cookie login</h2>
-        <p style={{ fontSize: 13, color: '#555', marginBottom: 8 }}>
-          Sign in at{' '}
-          <a href="https://creator.rednote.com/login" target="_blank" rel="noreferrer">
-            creator.rednote.com/login
-          </a>
-          . {CREATOR_COOKIE_COPY_VALUE_INSTRUCTION}
-        </p>
-        <p style={{ fontSize: 13, color: '#7a2e0b', marginTop: 0, marginBottom: 8 }}>
-          <strong>{CREATOR_COOKIE_COPY_WARNING}</strong>
-        </p>
-        <textarea
-          aria-label="Cookie request-header value copied from a newly authenticated request"
-          autoComplete="off"
-          spellCheck={false}
-          placeholder="Paste the copied cookie request-header value"
-          value={cookieStr}
-          onChange={e => setCookieStr(e.target.value)}
-          style={{ width: '100%', padding: 8, marginBottom: 8, minHeight: 60, fontSize: 12 }}
-        />
-        <button onClick={loginWithCookie} disabled={!cookieStr.trim()}>
-          Save Cookie
-        </button>
-      </section>
+        {/* Cloudflare Access authenticates the operator before this route renders. */}
+        <section style={{ marginBottom: 24 }}>
+          <h2>XHS microservice session</h2>
+          <button onClick={checkSession}>
+            Check XHS Session
+          </button>
+          <p>XHS Session: {sessionValid === null ? '—' : sessionValid ? '✅ Valid' : '❌ Expired'}</p>
+        </section>
 
-      {/* QR Login */}
-      <section style={{ marginBottom: 24, padding: 16, background: '#fff8e6', border: '1px solid #e6c75c', borderRadius: 8 }}>
-        <h2 style={{ marginTop: 0 }}>3. QR login unavailable</h2>
-        <p style={{ marginBottom: 0, color: '#594800' }}>
-          {CREATOR_QR_UNAVAILABLE_DETAIL.message}
-        </p>
-      </section>
+        <section style={{ marginBottom: 24, padding: 16, background: '#f9f9f9', borderRadius: 8, border: '1px solid #e0e0e0' }}>
+          <h2>Rednote cookie login</h2>
+          <p style={{ fontSize: 13, color: '#555', marginBottom: 8 }}>
+            Sign in at{' '}
+            <a href="https://creator.rednote.com/login" target="_blank" rel="noreferrer">
+              creator.rednote.com/login
+            </a>
+            . {CREATOR_COOKIE_COPY_VALUE_INSTRUCTION}
+          </p>
+          <p style={{ fontSize: 13, color: '#7a2e0b', marginTop: 0, marginBottom: 8 }}>
+            <strong>{CREATOR_COOKIE_COPY_WARNING}</strong>
+          </p>
+          <textarea
+            aria-label="Cookie request-header value copied from a newly authenticated request"
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="Paste the copied cookie request-header value"
+            value={cookieStr}
+            onChange={e => setCookieStr(e.target.value)}
+            style={{ width: '100%', padding: 8, marginBottom: 8, minHeight: 60, fontSize: 12 }}
+          />
+          <button onClick={loginWithCookie} disabled={!cookieStr.trim()}>
+            Save Cookie
+          </button>
+        </section>
+
+        <section style={{ padding: 16, background: '#fff8e6', border: '1px solid #e6c75c', borderRadius: 8 }}>
+          <h2 style={{ marginTop: 0 }}>QR login unavailable</h2>
+          <p style={{ marginBottom: 0, color: '#594800' }}>
+            {CREATOR_QR_UNAVAILABLE_DETAIL.message}
+          </p>
+        </section>
+      </details>
 
       <ReadyPostsPanel />
 
-      {/* Publish */}
-      <section style={{ marginBottom: 24, padding: 20, background: '#fff', borderRadius: 12, border: '1px solid #e0e0e0' }}>
-        <h2 style={{ marginTop: 0 }}>5. Manual publish to XHS</h2>
+      <details style={{ marginBottom: 24, padding: 16, background: '#f7f7f5', borderRadius: 10, border: '1px solid #d8d8d3' }}>
+        <summary style={{ cursor: 'pointer', fontWeight: 700 }}>
+          Legacy / explicit automation — direct xhs-microservice publishing
+        </summary>
+        <p style={{ fontSize: 13, color: '#555' }}>
+          Publishes through the automation service. For manual publishing, use Creator and record the public receipt above.
+        </p>
+        <section style={{ padding: 20, background: '#fff', borderRadius: 12, border: '1px solid #e0e0e0' }}>
+        <h2 style={{ marginTop: 0 }}>Direct microservice publish</h2>
         <form onSubmit={handlePublish}>
           {/* Title */}
           <input
@@ -880,19 +893,19 @@ export default function AdminPage() {
                 : '🚀 Publish to XHS'}
           </button>
         </form>
-      </section>
-
-      {/* Status */}
-      {status && (
-        <section style={{
-          padding: 14, borderRadius: 8, marginTop: 16, fontSize: 14,
-          background: statusType === 'success' ? '#e6f4ea' : statusType === 'error' ? '#fce8e6' : '#f0f0f0',
-          color: statusType === 'success' ? '#1e7e34' : statusType === 'error' ? '#c62828' : '#333',
-          border: `1px solid ${statusType === 'success' ? '#a8dab5' : statusType === 'error' ? '#f5c6cb' : '#d0d0d0'}`,
-        }}>
-          <strong>{statusType === 'success' ? '✅' : statusType === 'error' ? '❌' : 'ℹ️'}</strong> {status}
         </section>
-      )}
+
+        {status && (
+          <section style={{
+            padding: 14, borderRadius: 8, marginTop: 16, fontSize: 14,
+            background: statusType === 'success' ? '#e6f4ea' : statusType === 'error' ? '#fce8e6' : '#f0f0f0',
+            color: statusType === 'success' ? '#1e7e34' : statusType === 'error' ? '#c62828' : '#333',
+            border: `1px solid ${statusType === 'success' ? '#a8dab5' : statusType === 'error' ? '#f5c6cb' : '#d0d0d0'}`,
+          }}>
+            <strong>{statusType === 'success' ? '✅' : statusType === 'error' ? '❌' : 'ℹ️'}</strong> {status}
+          </section>
+        )}
+      </details>
     </div>
   );
 }

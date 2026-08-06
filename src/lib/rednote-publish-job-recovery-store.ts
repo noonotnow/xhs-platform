@@ -237,7 +237,6 @@ export async function recoverStoredApprovedPublishJob(
            SELECT 1
            FROM plan_operator_scheduled_posts operator_scheduled
            WHERE operator_scheduled.notion_page_id = job.notion_page_id
-             AND operator_scheduled.reconciled_at IS NULL
          )
        FOR UPDATE OF batch, item, job`,
       [input.jobId],

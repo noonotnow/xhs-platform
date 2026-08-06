@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   directManualSchedulingCandidate,
   displayedLocalPublishJob,
+  hasLiveUnsafeAutomationOwnership,
   isActiveLocalPublishJob,
   publicationOperationalTruth,
   receiptPendingLocalPublishJobs,
@@ -45,6 +46,19 @@ describe('local publish job display selection', () => {
     const reconciled = job('reconciled', 'reconciled');
 
     expect(receiptPendingLocalPublishJobs([reconciled, attested])).toEqual([attested]);
+  });
+
+  it('lets manual truth supersede queued and expired staged work, but not a live permit', () => {
+    expect(hasLiveUnsafeAutomationOwnership(job('queued', 'queued'))).toBe(false);
+    expect(hasLiveUnsafeAutomationOwnership({
+      ...job('stale', 'staged'),
+      claimExpiresAt: '2026-01-01T00:00:00.000Z',
+    }, Date.parse('2026-08-06T12:00:00.000Z'))).toBe(false);
+    expect(hasLiveUnsafeAutomationOwnership({
+      ...job('authorized', 'staged'),
+      claimExpiresAt: '2026-01-01T00:00:00.000Z',
+      dispatchAuthorizedAt: '2026-01-01T00:00:00.000Z',
+    }, Date.parse('2026-08-06T12:00:00.000Z'))).toBe(true);
   });
 
   it('keeps Day 5 immutable attestation truth ahead of a newer terminal attempt', () => {
@@ -246,5 +260,7 @@ function readyPost(overrides: Partial<ReadyXhsPost> = {}): ReadyXhsPost {
     publishBlockers: [],
     candidateKind: 'packet_ready',
     ...overrides,
+    automationBlockers: overrides.automationBlockers ?? [],
+    manualWarnings: overrides.manualWarnings ?? [],
   };
 }

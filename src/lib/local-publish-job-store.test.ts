@@ -150,7 +150,7 @@ describe('local publish atomic claim storage', () => {
     expect(query).toContain('dispatch_authorized_at IS NULL');
     expect(query).toContain('external_disposition_request_id IS NULL');
     expect(query).toContain('plan_operator_scheduled_posts');
-    expect(query).toContain('operator_scheduled.reconciled_at IS NULL');
+    expect(query).not.toContain('operator_scheduled.reconciled_at IS NULL');
     expect(query).toContain("status IN ('submitted', 'scheduled', 'verification_pending')");
     expect(query).toContain("attestation.provenance = 'worker_ambiguous'");
     expect(query).toContain('claim_expires_at IS NULL');
@@ -437,6 +437,23 @@ describe('local publish atomic claim storage', () => {
       claimedRow().id,
       claimedRow().claim_token,
     )).rejects.toMatchObject({ code: 'STALE_CLAIM', status: 409 });
+  });
+
+  it('rejects late worker state after durable manual handling is recorded', async () => {
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({
+        rows: [{ ...claimedRow(), manual_handling_exists: true }],
+        rowCount: 1,
+      });
+
+    await expect(stageStoredLocalPublishJob(
+      claimedRow().id,
+      claimedRow().claim_token,
+    )).rejects.toMatchObject({
+      code: 'MANUAL_HANDLING_EXISTS',
+      status: 409,
+    });
   });
 
   it('anchors scheduled verification after the frozen publishAt', async () => {

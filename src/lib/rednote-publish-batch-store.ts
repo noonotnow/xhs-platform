@@ -272,8 +272,7 @@ export async function createStoredPublishBatch(input: {
       : await client.query<{ notion_page_id: string }>(
          `SELECT notion_page_id
           FROM plan_operator_scheduled_posts
-          WHERE notion_page_id = ANY($1::text[])
-            AND reconciled_at IS NULL`,
+          WHERE notion_page_id = ANY($1::text[])`,
          [pageIds],
         );
     const operatorScheduledPages = new Set(
@@ -561,7 +560,6 @@ export async function approveStoredPublishBatch(
             FROM plan_operator_scheduled_posts operator_scheduled
             WHERE operator_scheduled.notion_page_id =
               rednote_publish_batch_items.notion_page_id
-              AND operator_scheduled.reconciled_at IS NULL
           )
         RETURNING *
       ), page_lock AS (
@@ -582,7 +580,6 @@ export async function approveStoredPublishBatch(
           SELECT 1
           FROM plan_operator_scheduled_posts operator_scheduled
           WHERE operator_scheduled.notion_page_id = page_lock.notion_page_id
-            AND operator_scheduled.reconciled_at IS NULL
         )
           AND NOT EXISTS (
           SELECT 1
