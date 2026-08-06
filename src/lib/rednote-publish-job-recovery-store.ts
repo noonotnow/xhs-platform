@@ -233,6 +233,12 @@ export async function recoverStoredApprovedPublishJob(
        ) AS recovery ON TRUE
        WHERE job.id = $1::uuid
          AND job.success_attestation_id IS NULL
+         AND NOT EXISTS (
+           SELECT 1
+           FROM plan_operator_scheduled_posts operator_scheduled
+           WHERE operator_scheduled.notion_page_id = job.notion_page_id
+             AND operator_scheduled.reconciled_at IS NULL
+         )
        FOR UPDATE OF batch, item, job`,
       [input.jobId],
     );

@@ -72,6 +72,7 @@ in Vercel:
 | `PLAN_SECRET` | At least 32 random characters shared with Vibe Atlas for integration media uploads |
 | `NOTION_API_KEY` | Server-only Notion integration token with read/write access to the canonical Posts DB |
 | `NOTION_POSTS_DB_ID` | Canonical Posts database ID shared with the production CREATE workflow |
+| `PLAN_INTEGRATION_TOKEN` | At least 32 random characters shared only with PLAN for page-level operator-scheduled execution state |
 | `LOCAL_PUBLISH_WORKER_TOKEN` | At least 32 random characters shared only with the trusted Mac-local browser worker |
 | `LOCAL_PUBLISH_JOB_LEASE_SECONDS` | Optional worker claim lease; defaults to 7200 seconds and is clamped to 60–86400 |
 | `LOCAL_PUBLISH_VERIFICATION_BACKOFF_SECONDS` | Optional four-value retry schedule; defaults to `900,3600,21600,86400` seconds (15m, 1h, 6h, 24h) |
@@ -106,6 +107,35 @@ Deploy the microservice upload-token verifier and shared
 and Vercel variables, deploy this application, and finally route the production
 admin hostname through Access. This avoids switching the browser to upload
 grants before the microservice accepts them.
+
+### PLAN operator-scheduled integration
+
+Apply `migrations/015_plan_operator_scheduled_posts.sql`, then configure the same
+`PLAN_INTEGRATION_TOKEN` in XHS and PLAN. PLAN calls
+`POST /api/integrations/plan/operator-scheduled` with
+`Authorization: Bearer <PLAN_INTEGRATION_TOKEN>`, a UUID `Idempotency-Key`
+header, and:
+
+```json
+{
+  "notionPageId": "canonical-page-id",
+  "expectedNotionVersion": "2026-08-06T16:00:00.000Z",
+  "expectedScheduledAt": "2026-08-07T14:30:00.000Z"
+}
+```
+
+XHS re-reads the canonical Approved post and requires exact revision and
+`ScheduledDate` agreement. A successful response contains
+`execution.state = "operator_scheduled_receipt_pending"` plus `scheduledAt`,
+`notionVersion`, `recordedAt`, and the canonical page ID. Exact replay returns
+HTTP 200; creation returns HTTP 201. A different use of the key or page returns
+`PLAN_OPERATOR_SCHEDULED_REPLAY_MISMATCH` (409). This operation never publishes
+and never writes a public identity.
+
+PLAN can read the durable state with
+`GET /api/integrations/plan/operator-scheduled?notionPageId=<id>` using the same
+bearer token. After the existing public-URL verification path reconciles the
+post, this read returns `execution.state = "reconciled"` and `reconciledAt`.
 
 ### Mac-local publishing for CREATE packets
 

@@ -581,19 +581,29 @@ export async function completeManualReconciliation(
   externalReconciliationId: string,
 ) {
   const result = await sql<ManualReconciliationRow>`
-    UPDATE manual_reconciliation_requests
-    SET status = 'reconciled',
-        external_reconciliation_id = ${externalReconciliationId}::uuid,
-        error_code = NULL,
-        error_message = NULL,
-        claim_expires_at = CURRENT_TIMESTAMP,
-        completed_at = CURRENT_TIMESTAMP,
-        updated_at = CURRENT_TIMESTAMP
-    WHERE id = ${id}::uuid
-      AND status = 'verifying'
-      AND claim_token = ${claimToken}::uuid
-      AND claim_expires_at > CURRENT_TIMESTAMP
-    RETURNING *
+    WITH reconciled AS (
+      UPDATE manual_reconciliation_requests
+      SET status = 'reconciled',
+          external_reconciliation_id = ${externalReconciliationId}::uuid,
+          error_code = NULL,
+          error_message = NULL,
+          claim_expires_at = CURRENT_TIMESTAMP,
+          completed_at = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${id}::uuid
+        AND status = 'verifying'
+        AND claim_token = ${claimToken}::uuid
+        AND claim_expires_at > CURRENT_TIMESTAMP
+      RETURNING *
+    ), completed_operator_schedule AS (
+      UPDATE plan_operator_scheduled_posts AS operator_scheduled
+      SET reconciled_at = CURRENT_TIMESTAMP
+      FROM reconciled
+      WHERE operator_scheduled.notion_page_id = reconciled.notion_page_id
+        AND operator_scheduled.reconciled_at IS NULL
+      RETURNING operator_scheduled.id
+    )
+    SELECT * FROM reconciled
   `;
   if (result.rows[0]) return mapRow(result.rows[0]);
   const request = await loadManualReconciliation(id);

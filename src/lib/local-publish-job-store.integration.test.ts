@@ -228,6 +228,10 @@ describe('local publish job PostgreSQL execution', () => {
         request_kind text NOT NULL,
         source_local_job_id uuid
       );
+      CREATE TABLE plan_operator_scheduled_posts (
+        notion_page_id text PRIMARY KEY,
+        reconciled_at timestamptz
+      );
       CREATE TABLE local_publish_job_success_attestations (
         id uuid PRIMARY KEY,
         provenance text NOT NULL
@@ -244,6 +248,7 @@ describe('local publish job PostgreSQL execution', () => {
     await database.exec(`
       TRUNCATE local_publish_jobs CASCADE;
       TRUNCATE manual_reconciliation_requests;
+      TRUNCATE plan_operator_scheduled_posts;
       TRUNCATE local_publish_job_success_attestations;
       TRUNCATE local_publish_job_success_attestation_release_acks;
       TRUNCATE rednote_publish_batch_items;

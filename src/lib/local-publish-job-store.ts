@@ -197,6 +197,12 @@ export async function insertLocalPublishJob(
     FROM page_lock
     WHERE NOT EXISTS (
       SELECT 1
+      FROM plan_operator_scheduled_posts
+      WHERE notion_page_id = ${snapshot.notionPageId}
+        AND reconciled_at IS NULL
+    )
+      AND NOT EXISTS (
+      SELECT 1
       FROM manual_reconciliation_requests
       WHERE notion_page_id = ${snapshot.notionPageId}
         AND status IN ('queued', 'verifying')
@@ -236,6 +242,21 @@ export async function insertLocalPublishJob(
       );
     }
     return { job, created: false };
+  }
+
+  const operatorScheduled = await sql`
+    SELECT id
+    FROM plan_operator_scheduled_posts
+    WHERE notion_page_id = ${snapshot.notionPageId}
+      AND reconciled_at IS NULL
+    LIMIT 1
+  `;
+  if (operatorScheduled.rows[0]) {
+    throw new LocalPublishJobError(
+      'PLAN already recorded this post as operator scheduled',
+      'OPERATOR_SCHEDULED_NON_DISPATCHABLE',
+      409,
+    );
   }
 
   const active = await sql<LocalPublishJobRow>`
@@ -408,6 +429,13 @@ export async function claimNextStoredLocalPublishJob(
           )
         )
         AND external_disposition_request_id IS NULL
+        AND NOT EXISTS (
+          SELECT 1
+          FROM plan_operator_scheduled_posts AS operator_scheduled
+          WHERE operator_scheduled.notion_page_id =
+            local_publish_jobs.notion_page_id
+            AND operator_scheduled.reconciled_at IS NULL
+        )
         AND NOT EXISTS (
           SELECT 1
           FROM manual_reconciliation_requests AS disposition
