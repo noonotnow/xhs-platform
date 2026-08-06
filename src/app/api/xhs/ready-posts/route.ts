@@ -26,7 +26,10 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const result = await listReadyXhsPosts({ requestId });
+    const result = await listReadyXhsPosts({
+      requestId,
+      includePublishedCandidates: true,
+    });
     console.info('Ready posts request completed', {
       requestId,
       postCount: result.posts.length,

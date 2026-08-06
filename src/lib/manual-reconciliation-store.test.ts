@@ -1,7 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ sql: vi.fn() }));
-vi.mock('@/lib/db', () => ({ sql: mocks.sql }));
+const mocks = vi.hoisted(() => ({
+  sql: vi.fn(),
+  query: vi.fn(),
+  release: vi.fn(),
+  connect: vi.fn(),
+}));
+vi.mock('@/lib/db', () => ({
+  sql: mocks.sql,
+  getPool: () => ({ connect: mocks.connect }),
+}));
 
 import {
   claimDueManualReconciliations,
@@ -47,10 +55,37 @@ function row(status: 'queued' | 'verifying' | 'reconciled' | 'failed') {
 }
 
 describe('manual reconciliation persistence', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.connect.mockResolvedValue({
+      query: mocks.query,
+      release: mocks.release,
+    });
+  });
 
-  it('serializes creation against publish jobs and preserves failed source audit', async () => {
-    mocks.sql.mockResolvedValue({ rows: [row('queued')] });
+  it('attests manual publication and atomically closes an untouched queued job', async () => {
+    const queuedJob = {
+      id: row('queued').source_local_job_id,
+      status: 'queued',
+      claim_token: null,
+      claimed_at: null,
+      staged_at: null,
+      dispatch_authorized_at: null,
+      dispatched_at: null,
+      note_id: null,
+      share_url: null,
+      verified_at: null,
+      reconciled_at: null,
+      success_attestation_id: null,
+      external_disposition_request_id: null,
+    };
+    mocks.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [queuedJob] })
+      .mockResolvedValueOnce({ rows: [row('queued')] })
+      .mockResolvedValueOnce({ rows: [{ id: queuedJob.id }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [] });
     await expect(insertManualReconciliation({
       notionPageId: row('queued').notion_page_id,
       noteId: 'note_123',
@@ -64,11 +99,47 @@ describe('manual reconciliation persistence', () => {
         status: 'queued',
       },
     });
-    const query = (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
-    expect(query).toContain('pg_advisory_xact_lock');
-    expect(query).toContain("status = 'failed'");
-    expect(query).toContain("status NOT IN ('reconciled', 'succeeded', 'failed')");
-    expect(query).not.toContain('DELETE');
+    expect(mocks.query.mock.calls[1][0]).toContain('pg_advisory_xact_lock');
+    expect(mocks.query.mock.calls[4][0]).toContain("status = 'failed'");
+    expect(mocks.query.mock.calls[4][0]).toContain('MANUAL_PUBLICATION_ATTESTED');
+    expect(mocks.query.mock.calls.flatMap((call) => call[0])).not.toContain('DELETE');
+    expect(mocks.release).toHaveBeenCalledOnce();
+  });
+
+  it('does not supersede a claimed worker lifecycle with manual publication truth', async () => {
+    mocks.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{
+        id: row('queued').source_local_job_id,
+        status: 'claimed',
+        claim_token: '55555555-5555-4555-8555-555555555555',
+        claimed_at: '2026-08-03T12:00:00.000Z',
+        staged_at: null,
+        dispatch_authorized_at: null,
+        dispatched_at: null,
+        note_id: null,
+        share_url: null,
+        verified_at: null,
+        reconciled_at: null,
+        success_attestation_id: null,
+        external_disposition_request_id: null,
+      }] })
+      .mockResolvedValueOnce({ rows: [] });
+    await expect(insertManualReconciliation({
+      notionPageId: row('queued').notion_page_id,
+      noteId: 'note_123',
+      shareUrl: 'https://www.rednote.com/explore/note_123',
+      expected,
+      idempotencyKey: row('queued').idempotency_key,
+    })).rejects.toMatchObject({
+      code: 'ACTIVE_JOB_EXISTS',
+      status: 409,
+    });
+    expect(mocks.query.mock.calls.some((call) =>
+      typeof call[0] === 'string' && call[0].includes('INSERT INTO manual_reconciliation_requests')
+    )).toBe(false);
+    expect(mocks.query.mock.calls.at(-1)?.[0]).toBe('ROLLBACK');
   });
 
   it('claims a bounded batch with independent leases and SKIP LOCKED', async () => {

@@ -77,6 +77,9 @@ describe('protected XHS route handlers', () => {
     const response = await getReadyPosts(request('/api/xhs/ready-posts'));
 
     expect(response.status).toBe(200);
+    expect(mocks.listReadyPosts).toHaveBeenCalledWith(expect.objectContaining({
+      includePublishedCandidates: true,
+    }));
     await expect(response.json()).resolves.toEqual({ posts: [], warnings: [] });
   });
 
