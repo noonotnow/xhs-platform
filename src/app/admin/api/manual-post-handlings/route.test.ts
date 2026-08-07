@@ -55,9 +55,15 @@ describe('manual post handling Admin route', () => {
   it('returns durable handling state to authenticated Admin', async () => {
     const response = await GET(request('GET'));
     expect(response.status).toBe(200);
+    expect(response.headers.get('x-xhs-admin-api-contract'))
+      .toBe('manual-post-handlings/v1');
+    expect(response.headers.get('x-xhs-source-commit')).toBe('development');
+    expect(response.headers.get('x-xhs-state-authority')).toBe('postgresql');
+    expect(response.headers.get('x-xhs-local-worker-state')).toBe('excluded');
     await expect(response.json()).resolves.toEqual({
       handlings: [{ id: 'handling', receiptStatus: 'pending' }],
     });
+    expect(mocks.list).toHaveBeenCalledOnce();
   });
 
   it('does not read or write state when authentication fails', async () => {

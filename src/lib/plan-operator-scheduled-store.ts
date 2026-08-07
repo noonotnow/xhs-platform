@@ -1,7 +1,11 @@
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
-import type { PlanOperatorScheduledInput } from '@/lib/plan-operator-scheduled-input';
 import {
-  findManualPostHandlingByIdempotencyKey,
+  canonicalTimestamp,
+  timestampsRepresentSameInstant,
+  type PlanOperatorScheduledInput,
+} from '@/lib/plan-operator-scheduled-input';
+import {
+  findManualPostHandlingReplayCandidates,
   insertManualPostHandling,
   loadManualPostHandlingsByPages,
   loadManualPostHandlingByPage,
@@ -39,12 +43,20 @@ function mapHandling(
 function replayMatches(
   handling: ManualPostHandlingSummary,
   input: PlanOperatorScheduledInput,
+  storedIdempotencyKey: string,
+  requestedIdempotencyKey: string,
 ) {
   return handling.notionPageId === input.notionPageId
     && handling.notionVersion === input.expectedNotionVersion
-    && handling.scheduledAt === input.expectedScheduledAt
+    && typeof handling.scheduledAt === 'string'
+    && timestampsRepresentSameInstant(
+      handling.scheduledAt,
+      input.expectedScheduledAt,
+    )
+    && storedIdempotencyKey === requestedIdempotencyKey
     && handling.mode === 'scheduled'
-    && handling.recordedBy === 'plan';
+    && handling.recordedBy === 'plan'
+    && handling.warnings.length === 0;
 }
 
 function replayConflict() {
@@ -90,11 +102,23 @@ export async function loadPlanOperatorScheduledReplay(
   input: PlanOperatorScheduledInput,
   idempotencyKey: string,
 ) {
-  const byKey = await findManualPostHandlingByIdempotencyKey(idempotencyKey);
-  const handling = byKey ?? await loadManualPostHandlingByPage(input.notionPageId);
-  if (!handling) return null;
-  if (!replayMatches(handling, input)) throw replayConflict();
-  return mapHandling(handling);
+  const candidates = await findManualPostHandlingReplayCandidates(
+    input.notionPageId,
+    idempotencyKey,
+  );
+  if (candidates.length === 0) return null;
+  if (
+    candidates.length !== 1
+    || !replayMatches(
+      candidates[0].handling,
+      input,
+      candidates[0].idempotencyKey,
+      idempotencyKey,
+    )
+  ) {
+    throw replayConflict();
+  }
+  return mapHandling(candidates[0].handling);
 }
 
 export async function listPlanOperatorScheduledPageIds(pageIds: string[]) {
@@ -112,7 +136,7 @@ export async function insertPlanOperatorScheduledState(
       notionPageId: input.notionPageId,
       notionVersion: input.expectedNotionVersion,
       mode: 'scheduled',
-      scheduledAt: input.expectedScheduledAt,
+      scheduledAt: canonicalTimestamp(input.expectedScheduledAt),
       warnings: [],
       recordedBy: 'plan',
       idempotencyKey,

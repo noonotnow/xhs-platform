@@ -182,8 +182,24 @@ caching.
 | `POST /admin/api/publish-job-recoveries` | Cloudflare Access operator action that requeues the same exact approved job only for a pre-dispatch `BOUNDED_BATCH_BYPASS_DISABLED` terminal claim generation and writes one append-only audit per generation |
 | `GET /admin/api/manual-post-handlings` | Access-authenticated durable manual handling state for Admin |
 | `POST /admin/api/manual-post-handlings` | Access-authenticated exact Approved-revision marker; warnings do not block operator truth |
+| `POST /admin/api/manual-public-receipt-supersessions` | Exceptional Access-authenticated manual public identity intake; requires exact expired staged/terminal ambiguous job, batch/item/hash, current Notion revision, canonical note identity, and explicit manual supersession confirmation |
 | `GET /api/rednote-metrics/due?limit=20` | Bounded metrics batch with a distinct token and lease per post |
 | `POST /api/rednote-metrics/observations` | Consolidated observations and one coalesced run summary |
+
+The manual-handlings and local-jobs Admin handlers return no-store
+`X-XHS-Admin-API-Contract` and `X-XHS-Source-Commit` response headers so an
+authenticated deployment check can verify the exact route module and source
+artifact without exposing database authority details or secrets.
+They also identify PostgreSQL as the durable state authority and explicitly
+exclude local Mac worker tombstones from the response.
+
+`POST /admin/api/manual-public-receipt-supersessions` is the only exceptional
+path for operator-confirmed manual publication after one ambiguous worker
+attempt. It requires exact immutable job, batch, item, hash, frozen revision,
+current Notion revision, and public identity evidence. The transaction records
+manual receipt-pending state and verification work while negatively
+terminalizing the stale attempt and invalidating its batch item. Worker-success
+attestation is forbidden for this path.
 
 Metrics cadence is 6-hourly through 48 hours, daily through day 14, weekly
 through day 90, and manual afterward. The server stores a performance snapshot

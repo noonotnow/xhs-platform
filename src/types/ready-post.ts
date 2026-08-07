@@ -23,6 +23,9 @@ export interface XhsPost {
   scheduledDate: string | null;
   publishAt?: string;
   lastEditedTime: string;
+  xhsNoteId?: string;
+  xhsShareUrl?: string;
+  publishedAt?: string;
   automationBlockers: string[];
   manualWarnings: string[];
   /** @deprecated Use automationBlockers. */
