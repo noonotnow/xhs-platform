@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { runDueRednoteSweeps } from '@/lib/rednote-sweeps';
+import { runRednoteMaintenance } from '@/lib/rednote-sweeps';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -9,5 +9,5 @@ export async function GET(request: NextRequest) {
   if (!secret || request.headers.get('authorization') !== `Bearer ${secret}`) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
-  return NextResponse.json({ runs: await runDueRednoteSweeps() });
+  return NextResponse.json(await runRednoteMaintenance());
 }

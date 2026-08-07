@@ -1,5 +1,7 @@
 export const REDNOTE_PUBLISHING_CONTRACT_REVISION =
   'rednote-publishing/v1' as const;
+export const REDNOTE_BROWSER_PAYLOAD_REVISION =
+  'rednote-browser-payload/v1' as const;
 
 export const REDNOTE_POST_STATUSES = [
   'Not started',
@@ -171,11 +173,20 @@ export type RednoteExecutorIdentity =
 
 export type RednoteMediaType = 'image' | 'video';
 export type RednoteMediaRole = 'content' | 'cover' | 'poster';
+export const REDNOTE_MEDIA_MIME_TYPES = [
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'video/mp4',
+] as const;
+export type RednoteMediaMimeType =
+  (typeof REDNOTE_MEDIA_MIME_TYPES)[number];
 
 export interface FrozenRednoteMediaAsset {
   assetId: string;
   deliveryUrl: string;
   sha256: string;
+  mimeType: RednoteMediaMimeType;
   mediaType: RednoteMediaType;
   role: RednoteMediaRole;
 }
@@ -229,7 +240,8 @@ export interface FrozenRednoteAttemptPayload {
   contractRevision: typeof REDNOTE_PUBLISHING_CONTRACT_REVISION;
   sourceNotionPageId: string;
   sourceLocalPublishJobId?: string;
-  payloadRevision: string;
+  payloadRevision: typeof REDNOTE_BROWSER_PAYLOAD_REVISION;
+  sourcePostRevision: string;
   payloadDigest: string;
   requestedAt: string;
   executor: RednoteExecutorIdentity;
