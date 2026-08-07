@@ -11,6 +11,36 @@ export function isActiveLocalPublishJob(job: LocalPublishJobSummary) {
   return job.status !== 'failed' && job.status !== 'reconciled';
 }
 
+export function hasLiveUnsafeAutomationOwnership(
+  job: LocalPublishJobSummary | undefined,
+  now = Date.now(),
+) {
+  if (!job) return false;
+  if (
+    job.noteId
+    || job.shareUrl
+    || job.dispatchAuthorizedAt
+    || job.dispatchedAt
+    || job.verifiedAt
+    || job.reconciledAt
+  ) {
+    return true;
+  }
+  if (
+    ['operator_attested', 'submitted', 'scheduled', 'verification_pending', 'verified']
+      .includes(job.status)
+  ) {
+    return true;
+  }
+  if (job.status === 'claimed' || job.status === 'staged') {
+    return Boolean(
+      job.claimExpiresAt
+      && new Date(job.claimExpiresAt).getTime() > now,
+    );
+  }
+  return false;
+}
+
 export function displayedLocalPublishJob(
   jobs: LocalPublishJobSummary[],
   notionPageId: string,

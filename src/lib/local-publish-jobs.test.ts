@@ -65,6 +65,8 @@ function readyPost(): ReadyXhsPost {
     publishAt: snapshot.publishAt,
     scheduledDate: null,
     lastEditedTime: snapshot.notionLastEditedTime,
+    automationBlockers: [],
+    manualWarnings: [],
     publishBlockers: [],
   };
 }

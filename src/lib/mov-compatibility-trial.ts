@@ -2,10 +2,14 @@ import type { XhsPost } from '@/types/ready-post';
 
 export const MOV_COMPATIBILITY_BLOCKER = 'No canonical HTTPS Rednote media is attached';
 export const MOV_MEDIA_STATE_BLOCKER = 'Needs media is still checked';
+export const MOV_PACKET_BLOCKER = 'Publish packet is not ready';
+export const MOV_WORKFLOW_BLOCKER = 'MOV media requires the CapCut compatibility workflow';
 
 const MOV_TRIAL_ALLOWED_BLOCKERS = new Set([
   MOV_COMPATIBILITY_BLOCKER,
   MOV_MEDIA_STATE_BLOCKER,
+  MOV_PACKET_BLOCKER,
+  MOV_WORKFLOW_BLOCKER,
 ]);
 
 type MovTrialPost = Pick<
@@ -27,6 +31,7 @@ export function isMovCompatibilityTrialEligible(post: MovTrialPost) {
     post.hasVideo &&
     post.needsMedia &&
     (post.compatibilityTrialVideoUrls?.length ?? 0) > 0 &&
-    blockers.size === MOV_TRIAL_ALLOWED_BLOCKERS.size &&
-    Array.from(MOV_TRIAL_ALLOWED_BLOCKERS).every((blocker) => blockers.has(blocker));
+    blockers.has(MOV_COMPATIBILITY_BLOCKER) &&
+    blockers.has(MOV_MEDIA_STATE_BLOCKER) &&
+    movCompatibilityTrialBlockers(post).length === 0;
 }

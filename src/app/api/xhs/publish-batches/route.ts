@@ -35,7 +35,18 @@ export async function POST(request: NextRequest) {
       if (!['weekly', 'catch_up', 'bootstrap'].includes(String(body.kind))) {
         throw new Error('kind must be weekly, catch_up, or bootstrap');
       }
-      const batch = await createPublishBatch(body.kind as PublishBatchKind);
+      if (
+        !Array.isArray(body.notionPageIds)
+        || body.notionPageIds.length === 0
+        || body.notionPageIds.length > 50
+        || body.notionPageIds.some((id) => typeof id !== 'string' || !id.trim())
+      ) {
+        throw new Error('notionPageIds must contain 1 to 50 explicitly selected posts');
+      }
+      const batch = await createPublishBatch(
+        body.kind as PublishBatchKind,
+        body.notionPageIds as string[],
+      );
       return NextResponse.json({ batch }, { status: batch ? 201 : 200, headers: NO_STORE_HEADERS });
     }
     if (

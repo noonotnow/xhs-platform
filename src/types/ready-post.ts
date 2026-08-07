@@ -23,7 +23,11 @@ export interface XhsPost {
   scheduledDate: string | null;
   publishAt?: string;
   lastEditedTime: string;
+  automationBlockers: string[];
+  manualWarnings: string[];
+  /** @deprecated Use automationBlockers. */
   publishBlockers: string[];
+  manualHandling?: ManualPostHandlingSummary;
 }
 
 export interface ReadyXhsPost extends XhsPost {
@@ -40,3 +44,4 @@ export interface PublishReadyPostResponse {
   noteId: string;
   shareUrl: string;
 }
+import type { ManualPostHandlingSummary } from '@/types/manual-post-handling';

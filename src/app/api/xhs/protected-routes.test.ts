@@ -4,6 +4,8 @@ import { NextRequest } from 'next/server';
 const mocks = vi.hoisted(() => ({
   requireOperator: vi.fn(),
   listReadyPosts: vi.fn(),
+  getManualPost: vi.fn(),
+  listHandlings: vi.fn(),
   publishReadyPost: vi.fn(),
   getSessionStatus: vi.fn(),
   getQrCode: vi.fn(),
@@ -17,6 +19,7 @@ vi.mock('@/lib/xhs-operator-auth', () => ({
 
 vi.mock('@/lib/notion-posts', () => ({
   listReadyXhsPosts: mocks.listReadyPosts,
+  getXhsPostForManualHandling: mocks.getManualPost,
   normalizeNotionPostsError: (error: Error & { code?: string; status?: number }) =>
     error.code && error.status
       ? error
@@ -33,6 +36,10 @@ vi.mock('@/lib/notion-posts', () => ({
       super(message);
     }
   },
+}));
+
+vi.mock('@/lib/manual-post-handling-store', () => ({
+  listManualPostHandlings: mocks.listHandlings,
 }));
 
 vi.mock('@/lib/ready-post-publisher', () => ({
@@ -69,6 +76,7 @@ describe('protected XHS route handlers', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.requireOperator.mockResolvedValue(null);
+    mocks.listHandlings.mockResolvedValue([]);
   });
 
   it('returns the ready queue as JSON', async () => {

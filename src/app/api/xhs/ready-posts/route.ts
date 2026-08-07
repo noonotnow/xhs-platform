@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { listReadyXhsPosts, normalizeNotionPostsError } from '@/lib/notion-posts';
+import {
+  getXhsPostForManualHandling,
+  listReadyXhsPosts,
+  normalizeNotionPostsError,
+} from '@/lib/notion-posts';
 import { requireXhsOperator } from '@/lib/xhs-operator-auth';
-import { listPlanOperatorScheduledPageIds } from '@/lib/plan-operator-scheduled-store';
+import { listManualPostHandlings } from '@/lib/manual-post-handling-store';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -31,10 +35,25 @@ export async function GET(request: NextRequest) {
       requestId,
       includePublishedCandidates: true,
     });
-    const handled = await listPlanOperatorScheduledPageIds(
-      result.posts.map((post) => post.id),
+    const handlings = await listManualPostHandlings();
+    const handlingByPage = new Map(handlings.map((handling) => [
+      handling.notionPageId,
+      handling,
+    ]));
+    const visiblePageIds = new Set(result.posts.map((post) => post.id));
+    const missingReconciled = handlings.filter((handling) =>
+      handling.receiptStatus === 'reconciled'
+      && !visiblePageIds.has(handling.notionPageId));
+    const reconciledPosts = await Promise.all(
+      missingReconciled.map(async (handling) => ({
+        ...await getXhsPostForManualHandling(handling.notionPageId),
+        manualHandling: handling,
+      })),
     );
-    result.posts = result.posts.filter((post) => !handled.has(post.id));
+    result.posts = result.posts.map((post) => {
+      const manualHandling = handlingByPage.get(post.id);
+      return manualHandling ? { ...post, manualHandling } : post;
+    }).concat(reconciledPosts);
     console.info('Ready posts request completed', {
       requestId,
       postCount: result.posts.length,

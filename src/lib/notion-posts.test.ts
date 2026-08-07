@@ -5,6 +5,7 @@ import {
   buildReadyPostCandidatesQueryFilter,
   isCanonicalMediaMov,
   isCanonicalMediaVideo,
+  buildManualPublishedProperties,
   buildPublishedProperties,
   mapReadyXhsPost,
   normalizeNotionPostsError,
@@ -201,7 +202,11 @@ describe('Notion Posts mapping', () => {
     fixture.properties.ScheduledDate = {
       id: 'scheduled-date',
       type: 'date',
-      date: null,
+      date: {
+        start: '2026-08-07T10:30:00-04:00',
+        end: null,
+        time_zone: null,
+      },
     };
     fixture.properties['Image URLs'] = {
       id: 'media',
@@ -228,11 +233,13 @@ describe('Notion Posts mapping', () => {
         'https://images.xhs.justlikekatie.com/videos/assets/51/live-trial.mov',
       ],
       publishBlockers: [
+        'Publish packet is not ready',
         'Needs media is still checked',
         'No canonical HTTPS Rednote media is attached',
+        'MOV media requires the CapCut compatibility workflow',
       ],
     });
-    expect(post).not.toHaveProperty('publishAt');
+    expect(post).toHaveProperty('publishAt', '2026-08-07T14:30:00.000Z');
   });
 
   it('keeps a MOV trial visible when Image URLs also contains a distinct JPG cover', () => {
@@ -251,7 +258,11 @@ describe('Notion Posts mapping', () => {
     fixture.properties.ScheduledDate = {
       id: 'scheduled-date',
       type: 'date',
-      date: null,
+      date: {
+        start: '2026-08-07T10:30:00-04:00',
+        end: null,
+        time_zone: null,
+      },
     };
     fixture.properties['Image URLs'] = {
       id: 'media',
@@ -277,8 +288,10 @@ describe('Notion Posts mapping', () => {
         'https://images.xhs.justlikekatie.com/videos/assets/51/live-trial.mov',
       ],
       publishBlockers: [
+        'Publish packet is not ready',
         'Needs media is still checked',
         'No canonical HTTPS Rednote media is attached',
+        'MOV media requires the CapCut compatibility workflow',
       ],
     });
 
@@ -289,7 +302,10 @@ describe('Notion Posts mapping', () => {
     };
     expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toMatchObject({
       candidateKind: 'active_unpublished',
-      publishBlockers: ['Needs media is still checked'],
+      publishBlockers: expect.arrayContaining([
+        'Publish packet is not ready',
+        'Needs media is still checked',
+      ]),
     });
 
     fixture.properties['Has video'] = {
@@ -351,7 +367,7 @@ describe('Notion Posts mapping', () => {
     });
   });
 
-  it('fails closed for MOV trials when packet readiness is missing or ambiguous', () => {
+  it('keeps ambiguous MOV records visible for manual handling without enabling the trial', () => {
     const fixture = pageFixture();
     fixture.properties['Publish packet ready'] = {
       id: 'packet',
@@ -379,12 +395,12 @@ describe('Notion Posts mapping', () => {
       fixture,
       { ...resolved, publishPacketReady: null },
       {},
-    )).toBeNull();
+    )).toMatchObject({ candidateKind: 'active_unpublished' });
     expect(toReadyPostCandidate(
       fixture,
       resolved,
       { publishPacketReady: ['Publish packet ready', 'Packet ready'] },
-    )).toBeNull();
+    )).toMatchObject({ candidateKind: 'active_unpublished' });
   });
 
   it('keeps packet-ready unpublished Rednote records in normal readiness semantics', () => {
@@ -507,6 +523,7 @@ describe('Notion Posts mapping', () => {
     expect(post.publishBlockers).toEqual([
       'Needs media is still checked',
       'No canonical HTTPS Rednote media is attached',
+      'MOV media requires the CapCut compatibility workflow',
     ]);
   });
 
@@ -744,6 +761,20 @@ describe('Notion Posts mapping', () => {
       .toContain('Caption is empty');
   });
 
+  it('reports a missing cover as a manual warning without making it an automation blocker', () => {
+    const fixture = pageFixture();
+    delete fixture.properties.Thumbnail;
+    const { resolved, duplicateAliases } = resolvePostsSchema(
+      Object.fromEntries(
+        Object.entries(fixture.properties).map(([name, value]) => [name, { type: value.type }]),
+      ),
+    );
+
+    const post = mapReadyXhsPost(fixture, resolved, duplicateAliases);
+    expect(post.manualWarnings).toContain('Cover thumbnail is missing');
+    expect(post.automationBlockers).not.toContain('Cover thumbnail is missing');
+  });
+
   it('uses only trailing Caption hashtags as an explicit legacy tags fallback', () => {
     const fixture = pageFixture();
     delete fixture.properties['Final Tags'];
@@ -958,6 +989,7 @@ describe('Notion Posts mapping', () => {
         'Published At': { date: { start: '2026-07-31T20:00:00.000Z' } },
         'Next action': { select: { name: 'Backfill URL/metrics' } },
       });
+
       expect(buildPublishedProperties(
         fixture,
         resolved,
@@ -970,6 +1002,59 @@ describe('Notion Posts mapping', () => {
         },
         '2026-07-31T20:00:00.000Z',
       )).not.toHaveProperty('ScheduledDate');
+  });
+
+  it('backfills a manual receipt without rewriting packet, media, or copy truth', () => {
+    const fixture = pageFixture();
+    fixture.properties.Platform = {
+      id: 'platform',
+      type: 'multi_select',
+      multi_select: [{ id: 'instagram', name: 'Instagram', color: 'pink' }],
+    };
+    fixture.properties['Published At'] = {
+      id: 'published-at',
+      type: 'date',
+      date: null,
+    };
+    const schemaProperties = Object.fromEntries(
+      Object.entries(fixture.properties).map(([name, value]) => [
+        name,
+        name === 'Next action'
+          ? {
+              type: value.type,
+              select: { options: [{ name: 'Backfill URL/metrics' }] },
+            }
+          : { type: value.type },
+      ]),
+    );
+    const { resolved, duplicateAliases } = resolvePostsSchema(schemaProperties);
+    const properties = buildManualPublishedProperties(
+      resolved,
+      duplicateAliases,
+      schemaProperties,
+      {
+        noteId: 'note-123',
+        shareUrl: 'https://www.rednote.com/explore/note-123',
+        title: 'Observed title',
+        caption: 'Observed caption',
+        mediaType: 'video',
+      },
+      '2026-08-06T20:00:00.000Z',
+      fixture,
+    );
+
+    expect(properties).toMatchObject({
+      Platform: { multi_select: [{ name: 'Instagram' }, { name: 'RedNote' }] },
+      Status: { status: { name: 'Published' } },
+      'Rednote URL': { url: 'https://www.rednote.com/explore/note-123' },
+      'Next action': { select: { name: 'Backfill URL/metrics' } },
+      'Published At': { date: { start: '2026-08-06T20:00:00.000Z' } },
+    });
+    expect(properties).not.toHaveProperty('Caption');
+    expect(properties).not.toHaveProperty('Publish packet ready');
+    expect(properties).not.toHaveProperty('Needs media');
+    expect(properties).not.toHaveProperty('Needs caption');
+    expect(properties).not.toHaveProperty('Image URLs');
   });
 
   it('recognizes an identical published result without rewriting published metadata', () => {

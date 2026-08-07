@@ -40,7 +40,15 @@ function marker(overrides: Record<string, unknown> = {}) {
     notion_last_edited_time: input.expectedNotionVersion,
     scheduled_at: input.expectedScheduledAt,
     recorded_by: 'plan',
+    handling_mode: 'scheduled',
+    receipt_status: 'pending',
+    warnings: [],
+    manual_reconciliation_id: null,
+    note_id: null,
+    share_url: null,
+    published_at: null,
     recorded_at: '2026-08-06T16:05:00.000Z',
+    updated_at: '2026-08-06T16:05:00.000Z',
     reconciled_at: null,
     ...overrides,
   };
@@ -53,6 +61,7 @@ function pristineJob() {
     claim_token: null,
     claim_attempts: 0,
     claimed_at: null,
+    claim_expires_at: null,
     staged_at: null,
     dispatch_authorized_at: null,
     dispatched_at: null,
@@ -75,26 +84,15 @@ describe('PLAN operator-scheduled store', () => {
     ['without an existing job', []],
     ['while closing an untouched queued job', [pristineJob()]],
   ])('persists durable page state %s', async (_label, jobs) => {
-    mocks.query
-      .mockResolvedValueOnce(result())
-      .mockResolvedValueOnce(result())
-      .mockResolvedValueOnce(result())
-      .mockResolvedValueOnce(result())
-      .mockResolvedValueOnce(result(jobs))
-      .mockResolvedValueOnce(result([{
-        id: '55555555-5555-4555-8555-555555555555',
-        state: 'queued',
-        local_publish_job_id: jobs.length ? pristineJob().id : null,
-      }].filter(() => jobs.length > 0)))
-      .mockResolvedValueOnce(result())
-      .mockResolvedValueOnce(result())
-      .mockResolvedValueOnce(result())
-      .mockResolvedValueOnce(result())
-      .mockResolvedValueOnce(result([{ conflict: false }]))
-      .mockResolvedValueOnce(result([], jobs.length))
-      .mockResolvedValueOnce(result([], jobs.length))
-      .mockResolvedValueOnce(result([marker()]))
-      .mockResolvedValueOnce(result());
+    mocks.query.mockImplementation(async (text: string) => {
+      if (text.includes('FROM local_publish_jobs')) return result(jobs);
+      if (text.includes('FROM xhs_publish_receipts')) return result();
+      if (text.includes('FROM rednote_publish_batch_items')) return result();
+      if (text.includes('INSERT INTO plan_operator_scheduled_posts')) {
+        return result([marker()]);
+      }
+      return result();
+    });
 
     await expect(insertPlanOperatorScheduledState(input, key)).resolves.toMatchObject({
       created: true,
@@ -106,27 +104,30 @@ describe('PLAN operator-scheduled store', () => {
     });
     const statements = mocks.query.mock.calls.map(([text]) => String(text));
     expect(statements).toEqual(expect.arrayContaining([
-      expect.stringContaining("error_code = 'OPERATOR_SCHEDULED_BY_PLAN'"),
+      expect.stringContaining('UPDATE local_publish_jobs'),
       expect.stringContaining("SET state = 'invalidated'"),
       expect.stringContaining('INSERT INTO plan_operator_scheduled_posts'),
       'COMMIT',
     ]));
+    expect(mocks.query.mock.calls.some((call) =>
+      Array.isArray(call[1]) && call[1].includes('OPERATOR_SCHEDULED_BY_PLAN')
+    )).toBe(true);
   });
 
   it('fails closed when a worker already claimed or acted on the page', async () => {
-    mocks.query
-      .mockResolvedValueOnce(result())
-      .mockResolvedValueOnce(result())
-      .mockResolvedValueOnce(result())
-      .mockResolvedValueOnce(result())
-      .mockResolvedValueOnce(result([{
+    mocks.query.mockImplementation(async (text: string) => {
+      if (text.includes('FROM local_publish_jobs')) {
+        return result([{
         ...pristineJob(),
         status: 'claimed',
         claim_token: key,
         claim_attempts: 1,
         claimed_at: '2026-08-06T16:01:00.000Z',
-      }]))
-      .mockResolvedValueOnce(result());
+        claim_expires_at: '2099-08-06T16:31:00.000Z',
+        }]);
+      }
+      return result();
+    });
 
     await expect(insertPlanOperatorScheduledState(input, key)).rejects.toMatchObject({
       code: 'PLAN_OPERATOR_SCHEDULED_ACTIVE_WORKER_CONFLICT',

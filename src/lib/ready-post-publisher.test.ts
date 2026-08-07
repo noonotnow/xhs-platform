@@ -27,6 +27,8 @@ function readyPost(overrides: Partial<ReadyXhsPost> = {}): ReadyXhsPost {
     lastEditedTime: '2026-07-31T01:00:00.000Z',
     publishBlockers: [],
     ...overrides,
+    automationBlockers: overrides.automationBlockers ?? [],
+    manualWarnings: overrides.manualWarnings ?? [],
   };
 }
 

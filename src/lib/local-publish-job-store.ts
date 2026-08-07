@@ -46,6 +46,7 @@ interface LocalPublishJobRow extends QueryResultRow {
   share_url: string | null;
   created_at: Date | string;
   updated_at: Date | string;
+  manual_handling_exists?: boolean;
   completed_at: Date | string | null;
   batch_item_id?: string | null;
   dispatch_authorized_at?: Date | string | null;
@@ -69,6 +70,7 @@ export interface StoredLocalPublishJob {
   verificationAttempts: number;
   nextVerificationAt?: string;
   stagedAt?: string;
+  dispatchAuthorizedAt?: string;
   dispatchedAt?: string;
   verifiedAt?: string;
   reconciledAt?: string;
@@ -131,6 +133,9 @@ function mapRow(row: LocalPublishJobRow): StoredLocalPublishJob {
     ...(optionalTimestamp(row.staged_at ?? null)
       ? { stagedAt: optionalTimestamp(row.staged_at ?? null) }
       : {}),
+    ...(optionalTimestamp(row.dispatch_authorized_at ?? null)
+      ? { dispatchAuthorizedAt: optionalTimestamp(row.dispatch_authorized_at ?? null) }
+      : {}),
     ...(optionalTimestamp(row.dispatched_at ?? null)
       ? { dispatchedAt: optionalTimestamp(row.dispatched_at ?? null) }
       : {}),
@@ -165,6 +170,9 @@ export function jobSummary(job: StoredLocalPublishJob): LocalPublishJobSummary {
     verificationAttempts: job.verificationAttempts,
     ...(job.nextVerificationAt ? { nextVerificationAt: job.nextVerificationAt } : {}),
     ...(job.stagedAt ? { stagedAt: job.stagedAt } : {}),
+    ...(job.dispatchAuthorizedAt
+      ? { dispatchAuthorizedAt: job.dispatchAuthorizedAt }
+      : {}),
     ...(job.dispatchedAt ? { dispatchedAt: job.dispatchedAt } : {}),
     ...(job.verifiedAt ? { verifiedAt: job.verifiedAt } : {}),
     ...(job.reconciledAt ? { reconciledAt: job.reconciledAt } : {}),
@@ -199,7 +207,6 @@ export async function insertLocalPublishJob(
       SELECT 1
       FROM plan_operator_scheduled_posts
       WHERE notion_page_id = ${snapshot.notionPageId}
-        AND reconciled_at IS NULL
     )
       AND NOT EXISTS (
       SELECT 1
@@ -248,7 +255,6 @@ export async function insertLocalPublishJob(
     SELECT id
     FROM plan_operator_scheduled_posts
     WHERE notion_page_id = ${snapshot.notionPageId}
-      AND reconciled_at IS NULL
     LIMIT 1
   `;
   if (operatorScheduled.rows[0]) {
@@ -434,7 +440,6 @@ export async function claimNextStoredLocalPublishJob(
           FROM plan_operator_scheduled_posts AS operator_scheduled
           WHERE operator_scheduled.notion_page_id =
             local_publish_jobs.notion_page_id
-            AND operator_scheduled.reconciled_at IS NULL
         )
         AND NOT EXISTS (
           SELECT 1
@@ -660,6 +665,11 @@ export async function authorizeStoredLocalPublishJob(id: string, claimToken: str
       AND claim_token = ${claimToken}::uuid
       AND claim_expires_at > CURRENT_TIMESTAMP
       AND external_disposition_request_id IS NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM plan_operator_scheduled_posts AS manual_handling
+        WHERE manual_handling.notion_page_id = local_publish_jobs.notion_page_id
+      )
       AND status IN (
         'claimed', 'staged', 'submitted', 'scheduled',
         'verification_pending', 'verified'
@@ -692,6 +702,11 @@ export async function consumeStoredDispatchAuthorization(id: string, claimToken:
       AND status = 'staged'
       AND claim_expires_at > CURRENT_TIMESTAMP
       AND external_disposition_request_id IS NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM plan_operator_scheduled_posts AS manual_handling
+        WHERE manual_handling.notion_page_id = local_publish_jobs.notion_page_id
+      )
     RETURNING *
   `;
   if (result.rows[0]) return claimedResponse(result.rows[0]);
@@ -705,14 +720,26 @@ export async function consumeStoredDispatchAuthorization(id: string, claimToken:
 
 async function loadResultJob(id: string) {
   const result = await sql<LocalPublishJobRow>`
-    SELECT *
-    FROM local_publish_jobs
-    WHERE id = ${id}::uuid
+    SELECT job.*,
+           EXISTS (
+             SELECT 1
+             FROM plan_operator_scheduled_posts AS manual_handling
+             WHERE manual_handling.notion_page_id = job.notion_page_id
+           ) AS manual_handling_exists
+    FROM local_publish_jobs AS job
+    WHERE job.id = ${id}::uuid
     LIMIT 1
   `;
   const row = result.rows[0];
   if (!row) {
     throw new LocalPublishJobError('Local publish job was not found', 'JOB_NOT_FOUND', 404);
+  }
+  if (row.manual_handling_exists) {
+    throw new LocalPublishJobError(
+      'Operator handling superseded this local publish attempt',
+      'MANUAL_HANDLING_EXISTS',
+      409,
+    );
   }
   return mapRow(row);
 }
@@ -758,6 +785,11 @@ export async function stageStoredLocalPublishJob(id: string, claimToken: string)
       AND claim_token = ${claimToken}::uuid
       AND claim_expires_at > CURRENT_TIMESTAMP
       AND external_disposition_request_id IS NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM plan_operator_scheduled_posts AS manual_handling
+        WHERE manual_handling.notion_page_id = local_publish_jobs.notion_page_id
+      )
       AND NOT EXISTS (
         SELECT 1
         FROM manual_reconciliation_requests AS disposition
@@ -818,6 +850,11 @@ export async function recordStoredLocalPublishDispatch(
       AND claim_token = ${claimToken}::uuid
       AND claim_expires_at > CURRENT_TIMESTAMP
       AND external_disposition_request_id IS NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM plan_operator_scheduled_posts AS manual_handling
+        WHERE manual_handling.notion_page_id = local_publish_jobs.notion_page_id
+      )
       AND NOT EXISTS (
         SELECT 1
         FROM manual_reconciliation_requests AS disposition
@@ -888,6 +925,11 @@ export async function deferStoredLocalPublishVerification(
       AND note_id = ${noteId}
       AND share_url = ${shareUrl}
       AND external_disposition_request_id IS NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM plan_operator_scheduled_posts AS manual_handling
+        WHERE manual_handling.notion_page_id = local_publish_jobs.notion_page_id
+      )
       AND NOT EXISTS (
         SELECT 1
         FROM manual_reconciliation_requests AS disposition
@@ -1026,6 +1068,11 @@ export async function failStoredLocalPublishJob(
       AND external_disposition_request_id IS NULL
       AND NOT EXISTS (
         SELECT 1
+        FROM plan_operator_scheduled_posts AS manual_handling
+        WHERE manual_handling.notion_page_id = local_publish_jobs.notion_page_id
+      )
+      AND NOT EXISTS (
+        SELECT 1
         FROM manual_reconciliation_requests AS disposition
         WHERE disposition.request_kind = 'targeted_local_job'
           AND disposition.source_local_job_id = local_publish_jobs.id
@@ -1077,6 +1124,11 @@ export async function prepareStoredLocalPublishVerification(
       AND claim_token = ${claimToken}::uuid
       AND claim_expires_at > CURRENT_TIMESTAMP
       AND external_disposition_request_id IS NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM plan_operator_scheduled_posts AS manual_handling
+        WHERE manual_handling.notion_page_id = local_publish_jobs.notion_page_id
+      )
       AND NOT EXISTS (
         SELECT 1
         FROM manual_reconciliation_requests AS disposition
@@ -1173,6 +1225,11 @@ export async function completeStoredLocalPublishReconciliation(
       AND note_id = ${noteId}
       AND share_url = ${shareUrl}
       AND external_disposition_request_id IS NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM plan_operator_scheduled_posts AS manual_handling
+        WHERE manual_handling.notion_page_id = local_publish_jobs.notion_page_id
+      )
       AND NOT EXISTS (
         SELECT 1
         FROM manual_reconciliation_requests AS disposition

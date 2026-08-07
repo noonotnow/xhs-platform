@@ -108,9 +108,43 @@ and Vercel variables, deploy this application, and finally route the production
 admin hostname through Access. This avoids switching the browser to upload
 grants before the microservice accepts them.
 
+### Manual-first Admin receipt lane
+
+Manual Creator publishing is the default path. Automation is optional and must
+be explicitly selected; `ScheduledDate` is expected on every post but never
+opts a post into automation, marks it complete, locks it, or hides it.
+
+Apply `migrations/015_plan_operator_scheduled_posts.sql`, then
+`migrations/016_manual_first_receipt_lane.sql` before deploying this release.
+Migration 016 generalizes the existing PLAN marker, so deploy the database
+migration first, the XHS platform second, and worker changes last. Do not enable
+new worker dispatch until the platform deployment is healthy.
+
+In XHS Admin, an operator can open Creator, copy reviewed copy and assets, then
+choose **Mark handled manually** as scheduled or published. The server re-reads
+Notion and requires the exact revision and canonical `Approved` status. Missing
+packet readiness, caption/media flags, canonical MEDIA registration, and MOV or
+CapCut compatibility are returned as warnings; they do not prevent recording
+operator truth. The durable PostgreSQL marker immediately quarantines inactive,
+expired, failed, or abandoned automation. Only a live Creator-capable claim,
+stage, submission, or incompatible verified publication conflicts.
+
+Notion remains `Approved` while the receipt is pending or verification is
+retrying. Paste the public RedNote URL or note ID in Admin to verify it. Success
+atomically writes a manual publication receipt, then backfills only RedNote
+identity, `Published At`, the additive RedNote platform tag, `Status =
+Published`, and the existing `Backfill URL/metrics` next action. It does not
+rewrite copy, set packet readiness, clear needs flags, or invent MEDIA URLs.
+Failed verification remains durable, visible, and non-dispatchable.
+
+The authenticated API is `GET|POST /admin/api/manual-post-handlings`. POST
+requires a UUID `Idempotency-Key` and exact
+`{notionPageId,expectedLastEditedTime,mode}` where mode is `scheduled` or
+`published`.
+
 ### PLAN operator-scheduled integration
 
-Apply `migrations/015_plan_operator_scheduled_posts.sql`, then configure the same
+Apply migrations 015 and 016 in order, then configure the same
 `PLAN_INTEGRATION_TOKEN` in XHS and PLAN. PLAN calls
 `POST /api/integrations/plan/operator-scheduled` with
 `Authorization: Bearer <PLAN_INTEGRATION_TOKEN>`, a UUID `Idempotency-Key`
@@ -139,10 +173,12 @@ post, this read returns `execution.state = "reconciled"` and `reconciledAt`.
 
 ### Mac-local publishing for CREATE packets
 
-The protected admin loads unpublished RedNote records whose canonical
-`Publish packet ready` property is checked. The server re-reads the selected
-Notion page before creating a queue job, confirms that it is still RedNote-ready
-and not `Published`, and builds an immutable snapshot from canonical HTTPS media.
+The protected admin keeps active unpublished RedNote records visible regardless
+of packet readiness or ScheduledDate. Manual handoff is primary. Explicit
+automation re-reads a selected Notion page before creating a queue job, confirms
+that it is still automation-ready and not `Published`, and builds an immutable
+snapshot from canonical HTTPS media. Dated posts never enter a worker manifest
+unless the operator explicitly selects them.
 Client-provided media URLs and Notion metadata are never accepted. The operator
 can edit only the final reviewed title, caption, tags, and trusted media choice.
 `Caption` is the canonical platform-neutral and language-neutral post body. It
@@ -169,9 +205,10 @@ Trusted canonical MEDIA `.mov` registrations remain compatibility-unverified and
 are not added to the normal ready video set. Admin exposes a separate warning and
 staging-trial action only for these MOV assets. Queueing that lane requires a
 second explicit compatibility-trial confirmation; the server re-reads Notion and
-accepts only a reviewed packet whose blockers are limited to `Needs media` and
-the absence of certified canonical media. Missing title/caption, incomplete
-packet review, untrusted media, schema ambiguity, and every unrelated blocker
+accepts only a reviewed packet whose blockers are limited to packet readiness,
+`Needs media`, the absence of certified canonical media, and the explicit MOV
+compatibility workflow. Missing title/caption, untrusted media, schema
+ambiguity, invalid ScheduledDate, and every unrelated blocker
 still fail closed. Normal MP4 and image readiness rules are unchanged.
 
 Apply the required queue migration before deploying the publishing pipeline:
@@ -400,15 +437,16 @@ The hourly `.github/workflows/rednote-sweep.yml` workflow calls
 repository secrets. The application uses
 `America/New_York`, not a fixed UTC offset, to run the daily 08:00 operational
 sweep and Sunday 18:00 weekly candidate for the following Monday-Sunday window.
-Sweeps never approve. Daily runs recover known receipts into verification,
-continue post-dispatch jobs through the existing verification lane, and create
-one catch-up candidate. Verification remains 15m, 1h, 6h, and 24h; RedNote
+Sweeps never approve or ambient-create manifests from dated posts. Daily runs
+recover known receipts into verification and continue post-dispatch jobs
+through the existing verification lane. Verification remains 15m, 1h, 6h, and 24h; RedNote
 `300031` stays `verification_pending` and is never dispatchable.
 
 For the one-time bootstrap after the migration and application deploy:
 
-1. Open `/admin`, refresh posts, and select **Build bootstrap batch**.
-2. Review every item and confirm each explicit `Post now — Nh late` conversion.
+1. Open `/admin`, refresh posts, select one intended automation item, and choose
+   **Build bootstrap batch** under explicit legacy automation.
+2. Review the selected item and confirm any explicit `Post now — Nh late` conversion.
    Items over 24 hours late, records without an exact time, and uncertified MOV
    records remain visible in the preview as blocked and are not part of the
    authorized manifest.
@@ -500,22 +538,23 @@ lifecycle owns the post. Because an in-flight external reconciliation has no
 canonical page ID until it succeeds, any `processing` external reconciliation
 conservatively blocks recovery until it finishes.
 
-### Already-published manual reconciliation
+### Manual receipt verification
 
-XHS Admin owns reconciliation for a post that an operator published manually.
-On an unpublished canonical row with no active local publish job, choose
-**Already published? Reconcile**, enter the exact public RedNote URL or bare note
-ID, confirm that the post is already public, and queue verification. A terminal
-failed local publish job is eligible and remains unchanged as audit history.
+XHS Admin owns reconciliation for a post that an operator handled manually.
+First choose **Mark handled manually** on the stable canonical `Approved` row.
+Then enter the exact public RedNote URL or bare note ID and queue verification.
+A terminal failed or expired local publish job is quarantined as audit history.
 Queued or verifying manual reconciliation blocks another local publish job for
 the same canonical row.
 
 The server accepts only a bare ID containing letters, numbers, `_`, or `-`, or
 the exact query-free URL
 `https://www.rednote.com/explore/<noteId>`. It re-reads the canonical Notion
-record and freezes title, caption, and media type; the browser cannot submit
-those claims. Published rows, active local jobs, alternate hosts, query strings,
-fragments, trailing slashes, and conflicting identities fail closed.
+record and freezes the exact Notion revision. It verifies public identity plus
+the reliable title/caption/media fields; warning-level media or CapCut fallout
+can omit media matching. The browser cannot submit those claims. Alternate
+hosts, query strings, fragments, trailing slashes, live unsafe ownership, and
+conflicting verified identities fail closed.
 
 The Mac worker uses a separate lane:
 
@@ -565,7 +604,8 @@ The Mac worker uses a separate lane:
    A definitive mismatch uses
    `{"status":"failed","code":"SAFE_CODE","message":"Safe operator guidance"}`.
    Messages containing URLs or credential-like data are rejected.
-3. A verified snapshot must exactly equal the durable request. XHS then reuses
+3. A verified snapshot must match the durable request's selected reliable
+   fields and exact public identity. XHS then reuses
    the external reconciliation receipt, checks that the RedNote identity does
    not belong to another canonical row, updates only the request's
    `notionPageId`, and writes the established Published fields. A Notion outage
@@ -573,10 +613,9 @@ The Mac worker uses a separate lane:
    canonical row or audit receipt.
 
 Admin displays `queued`, `verifying`, `reconciled`, or `failed`. Failed requests
-are retried in place after eligibility is rechecked. Manual reconciliation is
-publication verification, not metrics scraping: it does not use
-`/api/rednote-metrics/*`, the local dispatch lane, or the local verification
-lane.
+are retried in place after eligibility is rechecked. Manual reconciliation is publication verification, not metrics scraping. Once
+verified, its exact manual receipt becomes eligible for the existing bounded
+`/api/rednote-metrics/*` cadence without requiring a local publish job.
 
 ### Quiet worker lanes and metrics
 
@@ -631,6 +670,8 @@ Metrics use a separate bounded batch because they are read-only collection work:
    values. `lastObservedAt` has the same baseline meaning.
 2. Cadence is derived from the durable publication time: through 48 hours every
    6 hours, through day 14 daily, through day 90 weekly, then manual/on-demand.
+   The source can be a reconciled local job or an exact verified manual handling
+   receipt; provenance remains mutually exclusive and durable.
 3. Submit one consolidated request to `POST /api/rednote-metrics/observations`:
 
    ```json

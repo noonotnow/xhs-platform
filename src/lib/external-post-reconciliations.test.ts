@@ -96,6 +96,7 @@ describe('external reconciliation orchestration', () => {
       snapshot,
       processing.createdAt,
       'target-page',
+      undefined,
     );
   });
 
@@ -121,6 +122,8 @@ describe('external reconciliation orchestration', () => {
       snapshot,
       idempotencyKey,
       processing.id,
+      'automation',
+      'target-page',
     );
   });
 

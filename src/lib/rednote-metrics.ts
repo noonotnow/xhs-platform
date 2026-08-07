@@ -147,9 +147,10 @@ export async function claimDueRednoteMetricPosts(
   leaseSeconds = DEFAULT_LEASE_SECONDS,
 ): Promise<ClaimedRednoteMetricPost[]> {
   const result = await sql<MetricClaimRow>`
-    WITH candidates AS (
+    WITH publication_sources AS (
       SELECT
         job.id AS source_job_id,
+        NULL::uuid AS manual_handling_id,
         job.notion_page_id,
         job.note_id,
         job.share_url,
@@ -165,11 +166,15 @@ export async function claimDueRednoteMetricPosts(
           ELSE COALESCE(job.dispatched_at, job.verified_at, job.reconciled_at)
         END AS published_at
       FROM local_publish_jobs AS job
-      LEFT JOIN rednote_metric_collection_state AS state
-        ON state.notion_page_id = job.notion_page_id
       WHERE job.status = 'reconciled'
         AND job.note_id IS NOT NULL
         AND job.share_url IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1
+          FROM plan_operator_scheduled_posts AS manual
+          WHERE manual.notion_page_id = job.notion_page_id
+            AND manual.receipt_status = 'reconciled'
+        )
         AND NOT EXISTS (
           SELECT 1
           FROM local_publish_jobs AS newer
@@ -178,21 +183,28 @@ export async function claimDueRednoteMetricPosts(
             AND (newer.reconciled_at, newer.created_at, newer.id)
               > (job.reconciled_at, job.created_at, job.id)
         )
-        AND (
+      UNION ALL
+      SELECT
+        NULL::uuid AS source_job_id,
+        handling.id AS manual_handling_id,
+        handling.notion_page_id,
+        handling.note_id,
+        handling.share_url,
+        handling.published_at
+      FROM plan_operator_scheduled_posts AS handling
+      WHERE handling.receipt_status = 'reconciled'
+        AND handling.note_id IS NOT NULL
+        AND handling.share_url IS NOT NULL
+        AND handling.published_at IS NOT NULL
+    ),
+    candidates AS (
+      SELECT source.*
+      FROM publication_sources AS source
+      LEFT JOIN rednote_metric_collection_state AS state
+        ON state.notion_page_id = source.notion_page_id
+      WHERE (
           ${onDemand}
-          OR (
-            CASE
-              WHEN COALESCE(
-                job.snapshot->>'publishAt',
-                job.snapshot->>'scheduledDate'
-              ) IS NOT NULL
-                THEN COALESCE(
-                  job.snapshot->>'publishAt',
-                  job.snapshot->>'scheduledDate'
-                )::timestamptz
-              ELSE COALESCE(job.dispatched_at, job.verified_at, job.reconciled_at)
-            END
-          ) >= CURRENT_TIMESTAMP - INTERVAL '90 days'
+          OR source.published_at >= CURRENT_TIMESTAMP - INTERVAL '90 days'
         )
         AND (
           state.notion_page_id IS NULL
@@ -210,25 +222,15 @@ export async function claimDueRednoteMetricPosts(
         )
       ORDER BY COALESCE(
         state.next_due_at,
-        CASE
-          WHEN COALESCE(
-            job.snapshot->>'publishAt',
-            job.snapshot->>'scheduledDate'
-          ) IS NOT NULL
-            THEN COALESCE(
-              job.snapshot->>'publishAt',
-              job.snapshot->>'scheduledDate'
-            )::timestamptz
-          ELSE COALESCE(job.dispatched_at, job.verified_at, job.reconciled_at)
-        END
-      ), job.notion_page_id
-      FOR UPDATE OF job SKIP LOCKED
+        source.published_at
+      ), source.notion_page_id
       LIMIT ${limit}
     ),
     claimed AS (
       INSERT INTO rednote_metric_collection_state (
         notion_page_id,
         source_job_id,
+        manual_handling_id,
         claim_token,
         claimed_at,
         claim_expires_at
@@ -236,12 +238,14 @@ export async function claimDueRednoteMetricPosts(
       SELECT
         notion_page_id,
         source_job_id,
+        manual_handling_id,
         gen_random_uuid(),
         CURRENT_TIMESTAMP,
         CURRENT_TIMESTAMP + (${leaseSeconds} * INTERVAL '1 second')
       FROM candidates
       ON CONFLICT (notion_page_id) DO UPDATE
       SET source_job_id = EXCLUDED.source_job_id,
+          manual_handling_id = EXCLUDED.manual_handling_id,
           claim_token = gen_random_uuid(),
           claimed_at = CURRENT_TIMESTAMP,
           claim_expires_at = CURRENT_TIMESTAMP + (${leaseSeconds} * INTERVAL '1 second'),
@@ -295,6 +299,7 @@ async function writeMetricObservation(observation: RednoteMetricObservation) {
       INSERT INTO post_performance_snapshots (
         notion_page_id,
         source_job_id,
+        manual_handling_id,
         observed_at,
         metrics,
         write_reason
@@ -302,6 +307,7 @@ async function writeMetricObservation(observation: RednoteMetricObservation) {
       SELECT
         notion_page_id,
         source_job_id,
+        manual_handling_id,
         ${observation.observedAt}::timestamptz,
         ${JSON.stringify(observation.metrics)}::jsonb,
         CASE
@@ -327,13 +333,13 @@ async function writeMetricObservation(observation: RednoteMetricObservation) {
           END,
           next_due_at = CASE
             WHEN ${observation.observedAt}::timestamptz
-              <= job.published_at + INTERVAL '48 hours'
+              <= publication.published_at + INTERVAL '48 hours'
               THEN ${observation.observedAt}::timestamptz + INTERVAL '6 hours'
             WHEN ${observation.observedAt}::timestamptz
-              <= job.published_at + INTERVAL '14 days'
+              <= publication.published_at + INTERVAL '14 days'
               THEN ${observation.observedAt}::timestamptz + INTERVAL '1 day'
             WHEN ${observation.observedAt}::timestamptz
-              <= job.published_at + INTERVAL '90 days'
+              <= publication.published_at + INTERVAL '90 days'
               THEN ${observation.observedAt}::timestamptz + INTERVAL '7 days'
             ELSE NULL
           END,
@@ -341,17 +347,26 @@ async function writeMetricObservation(observation: RednoteMetricObservation) {
           updated_at = CURRENT_TIMESTAMP
       FROM locked
       JOIN LATERAL (
-        SELECT CASE
-          WHEN COALESCE(snapshot->>'publishAt', snapshot->>'scheduledDate') IS NOT NULL
-            THEN COALESCE(
-              snapshot->>'publishAt',
-              snapshot->>'scheduledDate'
-            )::timestamptz
-          ELSE COALESCE(dispatched_at, verified_at, reconciled_at)
-        END AS published_at
-        FROM local_publish_jobs
-        WHERE id = locked.source_job_id
-      ) AS job ON true
+        SELECT COALESCE(
+          (
+            SELECT CASE
+              WHEN COALESCE(snapshot->>'publishAt', snapshot->>'scheduledDate') IS NOT NULL
+                THEN COALESCE(
+                  snapshot->>'publishAt',
+                  snapshot->>'scheduledDate'
+                )::timestamptz
+              ELSE COALESCE(dispatched_at, verified_at, reconciled_at)
+            END
+            FROM local_publish_jobs
+            WHERE id = locked.source_job_id
+          ),
+          (
+            SELECT published_at
+            FROM plan_operator_scheduled_posts
+            WHERE id = locked.manual_handling_id
+          )
+        ) AS published_at
+      ) AS publication ON true
       WHERE state.notion_page_id = locked.notion_page_id
         AND (
           state.last_observed_at IS DISTINCT FROM ${observation.observedAt}::timestamptz

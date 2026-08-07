@@ -45,6 +45,7 @@ export interface LocalPublishJobSummary {
   verificationAttempts: number;
   nextVerificationAt?: string;
   stagedAt?: string;
+  dispatchAuthorizedAt?: string;
   dispatchedAt?: string;
   verifiedAt?: string;
   reconciledAt?: string;
@@ -248,6 +249,7 @@ export interface ExternalReconciliationSummary {
   shareUrl: string;
   title: string;
   mediaType: LocalPublishMediaType;
+  source?: 'automation' | 'manual' | 'recovery';
   status: ExternalReconciliationStatus;
   outcome?: ExternalReconciliationOutcome;
   notionPageId?: string;
@@ -269,6 +271,8 @@ export interface ManualReconciliationExpectedSnapshot {
   title: string;
   caption: string;
   mediaType: LocalPublishMediaType;
+  notionVersion?: string;
+  matchFields?: Array<'title' | 'caption' | 'mediaType'>;
 }
 
 export interface ManualReconciliationSummary {

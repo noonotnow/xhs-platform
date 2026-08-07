@@ -43,7 +43,7 @@ function row(status: 'queued' | 'verifying' | 'reconciled' | 'failed') {
         : null,
     claim_attempts: status === 'verifying' ? 1 : 0,
     claimed_at: status === 'verifying' ? '2026-08-03T12:00:00.000Z' : null,
-    claim_expires_at: status === 'verifying' ? '2026-08-03T12:30:00.000Z' : null,
+    claim_expires_at: status === 'verifying' ? '2099-08-03T12:30:00.000Z' : null,
     verification_attempts: 0,
     next_attempt_at: '2026-08-03T12:00:00.000Z',
     external_reconciliation_id: null,
@@ -154,7 +154,7 @@ describe('manual reconciliation persistence', () => {
       expected,
       verificationAttempts: 0,
       claimToken: row('verifying').claim_token,
-      claimExpiresAt: '2026-08-03T12:30:00.000Z',
+      claimExpiresAt: '2099-08-03T12:30:00.000Z',
     }]);
     const query = (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
     expect(query).toContain('FOR UPDATE SKIP LOCKED');
@@ -165,16 +165,65 @@ describe('manual reconciliation persistence', () => {
   });
 
   it('completes the durable operator-scheduled marker after verified reconciliation', async () => {
-    mocks.sql.mockResolvedValue({ rows: [row('reconciled')] });
+    mocks.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [row('verifying')] })
+      .mockResolvedValueOnce({ rows: [{
+        note_id: row('verifying').requested_note_id,
+        share_url: row('verifying').requested_share_url,
+        completed_at: '2026-08-03T12:05:00.000Z',
+        notion_page_id: row('verifying').notion_page_id,
+      }] })
+      .mockResolvedValueOnce({ rows: [{
+        id: '66666666-6666-4666-8666-666666666666',
+        receipt_status: 'pending',
+      }] })
+      .mockResolvedValueOnce({ rows: [{ notion_page_id: row('verifying').notion_page_id }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [row('reconciled')], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [] });
     await expect(completeManualReconciliation(
       row('verifying').id,
       row('verifying').claim_token!,
       '55555555-5555-4555-8555-555555555555',
     )).resolves.toMatchObject({ status: 'reconciled' });
-    const query = (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
-    expect(query).toContain('UPDATE plan_operator_scheduled_posts');
-    expect(query).toContain('SET reconciled_at = CURRENT_TIMESTAMP');
-    expect(query).toContain('operator_scheduled.notion_page_id = reconciled.notion_page_id');
+    const statements = mocks.query.mock.calls.map(([query]) => String(query));
+    expect(statements).toEqual(expect.arrayContaining([
+      expect.stringContaining('INSERT INTO xhs_publish_receipts'),
+      expect.stringContaining('UPDATE plan_operator_scheduled_posts'),
+      expect.stringContaining('UPDATE manual_reconciliation_requests'),
+      'COMMIT',
+    ]));
+    expect(statements.join('\n')).toContain("source = 'manual'");
+  });
+
+  it('rolls back when the durable manual handling cannot be reconciled', async () => {
+    mocks.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [row('verifying')] })
+      .mockResolvedValueOnce({ rows: [{
+        note_id: row('verifying').requested_note_id,
+        share_url: row('verifying').requested_share_url,
+        completed_at: '2026-08-03T12:05:00.000Z',
+        notion_page_id: row('verifying').notion_page_id,
+      }] })
+      .mockResolvedValueOnce({ rows: [{
+        id: '66666666-6666-4666-8666-666666666666',
+        receipt_status: 'pending',
+      }] })
+      .mockResolvedValueOnce({ rows: [{ notion_page_id: row('verifying').notion_page_id }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await expect(completeManualReconciliation(
+      row('verifying').id,
+      row('verifying').claim_token!,
+      '55555555-5555-4555-8555-555555555555',
+    )).rejects.toMatchObject({
+      code: 'RECONCILIATION_CONFLICT',
+      status: 409,
+    });
+    expect(mocks.query.mock.calls.at(-1)?.[0]).toBe('ROLLBACK');
   });
 
   it('requeues retryable failures and makes the fourth attempt terminal', async () => {

@@ -4,6 +4,8 @@ const mocks = vi.hoisted(() => ({
   find: vi.fn(),
   insert: vi.fn(),
   getPost: vi.fn(),
+  getManualPost: vi.fn(),
+  loadHandling: vi.fn(),
   assertSnapshot: vi.fn(),
   reconcile: vi.fn(),
   complete: vi.fn(),
@@ -31,8 +33,15 @@ vi.mock('@/lib/manual-reconciliation-store', async (importOriginal) => {
 });
 vi.mock('@/lib/notion-posts', async (importOriginal) => {
   const original = await importOriginal<typeof import('@/lib/notion-posts')>();
-  return { ...original, getReadyXhsPost: mocks.getPost };
+  return {
+    ...original,
+    getReadyXhsPost: mocks.getPost,
+    getXhsPostForManualHandling: mocks.getManualPost,
+  };
 });
+vi.mock('@/lib/manual-post-handling-store', () => ({
+  loadManualPostHandlingByPage: mocks.loadHandling,
+}));
 vi.mock('@/lib/external-post-reconciliations', () => ({
   reconcileVerifiedExternalPost: mocks.reconcile,
 }));
@@ -75,7 +84,10 @@ const snapshot = {
 };
 
 describe('manual reconciliation orchestration', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.loadHandling.mockResolvedValue(null);
+  });
 
   it('freezes expected metadata from Notion instead of the client', async () => {
     mocks.find.mockResolvedValue(null);
@@ -85,6 +97,7 @@ describe('manual reconciliation orchestration', () => {
       caption: request.expected.caption,
       hasVideo: true,
       candidateKind: 'packet_ready',
+      manualWarnings: [],
     });
     mocks.insert.mockResolvedValue({
       request: { ...request, status: 'queued' },
@@ -146,6 +159,7 @@ describe('manual reconciliation orchestration', () => {
       caption: request.expected.caption,
       hasVideo: true,
       candidateKind: 'mov_compatibility_trial',
+      manualWarnings: [],
     });
 
     await expect(createManualReconciliation({
@@ -157,6 +171,43 @@ describe('manual reconciliation orchestration', () => {
       status: 409,
     });
     expect(mocks.insert).not.toHaveBeenCalled();
+  });
+
+  it('allows a stable Approved handled post to verify despite media warnings', async () => {
+    mocks.find.mockResolvedValue(null);
+    mocks.loadHandling.mockResolvedValue({
+      notionPageId: request.notionPageId,
+      notionVersion: '2026-08-03T12:00:00.000Z',
+      receiptStatus: 'pending',
+    });
+    mocks.getManualPost.mockResolvedValue({
+      id: request.notionPageId,
+      headline: request.expected.title,
+      caption: request.expected.caption,
+      status: 'Approved',
+      lastEditedTime: '2026-08-03T12:00:00.000Z',
+      hasVideo: true,
+      manualWarnings: [
+        'Needs media is still checked',
+        'MOV media requires the CapCut compatibility workflow',
+      ],
+    });
+    mocks.insert.mockResolvedValue({
+      request: { ...request, status: 'queued' },
+      created: true,
+    });
+
+    await expect(createManualReconciliation({
+      notionPageId: request.notionPageId,
+      publicPost: request.shareUrl,
+      confirmed: true,
+    }, request.idempotencyKey)).resolves.toMatchObject({ created: true });
+    expect(mocks.insert).toHaveBeenCalledWith(expect.objectContaining({
+      expected: expect.objectContaining({
+        notionVersion: '2026-08-03T12:00:00.000Z',
+        matchFields: ['title', 'caption'],
+      }),
+    }));
   });
 
   it('targets the exact canonical row and completes only after the external receipt', async () => {
@@ -179,6 +230,7 @@ describe('manual reconciliation orchestration', () => {
       snapshot,
       idempotencyKey: request.id,
       targetNotionPageId: request.notionPageId,
+      source: 'manual',
     });
     expect(mocks.complete.mock.invocationCallOrder[0])
       .toBeGreaterThan(mocks.reconcile.mock.invocationCallOrder[0]);
