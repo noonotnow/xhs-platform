@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { adminApiHeaders } from '@/lib/admin-api-response';
 import { requireXhsOperator } from '@/lib/xhs-operator-auth';
 import { parseIdempotencyKey, LocalPublishJobError } from '@/lib/local-publish-job-input';
 import {
@@ -13,24 +14,20 @@ export const revalidate = 0;
 export const runtime = 'nodejs';
 export const maxDuration = 30;
 
-const NO_STORE_HEADERS = {
-  'Cache-Control': 'private, no-store, max-age=0, must-revalidate',
-  'CDN-Cache-Control': 'no-store',
-  'Vercel-CDN-Cache-Control': 'no-store',
-};
+const RESPONSE_HEADERS = adminApiHeaders('local-publish-jobs/v1');
 
 function errorResponse(error: unknown) {
   const known = normalizeLocalPublishJobError(error);
   return NextResponse.json(
     { error: known.message, code: known.code },
-    { status: known.status, headers: NO_STORE_HEADERS },
+    { status: known.status, headers: RESPONSE_HEADERS },
   );
 }
 
 export async function GET(request: NextRequest) {
   const unauthorized = await requireXhsOperator(request);
   if (unauthorized) {
-    for (const [name, value] of Object.entries(NO_STORE_HEADERS)) {
+    for (const [name, value] of Object.entries(RESPONSE_HEADERS)) {
       unauthorized.headers.set(name, value);
     }
     return unauthorized;
@@ -43,7 +40,7 @@ export async function GET(request: NextRequest) {
     ]);
     return NextResponse.json(
       { jobs, successAttestationCandidates },
-      { headers: NO_STORE_HEADERS },
+      { headers: RESPONSE_HEADERS },
     );
   } catch (error) {
     return errorResponse(error);
@@ -53,7 +50,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   const unauthorized = await requireXhsOperator(request);
   if (unauthorized) {
-    for (const [name, value] of Object.entries(NO_STORE_HEADERS)) {
+    for (const [name, value] of Object.entries(RESPONSE_HEADERS)) {
       unauthorized.headers.set(name, value);
     }
     return unauthorized;
@@ -74,7 +71,7 @@ export async function POST(request: NextRequest) {
     const result = await queueLocalPublishJob(body, idempotencyKey);
     return NextResponse.json(
       { job: result.job },
-      { status: result.created ? 201 : 200, headers: NO_STORE_HEADERS },
+      { status: result.created ? 201 : 200, headers: RESPONSE_HEADERS },
     );
   } catch (error) {
     return errorResponse(error);

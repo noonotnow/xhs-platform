@@ -158,13 +158,53 @@ header, and:
 }
 ```
 
-XHS re-reads the canonical Approved post and requires exact revision and
-`ScheduledDate` agreement. A successful response contains
+XHS re-reads the canonical Approved post and requires an exact revision plus
+instant-equivalent `ScheduledDate` agreement. Equivalent ISO offsets replay the
+same scheduled instant; malformed timestamps or different instants conflict. A
+successful response contains
 `execution.state = "operator_scheduled_receipt_pending"` plus `scheduledAt`,
 `notionVersion`, `recordedAt`, and the canonical page ID. Exact replay returns
 HTTP 200; creation returns HTTP 201. A different use of the key or page returns
 `PLAN_OPERATOR_SCHEDULED_REPLAY_MISMATCH` (409). This operation never publishes
 and never writes a public identity.
+
+Authenticated Admin responses from `/admin/api/manual-post-handlings` and
+`/admin/api/local-publish-jobs` include `X-XHS-Admin-API-Contract` and
+`X-XHS-Source-Commit` headers. `X-XHS-State-Authority: postgresql` identifies
+the durable server authority, while `X-XHS-Local-Worker-State: excluded`
+clarifies that a Mac worker tombstone is separate safety evidence and cannot be
+inferred from an empty jobs array. These safe canaries distinguish the exact
+route module and Vercel source commit without exposing database or environment
+credentials.
+
+### Exceptional manual public receipt supersession
+
+`POST /admin/api/manual-public-receipt-supersessions` is the only path that may
+supersede one expired staged or terminal `AMBIGUOUS_CREATOR_UI` local attempt
+after an operator confirms that they created the supplied public post manually.
+It requires a UUID `Idempotency-Key` and exact `notionPageId`,
+`expectedNotionVersion`, `jobId`, `batchId`, `batchItemId`, `manifestHash`,
+`itemHash`, `snapshotRevision`, canonical `noteId` and `shareUrl`,
+`provenance: "manual"`, `confirmed: true`, and
+`supersedeAmbiguousWorkerAttempt: true`.
+
+The route re-reads canonical Notion and requires the exact current revision,
+`Approved`, and no existing publication identity. One transaction locks and
+validates the page, job, batch item, hashes, snapshots, receipts, and other
+ownership; writes immutable supersession audit, manual handling, and queued
+manual reconciliation records; then permanently fails the job with
+`MANUAL_PUBLIC_RECEIPT_SUPERSESSION` and invalidates the batch item. It never
+attests worker success. The normal manual-handling guard remains unchanged.
+Verification must succeed before the existing manual reconciliation path writes
+the manual-source receipt or Published fields.
+
+Deploy order is: apply migration 017 if it is not already present, then apply
+`migrations/019_manual_public_receipt_supersessions.sql`, deploy the platform,
+and confirm the Admin contract/source/authority headers. Migration 018 remains
+reserved by the separate publishing-control-plane stack and is not required by
+this endpoint. Only after the new deployment is healthy and the exact evidence
+is re-read should an explicitly approved operator submit the exceptional
+action. Keep all publish workers stopped until separately approved.
 
 PLAN can read the durable state with
 `GET /api/integrations/plan/operator-scheduled?notionPageId=<id>` using the same

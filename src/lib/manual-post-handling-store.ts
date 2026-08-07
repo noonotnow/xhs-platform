@@ -50,7 +50,19 @@ function optionalIso(value: Date | string | null) {
   return value ? iso(value) : undefined;
 }
 
-function mapRow(row: ManualPostHandlingRow): ManualPostHandlingSummary {
+function replayScheduledAt(value: Date | string | null) {
+  if (!value) return undefined;
+  const timestamp = value instanceof Date ? value.getTime() : new Date(value).getTime();
+  return Number.isNaN(timestamp) ? String(value) : new Date(timestamp).toISOString();
+}
+
+function mapRow(
+  row: ManualPostHandlingRow,
+  preserveInvalidScheduledAt = false,
+): ManualPostHandlingSummary {
+  const scheduledAt = preserveInvalidScheduledAt
+    ? replayScheduledAt(row.scheduled_at)
+    : optionalIso(row.scheduled_at);
   return {
     id: row.id,
     notionPageId: row.notion_page_id,
@@ -59,7 +71,7 @@ function mapRow(row: ManualPostHandlingRow): ManualPostHandlingSummary {
     receiptStatus: row.receipt_status,
     recordedBy: row.recorded_by,
     warnings: row.warnings,
-    ...(optionalIso(row.scheduled_at) ? { scheduledAt: optionalIso(row.scheduled_at) } : {}),
+    ...(scheduledAt ? { scheduledAt } : {}),
     ...(row.manual_reconciliation_id
       ? { manualReconciliationId: row.manual_reconciliation_id }
       : {}),
@@ -134,6 +146,24 @@ export async function loadManualPostHandlingByPage(notionPageId: string) {
   return result.rows[0] ? mapRow(result.rows[0]) : null;
 }
 
+export async function findManualPostHandlingReplayCandidates(
+  notionPageId: string,
+  idempotencyKey: string,
+) {
+  const result = await sql<ManualPostHandlingRow>`
+    SELECT *
+    FROM plan_operator_scheduled_posts
+    WHERE notion_page_id = ${notionPageId}
+       OR idempotency_key = ${idempotencyKey}::uuid
+    ORDER BY recorded_at DESC
+    LIMIT 2
+  `;
+  return result.rows.map((row) => ({
+    handling: mapRow(row, true),
+    idempotencyKey: row.idempotency_key,
+  }));
+}
+
 export async function listManualPostHandlings() {
   const result = await sql<ManualPostHandlingRow>`
     SELECT *
@@ -141,7 +171,7 @@ export async function listManualPostHandlings() {
     ORDER BY recorded_at DESC
     LIMIT 200
   `;
-  return result.rows.map(mapRow);
+  return result.rows.map((row) => mapRow(row));
 }
 
 export async function loadManualPostHandlingsByPages(notionPageIds: string[]) {
@@ -152,7 +182,7 @@ export async function loadManualPostHandlingsByPages(notionPageIds: string[]) {
     WHERE notion_page_id = ANY(${notionPageIds}::text[])
     ORDER BY recorded_at DESC
   `;
-  return result.rows.map(mapRow);
+  return result.rows.map((row) => mapRow(row));
 }
 
 export async function insertManualPostHandling(input: {

@@ -69,6 +69,46 @@ describe('PLAN operator-scheduled orchestration', () => {
     expect(mocks.insert).not.toHaveBeenCalled();
   });
 
+  it('accepts an offset-equivalent canonical Notion schedule', async () => {
+    const offsetInput = {
+      ...input,
+      expectedScheduledAt: '2026-08-07T10:30:00.000-04:00',
+    };
+    await expect(markPlanOperatorScheduled(offsetInput, idempotencyKey)).resolves.toMatchObject({
+      created: true,
+    });
+    expect(mocks.insert).toHaveBeenCalledWith(offsetInput, idempotencyKey);
+  });
+
+  it('keeps the canonical Notion revision gate exact', async () => {
+    const equivalentRevision = {
+      ...input,
+      expectedNotionVersion: '2026-08-06T16:00:00.000+00:00',
+    };
+    await expect(
+      markPlanOperatorScheduled(equivalentRevision, idempotencyKey),
+    ).rejects.toMatchObject({
+      code: 'PLAN_OPERATOR_SCHEDULED_STALE_REVISION',
+      status: 409,
+    });
+    expect(mocks.insert).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['expectedScheduledAt', 'not-a-timestamp'],
+    ['expectedNotionVersion', 'not-a-timestamp'],
+  ])('rejects malformed %s before replay or canonical re-read', async (field, value) => {
+    await expect(markPlanOperatorScheduled({
+      ...input,
+      [field]: value,
+    }, idempotencyKey)).rejects.toMatchObject({
+      code: 'VALIDATION_ERROR',
+      status: 400,
+    });
+    expect(mocks.replay).not.toHaveBeenCalled();
+    expect(mocks.getPost).not.toHaveBeenCalled();
+  });
+
   it('requires the canonical post to remain Approved', async () => {
     mocks.getPost.mockResolvedValue(post({ status: 'Published' }));
     await expect(markPlanOperatorScheduled(input, idempotencyKey)).rejects.toMatchObject({

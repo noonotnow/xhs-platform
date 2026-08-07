@@ -1,6 +1,9 @@
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
 import { getReadyXhsPost } from '@/lib/notion-posts';
-import { parsePlanOperatorScheduledInput } from '@/lib/plan-operator-scheduled-input';
+import {
+  parsePlanOperatorScheduledInput,
+  timestampsRepresentSameInstant,
+} from '@/lib/plan-operator-scheduled-input';
 import {
   insertPlanOperatorScheduledState,
   loadPlanOperatorScheduledReplay,
@@ -29,7 +32,10 @@ export async function markPlanOperatorScheduled(
       409,
     );
   }
-  if (!post.publishAt || post.publishAt !== input.expectedScheduledAt) {
+  if (
+    !post.publishAt
+    || !timestampsRepresentSameInstant(post.publishAt, input.expectedScheduledAt)
+  ) {
     throw new LocalPublishJobError(
       'The canonical ScheduledDate changed or is invalid',
       'PLAN_OPERATOR_SCHEDULED_STALE_SCHEDULE',

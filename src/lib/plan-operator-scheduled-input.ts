@@ -21,13 +21,25 @@ function cleanString(value: unknown, field: string, maxLength: number) {
   return cleaned;
 }
 
-function instant(value: unknown, field: string) {
+function timestamp(value: unknown, field: string) {
   const raw = cleanString(value, field, 64);
   const parsed = new Date(raw);
   if (Number.isNaN(parsed.getTime())) {
     throw new LocalPublishJobError(`${field} must be an ISO timestamp`, 'VALIDATION_ERROR', 400);
   }
-  return parsed.toISOString();
+  return raw;
+}
+
+export function timestampsRepresentSameInstant(left: string, right: string) {
+  const leftTime = new Date(left).getTime();
+  const rightTime = new Date(right).getTime();
+  return !Number.isNaN(leftTime)
+    && !Number.isNaN(rightTime)
+    && leftTime === rightTime;
+}
+
+export function canonicalTimestamp(value: string) {
+  return new Date(value).toISOString();
 }
 
 export function parsePlanOperatorScheduledInput(
@@ -56,10 +68,10 @@ export function parsePlanOperatorScheduledInput(
   }
   return {
     notionPageId: cleanString(body.notionPageId, 'notionPageId', 64),
-    expectedNotionVersion: instant(
+    expectedNotionVersion: timestamp(
       body.expectedNotionVersion,
       'expectedNotionVersion',
     ),
-    expectedScheduledAt: instant(body.expectedScheduledAt, 'expectedScheduledAt'),
+    expectedScheduledAt: timestamp(body.expectedScheduledAt, 'expectedScheduledAt'),
   };
 }
