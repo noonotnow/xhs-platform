@@ -10,6 +10,7 @@ import {
   advanceStoredRednoteReceiptLookup,
   appendStoredRednoteAttemptEvent,
   captureStoredRednoteReceipt,
+  completeRednotePostMutation,
   createStoredRednoteAttempt,
   finalizeRednoteWorkerClaim,
   prepareRednoteWorkerClaim,
@@ -46,6 +47,7 @@ function rawRequest(input: {
   idempotencyKey: string;
   pageId?: string;
   executor?: 'worker' | 'operator';
+  executorKind?: 'playwright' | 'microservice';
 }) {
   const requester = input.requester ?? 'create';
   const executor = input.executor ?? 'worker';
@@ -57,7 +59,11 @@ function rawRequest(input: {
     sourcePostRevision: REVISION,
     requestedAt: REQUESTED_AT,
     executor: executor === 'worker'
-      ? { type: 'worker', kind: 'playwright', id: 'worker-1' }
+      ? {
+          type: 'worker',
+          kind: input.executorKind ?? 'playwright',
+          id: 'worker-1',
+        }
       : { type: 'operator', kind: 'operator', id: 'operator@example.com' },
     browserPayload: {
       sourcePostId: pageId,
@@ -105,6 +111,15 @@ const readyPost = {
   packetAuthorized: true,
 };
 
+function claimContext(attemptId = 'attempt') {
+  return {
+    workerRunId: `worker-run-${attemptId}`,
+    playwrightRunId: `playwright-run-${attemptId}`,
+    occurredAt: '2026-08-07T16:05:00.000Z',
+    actorId: 'worker-1',
+  };
+}
+
 async function createWorker(
   pool: RednoteDatabasePool,
   idempotencyKey: string,
@@ -119,7 +134,7 @@ async function createWorker(
 }
 
 async function claimWorker(
-  db: PGlite,
+  _db: PGlite,
   pool: RednoteDatabasePool,
   attemptId: string,
 ) {
@@ -127,23 +142,15 @@ async function claimWorker(
     attemptId,
     expectedActiveAttemptId: null,
     observedPost: readyPost,
+    ...claimContext(attemptId),
     pool,
   });
-  await db.query(
-    `UPDATE rednote_publish_post_mutations
-     SET state = 'applied', applied_at = CURRENT_TIMESTAMP
-     WHERE id = $1`,
-    [prepared.mutation.id],
-  );
-  const attempt = await finalizeRednoteWorkerClaim({
+  const completed = await completeRednotePostMutation({
     mutationId: prepared.mutation.id,
-    workerRunId: `worker-run-${attemptId}`,
-    playwrightRunId: `playwright-run-${attemptId}`,
-    occurredAt: '2026-08-07T16:05:00.000Z',
-    actorId: 'worker-1',
+    appliedAt: '2026-08-07T16:05:01.000Z',
     pool,
   });
-  return { attempt, prepared };
+  return { attempt: completed.attempt, prepared };
 }
 
 describe('Rednote publishing store', () => {
@@ -195,14 +202,11 @@ describe('Rednote publishing store', () => {
         attemptId: created.attempt.id,
         expectedActiveAttemptId: null,
         observedPost: readyPost,
+        ...claimContext(created.attempt.id),
         pool,
       });
       await expect(finalizeRednoteWorkerClaim({
         mutationId: prepared.mutation.id,
-        workerRunId: 'worker-run-1',
-        playwrightRunId: 'playwright-run-1',
-        occurredAt: '2026-08-07T16:05:00.000Z',
-        actorId: 'worker-1',
         pool,
       })).rejects.toMatchObject({ code: 'REDNOTE_CLAIM_NOT_VERIFIED' });
       await db.query(
@@ -213,10 +217,6 @@ describe('Rednote publishing store', () => {
       );
       const claimed = await finalizeRednoteWorkerClaim({
         mutationId: prepared.mutation.id,
-        workerRunId: 'worker-run-1',
-        playwrightRunId: 'playwright-run-1',
-        occurredAt: '2026-08-07T16:05:00.000Z',
-        actorId: 'worker-1',
         pool,
       });
       expect(claimed).toMatchObject({
@@ -229,6 +229,7 @@ describe('Rednote publishing store', () => {
         attemptId: claimed.id,
         expectedActiveAttemptId: null,
         observedPost: readyPost,
+        ...claimContext(claimed.id),
         pool,
       })).rejects.toMatchObject({ code: 'REDNOTE_CLAIM_INELIGIBLE' });
     } finally {
@@ -243,6 +244,16 @@ describe('Rednote publishing store', () => {
         pool,
         'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
       );
+      const microserviceInput = request({
+        idempotencyKey: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+        executorKind: 'microservice',
+      });
+      const microservice = await createStoredRednoteAttempt({
+        request: microserviceInput.parsed,
+        rawRequestDigest: microserviceInput.rawRequestDigest,
+        validateNew: async () => undefined,
+        pool,
+      });
       await expect(prepareRednoteWorkerClaim({
         attemptId: created.attempt.id,
         expectedActiveAttemptId: null,
@@ -250,6 +261,7 @@ describe('Rednote publishing store', () => {
           ...readyPost,
           nextAction: 'Blocked',
         },
+        ...claimContext(created.attempt.id),
         pool,
       })).rejects.toMatchObject({ code: 'REDNOTE_CLAIM_CAS_CONFLICT' });
       await expect(prepareRednoteWorkerClaim({
@@ -259,8 +271,19 @@ describe('Rednote publishing store', () => {
           ...readyPost,
           packetAuthorized: false,
         },
+        ...claimContext(created.attempt.id),
         pool,
       })).rejects.toMatchObject({ code: 'REDNOTE_CLAIM_CAS_CONFLICT' });
+      await expect(prepareRednoteWorkerClaim({
+        attemptId: microservice.attempt.id,
+        expectedActiveAttemptId: null,
+        observedPost: readyPost,
+        workerRunId: 'worker-run-microservice',
+        playwrightRunId: 'playwright-run-incompatible',
+        occurredAt: '2026-08-07T16:05:00.000Z',
+        actorId: 'worker-1',
+        pool,
+      })).rejects.toMatchObject({ code: 'REDNOTE_RUN_IDENTITY_CONFLICT' });
     } finally {
       await db.close();
     }
@@ -522,6 +545,17 @@ describe('Rednote publishing store', () => {
       );
       expect(owner.rows[0]?.operator_resolution_started_at).toBeTruthy();
       expect(owner.rows[0]?.operator_resolution_completed_at).toBeNull();
+      const finalized = await completeRednotePostMutation({
+        mutationId: captured.mutation!.id,
+        appliedAt: '2026-08-07T16:27:00.000Z',
+        pool,
+      });
+      expect(finalized).toMatchObject({
+        mutation: { state: 'applied' },
+        attempt: {
+          operatorResolutionCompletedAt: '2026-08-07T16:27:00.000Z',
+        },
+      });
     } finally {
       await db.close();
     }

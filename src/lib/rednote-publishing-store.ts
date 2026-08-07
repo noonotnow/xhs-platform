@@ -108,8 +108,18 @@ export interface RednotePostMutationRow extends QueryResultRow {
   desired_rednote_url: string | null;
   desired_rednote_note_id: string | null;
   desired_platform_publish_time: Date | string | null;
+  claim_worker_run_id: string | null;
+  claim_playwright_run_id: string | null;
+  claim_occurred_at: Date | string | null;
+  claim_actor_id: string | null;
   state: 'pending' | 'applied' | 'conflict';
+  attempt_count: number;
   diagnostics: Record<string, unknown>;
+  last_error_code: string | null;
+  last_error_message: string | null;
+  last_attempt_at: Date | string | null;
+  applied_at: Date | string | null;
+  conflict_at: Date | string | null;
   created_at: Date | string;
 }
 
@@ -409,6 +419,12 @@ async function insertMutation(
     };
     state?: 'pending' | 'conflict';
     diagnostics?: Readonly<Record<string, unknown>>;
+    claim?: {
+      workerRunId: string;
+      playwrightRunId?: string;
+      occurredAt: string;
+      actorId: string;
+    };
   },
 ) {
   const result = await client.query<RednotePostMutationRow>(
@@ -418,12 +434,15 @@ async function insertMutation(
        expected_status, expected_next_action, expected_publish_execution,
        desired_active_attempt_id, desired_status, desired_next_action,
        desired_publish_execution, desired_rednote_url, desired_rednote_note_id,
-       desired_platform_publish_time, state, diagnostics, conflict_at
+      desired_platform_publish_time, claim_worker_run_id,
+      claim_playwright_run_id, claim_occurred_at, claim_actor_id,
+      state, diagnostics, conflict_at
      ) VALUES (
        $1::uuid, $2, $3, $4, $5, $6, $7, $8,
        $9, $10, $11, $12, $13, $14, $15::timestamptz,
-       $16, $17::jsonb,
-       CASE WHEN $16 = 'conflict' THEN CURRENT_TIMESTAMP ELSE NULL END
+       $16, $17, $18::timestamptz, $19,
+       $20, $21::jsonb,
+       CASE WHEN $20 = 'conflict' THEN CURRENT_TIMESTAMP ELSE NULL END
      )
      RETURNING *`,
     [
@@ -442,6 +461,10 @@ async function insertMutation(
       input.desired.rednoteUrl ?? null,
       input.desired.rednoteNoteId ?? null,
       input.desired.platformPublishTime ?? null,
+      input.claim?.workerRunId ?? null,
+      input.claim?.playwrightRunId ?? null,
+      input.claim?.occurredAt ?? null,
+      input.claim?.actorId ?? null,
       input.state ?? 'pending',
       JSON.stringify(input.diagnostics ?? {}),
     ],
@@ -468,11 +491,11 @@ async function insertAttempt(
        payload_revision, executor_type, executor_kind, executor_id,
        worker_run_id, playwright_run_id, target_publish_at, requested_at,
        terminal_outcome, terminal_at, supersedes_attempt_id,
-       operator_resolution_started_at
+      operator_resolution_started_at, receipt_lookup_updated_at
      ) VALUES (
        COALESCE($1::uuid, gen_random_uuid()), $2, $3, $4, $5::uuid, $6::jsonb,
        $7, $8, $9, $10, $11, $12, $13, $14::timestamptz, $15::timestamptz,
-       $16, $17::timestamptz, $18::uuid, $19::timestamptz
+       $16, $17::timestamptz, $18::uuid, $19::timestamptz, $15::timestamptz
      )
      RETURNING *`,
     [
@@ -651,6 +674,10 @@ export async function prepareRednoteWorkerClaim(input: {
   attemptId: string;
   expectedActiveAttemptId: string | null;
   observedPost: ObservedRednotePostExecution;
+  workerRunId: string;
+  playwrightRunId?: string;
+  occurredAt: string;
+  actorId: string;
   pool?: RednoteDatabasePool;
 }) {
   const pool = input.pool ?? getPool();
@@ -658,6 +685,21 @@ export async function prepareRednoteWorkerClaim(input: {
   try {
     await begin(client);
     const attempt = await lockedAttempt(client, input.attemptId);
+    if (
+      !input.workerRunId.trim() ||
+      input.workerRunId.length > 255 ||
+      (input.playwrightRunId !== undefined &&
+        (!input.playwrightRunId.trim() ||
+          input.playwrightRunId.length > 255)) ||
+      !input.actorId.trim() ||
+      input.actorId.length > 255
+    ) {
+      throw storeError(
+        'Worker claim identity is invalid',
+        'REDNOTE_RUN_IDENTITY_INVALID',
+        400,
+      );
+    }
     if (
       attempt.executor_type !== 'worker' ||
       attempt.active ||
@@ -668,6 +710,18 @@ export async function prepareRednoteWorkerClaim(input: {
       throw storeError(
         'The attempt is not eligible for its first worker claim',
         'REDNOTE_CLAIM_INELIGIBLE',
+      );
+    }
+    if (
+      (attempt.worker_run_id &&
+        attempt.worker_run_id !== input.workerRunId) ||
+      (attempt.playwright_run_id &&
+        attempt.playwright_run_id !== input.playwrightRunId) ||
+      (attempt.executor_kind !== 'playwright' && input.playwrightRunId)
+    ) {
+      throw storeError(
+        'Worker or Playwright run identity conflicts with the frozen executor',
+        'REDNOTE_RUN_IDENTITY_CONFLICT',
       );
     }
     if (
@@ -746,6 +800,14 @@ export async function prepareRednoteWorkerClaim(input: {
         publishExecution: 'Worker claimed',
       },
       diagnostics: { packetAuthorized: true },
+      claim: {
+        workerRunId: input.workerRunId,
+        ...(input.playwrightRunId
+          ? { playwrightRunId: input.playwrightRunId }
+          : {}),
+        occurredAt: input.occurredAt,
+        actorId: input.actorId,
+      },
     });
     await commit(client);
     return {
@@ -760,123 +822,384 @@ export async function prepareRednoteWorkerClaim(input: {
   }
 }
 
-export async function finalizeRednoteWorkerClaim(input: {
+function assertWorkerClaimMutation(
+  attempt: RednoteAttemptRow,
+  mutation: RednotePostMutationRow | undefined,
+) {
+  if (
+    !mutation ||
+    mutation.attempt_id !== attempt.id ||
+    mutation.mutation_kind !== 'worker_claim' ||
+    !mutation.claim_worker_run_id ||
+    !mutation.claim_occurred_at ||
+    !mutation.claim_actor_id
+  ) {
+    throw storeError(
+      'Worker claim mutation identity changed',
+      'REDNOTE_DURABLE_STATE_INVALID',
+      500,
+    );
+  }
+  return mutation;
+}
+
+async function finalizeWorkerClaimLocked(
+  client: Queryable,
+  attempt: RednoteAttemptRow,
+  mutation: RednotePostMutationRow,
+) {
+  assertWorkerClaimMutation(attempt, mutation);
+  if (
+    attempt.active &&
+    attempt.activated_at &&
+    attempt.claim_source_status === 'Ready' &&
+    attempt.claim_source_post_revision === attempt.source_post_revision &&
+    attempt.worker_run_id === mutation.claim_worker_run_id &&
+    attempt.playwright_run_id === mutation.claim_playwright_run_id
+  ) {
+    return attempt;
+  }
+  if (
+    attempt.executor_type !== 'worker' ||
+    attempt.active ||
+    attempt.activated_at ||
+    attempt.terminal_outcome ||
+    attempt.superseded_by_attempt_id ||
+    mutation.expected_status !== 'Ready' ||
+    mutation.expected_source_post_revision !== attempt.source_post_revision
+  ) {
+    throw storeError(
+      'Worker claim state changed before finalization',
+      'REDNOTE_CLAIM_FINALIZE_CONFLICT',
+    );
+  }
+  if (
+    attempt.executor_kind !== 'playwright' &&
+    mutation.claim_playwright_run_id
+  ) {
+    throw storeError(
+      'Microservice attempts cannot bind a Playwright run ID',
+      'REDNOTE_RUN_IDENTITY_CONFLICT',
+    );
+  }
+  const updated = await client.query<RednoteAttemptRow>(
+    `UPDATE rednote_publish_attempts
+     SET active = TRUE,
+         activated_at = $2::timestamptz,
+         claim_source_status = 'Ready',
+         claim_source_post_revision = source_post_revision,
+         claim_packet_authorized_at = $2::timestamptz,
+         worker_run_id = COALESCE(worker_run_id, $3),
+         playwright_run_id = COALESCE(playwright_run_id, $4)
+     WHERE id = $1::uuid
+       AND NOT active
+       AND activated_at IS NULL
+       AND terminal_outcome IS NULL
+       AND superseded_by_attempt_id IS NULL
+       AND (worker_run_id IS NULL OR worker_run_id = $3)
+       AND (playwright_run_id IS NULL OR playwright_run_id = $4)
+     RETURNING *`,
+    [
+      attempt.id,
+      mutation.claim_occurred_at,
+      mutation.claim_worker_run_id,
+      mutation.claim_playwright_run_id,
+    ],
+  );
+  if (!updated.rows[0]) {
+    throw storeError(
+      'Worker run identity or activation changed',
+      'REDNOTE_CLAIM_FINALIZE_CONFLICT',
+    );
+  }
+  await insertEvent(client, {
+    attemptId: attempt.id,
+    type: 'worker_claimed',
+    occurredAt: timestamp(mutation.claim_occurred_at!),
+    actor: { type: 'worker', id: mutation.claim_actor_id! },
+    diagnostics: { mutationId: mutation.id },
+  });
+  return updated.rows[0];
+}
+
+async function lockedMutation(
+  client: Queryable,
+  mutationId: string,
+  attemptId: string,
+) {
+  const result = await client.query<RednotePostMutationRow>(
+    `SELECT * FROM rednote_publish_post_mutations
+     WHERE id = $1::uuid AND attempt_id = $2::uuid
+     FOR UPDATE`,
+    [mutationId, attemptId],
+  );
+  const mutation = result.rows[0];
+  if (!mutation) {
+    throw storeError(
+      'Rednote Posts mutation was not found',
+      'REDNOTE_MUTATION_NOT_FOUND',
+      404,
+    );
+  }
+  return mutation;
+}
+
+async function mutationAttemptId(client: Queryable, mutationId: string) {
+  const result = await client.query<QueryResultRow & { attempt_id: string }>(
+    `SELECT attempt_id FROM rednote_publish_post_mutations
+     WHERE id = $1::uuid`,
+    [mutationId],
+  );
+  const attemptId = result.rows[0]?.attempt_id;
+  if (!attemptId) {
+    throw storeError(
+      'Rednote Posts mutation was not found',
+      'REDNOTE_MUTATION_NOT_FOUND',
+      404,
+    );
+  }
+  return attemptId;
+}
+
+export async function loadRednotePostMutation(
+  mutationId: string,
+  pool: RednoteDatabasePool = getPool(),
+) {
+  const client = await pool.connect();
+  try {
+    const result = await client.query<RednotePostMutationRow>(
+      'SELECT * FROM rednote_publish_post_mutations WHERE id = $1::uuid',
+      [mutationId],
+    );
+    return result.rows[0] ? rednotePostMutationView(result.rows[0]) : null;
+  } finally {
+    client.release();
+  }
+}
+
+export async function withRednotePostProjectionLock<T>(
+  sourceNotionPageId: string,
+  action: () => Promise<T>,
+  pool: RednoteDatabasePool = getPool(),
+) {
+  const client = await pool.connect();
+  const lockIdentity = `rednote-projection:${sourceNotionPageId}`;
+  try {
+    await client.query(
+      'SELECT pg_advisory_lock(hashtextextended($1, 0))',
+      [lockIdentity],
+    );
+    return await action();
+  } finally {
+    try {
+      await client.query(
+        'SELECT pg_advisory_unlock(hashtextextended($1, 0))',
+        [lockIdentity],
+      );
+    } finally {
+      client.release();
+    }
+  }
+}
+
+export async function listPendingRednotePostMutations(
+  limit = 25,
+  pool: RednoteDatabasePool = getPool(),
+) {
+  const boundedLimit = Math.max(1, Math.min(100, Math.trunc(limit)));
+  const client = await pool.connect();
+  try {
+    const result = await client.query<RednotePostMutationRow>(
+      `SELECT * FROM rednote_publish_post_mutations
+       WHERE state = 'pending'
+       ORDER BY last_attempt_at NULLS FIRST, created_at
+       LIMIT $1`,
+      [boundedLimit],
+    );
+    return result.rows.map(rednotePostMutationView);
+  } finally {
+    client.release();
+  }
+}
+
+export async function recordRednotePostMutationFailure(input: {
   mutationId: string;
-  workerRunId: string;
-  playwrightRunId?: string;
-  occurredAt: string;
-  actorId: string;
+  code: string;
+  message: string;
+  attemptedAt: string;
+  pool?: RednoteDatabasePool;
+}) {
+  const pool = input.pool ?? getPool();
+  const client = await pool.connect();
+  try {
+    const result = await client.query<RednotePostMutationRow>(
+      `UPDATE rednote_publish_post_mutations
+       SET attempt_count = attempt_count + 1,
+           last_attempt_at = $2::timestamptz,
+           last_error_code = $3,
+           last_error_message = $4
+       WHERE id = $1::uuid AND state = 'pending'
+       RETURNING *`,
+      [
+        input.mutationId,
+        input.attemptedAt,
+        input.code.slice(0, 128),
+        input.message.slice(0, 1000),
+      ],
+    );
+    return result.rows[0] ? rednotePostMutationView(result.rows[0]) : null;
+  } finally {
+    client.release();
+  }
+}
+
+export async function conflictRednotePostMutation(input: {
+  mutationId: string;
+  code: string;
+  diagnostics: Readonly<Record<string, unknown>>;
+  attemptedAt: string;
+  pool?: RednoteDatabasePool;
+}) {
+  const pool = input.pool ?? getPool();
+  const client = await pool.connect();
+  try {
+    const result = await client.query<RednotePostMutationRow>(
+      `UPDATE rednote_publish_post_mutations
+       SET state = 'conflict',
+           attempt_count = attempt_count + 1,
+           last_attempt_at = $2::timestamptz,
+           conflict_at = $2::timestamptz,
+           last_error_code = $3,
+           last_error_message = 'Posts compare-and-set precondition changed',
+           diagnostics = diagnostics || $4::jsonb
+       WHERE id = $1::uuid AND state = 'pending'
+       RETURNING *`,
+      [
+        input.mutationId,
+        input.attemptedAt,
+        input.code.slice(0, 128),
+        JSON.stringify(input.diagnostics),
+      ],
+    );
+    return result.rows[0] ? rednotePostMutationView(result.rows[0]) : null;
+  } finally {
+    client.release();
+  }
+}
+
+export async function completeRednotePostMutation(input: {
+  mutationId: string;
+  appliedAt: string;
   pool?: RednoteDatabasePool;
 }) {
   const pool = input.pool ?? getPool();
   const client = await pool.connect();
   try {
     await begin(client);
-    const mutationIdentity = await client.query<
-      QueryResultRow & { attempt_id: string }
-    >(
-      `SELECT attempt_id FROM rednote_publish_post_mutations
-       WHERE id = $1::uuid`,
-      [input.mutationId],
-    );
-    const attemptId = mutationIdentity.rows[0]?.attempt_id;
-    if (!attemptId) {
-      throw storeError(
-        'Worker claim mutation was not found',
-        'REDNOTE_CLAIM_MUTATION_NOT_FOUND',
-        404,
-      );
-    }
+    const attemptId = await mutationAttemptId(client, input.mutationId);
     const attempt = await lockedAttempt(client, attemptId);
-    const mutationResult = await client.query<RednotePostMutationRow>(
-      `SELECT * FROM rednote_publish_post_mutations
-       WHERE id = $1::uuid FOR UPDATE`,
-      [input.mutationId],
-    );
-    const mutation = mutationResult.rows[0];
-    if (
-      !mutation ||
-      mutation.attempt_id !== attempt.id ||
-      mutation.mutation_kind !== 'worker_claim'
-    ) {
+    const mutation = await lockedMutation(client, input.mutationId, attempt.id);
+    if (mutation.state === 'conflict') {
       throw storeError(
-        'Worker claim mutation identity changed',
-        'REDNOTE_DURABLE_STATE_INVALID',
-        500,
+        'A conflicted Posts mutation requires explicit operator repair',
+        'REDNOTE_MUTATION_CONFLICT',
       );
     }
-    if (mutation.state !== 'applied') {
-      throw storeError(
-        'Worker claim cannot execute before Posts verification',
-        'REDNOTE_CLAIM_NOT_VERIFIED',
-        503,
+    let finalizedAttempt = attempt;
+    if (mutation.mutation_kind === 'worker_claim') {
+      finalizedAttempt = await finalizeWorkerClaimLocked(
+        client,
+        attempt,
+        mutation,
       );
     }
     if (
-      attempt.executor_type !== 'worker' ||
-      attempt.active ||
-      attempt.activated_at ||
-      attempt.terminal_outcome ||
-      attempt.superseded_by_attempt_id ||
-      mutation.expected_status !== 'Ready' ||
-      mutation.expected_source_post_revision !== attempt.source_post_revision
+      mutation.mutation_kind === 'receipt_capture' &&
+      attempt.executor_type === 'operator' &&
+      !attempt.operator_resolution_completed_at
     ) {
-      throw storeError(
-        'Worker claim state changed before finalization',
-        'REDNOTE_CLAIM_FINALIZE_CONFLICT',
+      const completed = await client.query<RednoteAttemptRow>(
+        `UPDATE rednote_publish_attempts
+         SET operator_resolution_completed_at = $2::timestamptz
+         WHERE id = $1::uuid
+           AND operator_resolution_started_at IS NOT NULL
+           AND operator_resolution_completed_at IS NULL
+           AND superseded_by_attempt_id IS NULL
+         RETURNING *`,
+        [attempt.id, input.appliedAt],
       );
+      if (!completed.rows[0]) {
+        throw storeError(
+          'Operator receipt ownership changed before publication finalization',
+          'REDNOTE_OPERATOR_FINALIZE_CONFLICT',
+        );
+      }
+      finalizedAttempt = completed.rows[0];
     }
-    if (attempt.executor_kind !== 'playwright' && input.playwrightRunId) {
-      throw storeError(
-        'Microservice attempts cannot bind a Playwright run ID',
-        'REDNOTE_RUN_IDENTITY_CONFLICT',
-      );
-    }
-    const updated = await client.query<RednoteAttemptRow>(
-      `UPDATE rednote_publish_attempts
-       SET active = TRUE,
-           activated_at = $2::timestamptz,
-           claim_source_status = 'Ready',
-           claim_source_post_revision = source_post_revision,
-           claim_packet_authorized_at = $2::timestamptz,
-           worker_run_id = COALESCE(worker_run_id, $3),
-           playwright_run_id = COALESCE(playwright_run_id, $4)
-       WHERE id = $1::uuid
-         AND NOT active
-         AND activated_at IS NULL
-         AND terminal_outcome IS NULL
-         AND superseded_by_attempt_id IS NULL
-         AND (worker_run_id IS NULL OR worker_run_id = $3)
-         AND (playwright_run_id IS NULL OR playwright_run_id = $4)
+    const applied = await client.query<RednotePostMutationRow>(
+      `UPDATE rednote_publish_post_mutations
+       SET state = 'applied',
+           attempt_count = CASE
+             WHEN state = 'pending' THEN attempt_count + 1
+             ELSE attempt_count
+           END,
+           last_attempt_at = $2::timestamptz,
+           last_error_code = NULL,
+           last_error_message = NULL,
+           applied_at = COALESCE(applied_at, $2::timestamptz),
+           conflict_at = NULL
+       WHERE id = $1::uuid AND state IN ('pending', 'applied')
        RETURNING *`,
       [
-        attempt.id,
-        input.occurredAt,
-        input.workerRunId,
-        input.playwrightRunId ?? null,
+        mutation.id,
+        input.appliedAt,
       ],
     );
-    if (!updated.rows[0]) {
+    if (!applied.rows[0]) {
       throw storeError(
-        'Worker run identity or activation changed',
-        'REDNOTE_CLAIM_FINALIZE_CONFLICT',
+        'Posts mutation state changed before finalization',
+        'REDNOTE_MUTATION_FINALIZE_CONFLICT',
       );
     }
-    await insertEvent(client, {
-      attemptId: attempt.id,
-      type: 'worker_claimed',
-      occurredAt: input.occurredAt,
-      actor: { type: 'worker', id: input.actorId },
-      diagnostics: { mutationId: mutation.id },
-    });
     await commit(client);
-    return rednoteAttemptView(updated.rows[0]);
+    return {
+      mutation: rednotePostMutationView(applied.rows[0]),
+      attempt: rednoteAttemptView(finalizedAttempt),
+    };
   } catch (error) {
     await rollback(client);
     throw error;
   } finally {
     client.release();
   }
+}
+
+export async function finalizeRednoteWorkerClaim(input: {
+  mutationId: string;
+  pool?: RednoteDatabasePool;
+}) {
+  const pool = input.pool ?? getPool();
+  const mutation = await loadRednotePostMutation(input.mutationId, pool);
+  if (!mutation || mutation.kind !== 'worker_claim') {
+    throw storeError(
+      'Worker claim mutation was not found',
+      'REDNOTE_CLAIM_MUTATION_NOT_FOUND',
+      404,
+    );
+  }
+  if (mutation.state !== 'applied') {
+    throw storeError(
+      'Worker claim cannot execute before Posts verification',
+      'REDNOTE_CLAIM_NOT_VERIFIED',
+      503,
+    );
+  }
+  const completed = await completeRednotePostMutation({
+    mutationId: input.mutationId,
+    appliedAt: new Date().toISOString(),
+    pool,
+  });
+  return completed.attempt;
 }
 
 export async function appendStoredRednoteAttemptEvent(input: {

@@ -439,10 +439,14 @@ describe('rednote publishing attempt migration', () => {
         INSERT INTO rednote_publish_post_mutations (
           attempt_id, source_notion_page_id, mutation_kind,
           expected_active_attempt_id, desired_active_attempt_id,
-          desired_publish_execution, desired_next_action
+          desired_publish_execution, desired_next_action,
+          claim_worker_run_id, claim_playwright_run_id,
+          claim_occurred_at, claim_actor_id
         ) VALUES (
           '${attemptId}', 'page-7', 'worker_claim', NULL, '${attemptId}',
-          'Worker claimed', 'Resolve attempt'
+          'Worker claimed', 'Resolve attempt',
+          'worker-run-1', 'playwright-run-1',
+          '2026-08-07T12:00:00Z', 'worker-1'
         );
       `);
       await expect(db.exec(`

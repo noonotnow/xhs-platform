@@ -122,6 +122,10 @@ CREATE TABLE IF NOT EXISTS rednote_publish_post_mutations (
   desired_rednote_url TEXT,
   desired_rednote_note_id TEXT,
   desired_platform_publish_time TIMESTAMP WITH TIME ZONE,
+  claim_worker_run_id TEXT,
+  claim_playwright_run_id TEXT,
+  claim_occurred_at TIMESTAMP WITH TIME ZONE,
+  claim_actor_id TEXT,
   state TEXT NOT NULL DEFAULT 'pending'
     CHECK (state IN ('pending', 'applied', 'conflict')),
   attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
@@ -135,6 +139,23 @@ CREATE TABLE IF NOT EXISTS rednote_publish_post_mutations (
   created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT rednote_publish_post_mutations_receipt_identity_check CHECK (
     (desired_rednote_url IS NULL) = (desired_rednote_note_id IS NULL)
+  ),
+  CONSTRAINT rednote_publish_post_mutations_claim_context_check CHECK (
+    (
+      mutation_kind = 'worker_claim'
+      AND claim_worker_run_id IS NOT NULL
+      AND char_length(claim_worker_run_id) > 0
+      AND claim_occurred_at IS NOT NULL
+      AND claim_actor_id IS NOT NULL
+      AND char_length(claim_actor_id) > 0
+    )
+    OR (
+      mutation_kind <> 'worker_claim'
+      AND claim_worker_run_id IS NULL
+      AND claim_playwright_run_id IS NULL
+      AND claim_occurred_at IS NULL
+      AND claim_actor_id IS NULL
+    )
   ),
   CONSTRAINT rednote_publish_post_mutations_state_time_check CHECK (
     (state = 'pending' AND applied_at IS NULL AND conflict_at IS NULL)
@@ -284,6 +305,10 @@ BEGIN
      OR NEW.desired_rednote_note_id IS DISTINCT FROM OLD.desired_rednote_note_id
      OR NEW.desired_platform_publish_time
        IS DISTINCT FROM OLD.desired_platform_publish_time
+     OR NEW.claim_worker_run_id IS DISTINCT FROM OLD.claim_worker_run_id
+     OR NEW.claim_playwright_run_id IS DISTINCT FROM OLD.claim_playwright_run_id
+     OR NEW.claim_occurred_at IS DISTINCT FROM OLD.claim_occurred_at
+     OR NEW.claim_actor_id IS DISTINCT FROM OLD.claim_actor_id
      OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
     RAISE EXCEPTION 'rednote publish Posts mutation intent is immutable';
   END IF;

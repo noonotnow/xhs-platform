@@ -4,6 +4,7 @@ import {
   createPublishBatch,
   dueSweepKinds,
 } from '@/lib/rednote-publish-batches';
+import { reconcilePendingRednotePostMutations } from '@/lib/rednote-publishing';
 
 function localDate(now: Date) {
   return new Intl.DateTimeFormat('en-CA', {
@@ -91,4 +92,12 @@ export async function runDueRednoteSweeps(now = new Date()) {
     }
   }
   return results;
+}
+
+export async function runRednoteMaintenance(now = new Date()) {
+  const [postMutations, runs] = await Promise.all([
+    reconcilePendingRednotePostMutations(25, { now: () => now }),
+    runDueRednoteSweeps(now),
+  ]);
+  return { postMutations, runs };
 }
