@@ -17,12 +17,13 @@ async function migratedDatabase() {
 
 const workerAttempt = (id: string, pageId: string, active = true) => `
   INSERT INTO rednote_publish_attempts (
-    id, contract_revision, source_notion_page_id, frozen_payload,
+    id, contract_revision, source_notion_page_id, source_post_revision, frozen_payload,
     payload_digest, payload_revision, executor_type, executor_kind, executor_id,
     target_publish_at, requested_at, active
   ) VALUES (
-    '${id}', 'rednote-publishing/v1', '${pageId}', '{}'::jsonb,
-    '${'a'.repeat(64)}', 'post-snapshot/v1', 'worker', 'playwright', 'worker-1',
+    '${id}', 'rednote-publishing/v1', '${pageId}', '2026-08-07T15:00:00.000Z',
+    '{}'::jsonb, '${'a'.repeat(64)}', 'rednote-browser-payload/v1',
+    'worker', 'playwright', 'worker-1',
     '2026-08-08T16:00:00Z', '2026-08-07T16:00:00Z', ${active}
   );
 `;
@@ -33,13 +34,14 @@ const operatorAttempt = (
   supersedesAttemptId: string,
 ) => `
   INSERT INTO rednote_publish_attempts (
-    id, contract_revision, source_notion_page_id, frozen_payload,
+    id, contract_revision, source_notion_page_id, source_post_revision, frozen_payload,
     payload_digest, payload_revision, executor_type, executor_kind, executor_id,
     target_publish_at, requested_at, active, supersedes_attempt_id,
     receipt_lookup_state
   ) VALUES (
-    '${id}', 'rednote-publishing/v1', '${pageId}', '{}'::jsonb,
-    '${'b'.repeat(64)}', 'post-snapshot/v1', 'operator', 'operator', 'operator-1',
+    '${id}', 'rednote-publishing/v1', '${pageId}', '2026-08-08T15:00:00.000Z',
+    '{}'::jsonb, '${'b'.repeat(64)}', 'rednote-browser-payload/v1',
+    'operator', 'operator', 'operator-1',
     '2026-08-09T16:00:00Z', '2026-08-08T16:00:00Z', FALSE,
     '${supersedesAttemptId}', 'not_required'
   );
@@ -98,12 +100,13 @@ describe('rednote publishing attempt migration', () => {
       `)).rejects.toThrow(/run identities are immutable once bound/);
       await expect(db.exec(`
         INSERT INTO rednote_publish_attempts (
-          contract_revision, source_notion_page_id, frozen_payload,
+          contract_revision, source_notion_page_id, source_post_revision,
+          frozen_payload,
           payload_digest, payload_revision, executor_type, executor_kind,
           executor_id, playwright_run_id, requested_at
         ) VALUES (
-          'rednote-publishing/v1', 'invalid-executor', '{}'::jsonb,
-          '${'c'.repeat(64)}', 'post-snapshot/v1', 'worker', 'microservice',
+          'rednote-publishing/v1', 'invalid-executor', 'source-revision',
+          '{}'::jsonb, '${'c'.repeat(64)}', 'rednote-browser-payload/v1',
           'worker-2', 'not-a-microservice-identity', CURRENT_TIMESTAMP
         );
       `)).rejects.toThrow();
@@ -311,6 +314,131 @@ describe('rednote publishing attempt migration', () => {
           CURRENT_TIMESTAMP, '{}'::jsonb
         );
       `)).rejects.toThrow();
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('activates a worker once and keeps operator ownership through receipt insertion', async () => {
+    const db = await migratedDatabase();
+    const workerId = '88888888-8888-4888-8888-888888888888';
+    const operatorId = '99999999-9999-4999-8999-999999999999';
+    try {
+      await db.exec(workerAttempt(workerId, 'page-6', false));
+      await db.exec(`
+        UPDATE rednote_publish_attempts
+        SET active = TRUE, activated_at = CURRENT_TIMESTAMP
+        WHERE id = '${workerId}';
+        INSERT INTO rednote_publish_attempts (
+          id, contract_revision, source_notion_page_id, source_post_revision,
+          frozen_payload, payload_digest, payload_revision,
+          executor_type, executor_kind, executor_id, requested_at,
+          terminal_outcome, terminal_at, receipt_lookup_state,
+          supersedes_attempt_id, operator_resolution_started_at
+        ) VALUES (
+          '${operatorId}', 'rednote-publishing/v1', 'page-6', 'source-revision',
+          '{}'::jsonb, '${'d'.repeat(64)}', 'rednote-browser-payload/v1',
+          'operator', 'operator', 'operator-2', CURRENT_TIMESTAMP,
+          'accepted', CURRENT_TIMESTAMP, 'pending',
+          '${workerId}', CURRENT_TIMESTAMP
+        );
+        UPDATE rednote_publish_attempts
+        SET terminal_outcome = 'outcome_unknown',
+            terminal_at = CURRENT_TIMESTAMP,
+            receipt_lookup_state = 'not_required',
+            receipt_lookup_updated_at = CURRENT_TIMESTAMP,
+            active = FALSE,
+            superseded_by_attempt_id = '${operatorId}'
+        WHERE id = '${workerId}';
+      `);
+      await expect(db.exec(`
+        UPDATE rednote_publish_attempts
+        SET active = TRUE
+        WHERE id = '${workerId}';
+      `)).rejects.toThrow(/cannot be reactivated/);
+
+      await db.exec(`
+        UPDATE rednote_publish_attempts
+        SET receipt_lookup_state = 'found',
+            receipt_lookup_updated_at = CURRENT_TIMESTAMP
+        WHERE id = '${operatorId}';
+        INSERT INTO rednote_publish_attempt_receipts (
+          attempt_id, rednote_url, rednote_note_id,
+          platform_publish_time, provenance
+        ) VALUES (
+          '${operatorId}', 'https://www.rednote.com/explore/operator-note',
+          'operator-note', CURRENT_TIMESTAMP, '{"source":"operator"}'::jsonb
+        );
+      `);
+      const current = await db.query<{
+        operator_resolution_started_at: string;
+        operator_resolution_completed_at: string | null;
+      }>(`
+        SELECT operator_resolution_started_at, operator_resolution_completed_at
+        FROM rednote_publish_attempts
+        WHERE id = '${operatorId}'
+      `);
+      expect(current.rows[0].operator_resolution_started_at).toBeTruthy();
+      expect(current.rows[0].operator_resolution_completed_at).toBeNull();
+
+      await expect(db.exec(`
+        INSERT INTO rednote_publish_attempts (
+          contract_revision, source_notion_page_id, source_post_revision,
+          frozen_payload, payload_digest, payload_revision,
+          executor_type, executor_kind, executor_id, requested_at,
+          terminal_outcome, terminal_at, operator_resolution_started_at
+        ) VALUES (
+          'rednote-publishing/v1', 'page-6', 'source-revision-2',
+          '{}'::jsonb, '${'e'.repeat(64)}', 'rednote-browser-payload/v1',
+          'operator', 'operator', 'operator-3', CURRENT_TIMESTAMP,
+          'accepted', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        );
+      `)).rejects.toThrow();
+
+      await db.exec(`
+        UPDATE rednote_publish_attempts
+        SET operator_resolution_completed_at = CURRENT_TIMESTAMP
+        WHERE id = '${operatorId}';
+      `);
+      await expect(db.exec(`
+        UPDATE rednote_publish_attempts
+        SET operator_resolution_completed_at = NULL
+        WHERE id = '${operatorId}';
+      `)).rejects.toThrow(/cannot be reactivated/);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('keeps request and Posts mutation intent identity immutable', async () => {
+    const db = await migratedDatabase();
+    const attemptId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    try {
+      await db.exec(workerAttempt(attemptId, 'page-7', false));
+      await db.exec(`
+        INSERT INTO rednote_publish_attempt_requests (
+          requester, idempotency_key, raw_request_digest, attempt_id
+        ) VALUES (
+          'create', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+          '${'f'.repeat(64)}', '${attemptId}'
+        );
+        INSERT INTO rednote_publish_post_mutations (
+          attempt_id, source_notion_page_id, mutation_kind,
+          expected_active_attempt_id, desired_active_attempt_id,
+          desired_publish_execution, desired_next_action
+        ) VALUES (
+          '${attemptId}', 'page-7', 'worker_claim', NULL, '${attemptId}',
+          'Worker claimed', 'Resolve attempt'
+        );
+      `);
+      await expect(db.exec(`
+        UPDATE rednote_publish_attempt_requests
+        SET raw_request_digest = '${'0'.repeat(64)}';
+      `)).rejects.toThrow(/immutable/);
+      await expect(db.exec(`
+        UPDATE rednote_publish_post_mutations
+        SET desired_active_attempt_id = 'changed';
+      `)).rejects.toThrow(/immutable/);
     } finally {
       await db.close();
     }

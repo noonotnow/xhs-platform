@@ -10,7 +10,9 @@ import {
   hasAtomicPublishedIdentity,
   isAttemptResultCurrent,
   REDNOTE_CANONICAL_PROPERTIES,
+  REDNOTE_BROWSER_PAYLOAD_REVISION,
   REDNOTE_EXECUTOR_KINDS,
+  REDNOTE_MEDIA_MIME_TYPES,
   REDNOTE_NEXT_ACTIONS,
   REDNOTE_POST_STATUSES,
   REDNOTE_PUBLISH_EXECUTIONS,
@@ -36,6 +38,7 @@ const browserPayload = {
     assetId: 'asset-video-1',
     deliveryUrl: 'https://images.xhs.justlikekatie.com/video.mp4',
     sha256: 'a'.repeat(64),
+    mimeType: 'video/mp4',
     mediaType: 'video',
     role: 'content',
   }],
@@ -43,6 +46,7 @@ const browserPayload = {
     assetId: 'asset-cover-1',
     deliveryUrl: 'https://images.xhs.justlikekatie.com/cover.jpg',
     sha256: 'b'.repeat(64),
+    mimeType: 'image/jpeg',
     mediaType: 'image',
     role: 'cover',
   },
@@ -52,6 +56,7 @@ const frozenAttempt = {
   contractRevision: 'rednote-publishing/v1',
   sourceNotionPageId: 'notion-page-1',
   payloadRevision: 'rednote-browser-payload/v1',
+  sourcePostRevision: '2026-08-07T15:59:00.000Z',
   payloadDigest: 'c'.repeat(64),
   requestedAt: '2026-08-07T16:00:00.000Z',
   executor: {
@@ -83,6 +88,10 @@ describe('rednote publishing contract v1', () => {
     ]);
     expect(REDNOTE_EXECUTOR_KINDS).toEqual([
       'playwright', 'microservice', 'operator',
+    ]);
+    expect(REDNOTE_BROWSER_PAYLOAD_REVISION).toBe('rednote-browser-payload/v1');
+    expect(REDNOTE_MEDIA_MIME_TYPES).toEqual([
+      'image/jpeg', 'image/png', 'image/webp', 'video/mp4',
     ]);
     expect(REDNOTE_CANONICAL_PROPERTIES.activeAttemptId)
       .toBe('Active XHS attempt ID');
@@ -127,6 +136,8 @@ describe('rednote publishing contract v1', () => {
       .toBe('Exact final Caption');
     expect(toRednoteBrowserExecutionPayload(frozenAttempt).mediaAssets)
       .toEqual(browserPayload.mediaAssets);
+    expect(frozenAttempt.sourcePostRevision)
+      .toBe('2026-08-07T15:59:00.000Z');
 
     const creativeDraftWithoutCaption = {
       ...browserPayload,
