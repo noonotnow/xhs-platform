@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   conflict: vi.fn(),
   failure: vi.fn(),
   pending: vi.fn(),
+  verify: vi.fn(),
   lock: vi.fn(async (
     _pageId: string,
     action: () => Promise<unknown>,
@@ -33,6 +34,7 @@ vi.mock('@/lib/rednote-publishing-store', () => ({
   listPendingRednotePostMutations: mocks.pending,
   loadRednotePostMutation: mocks.load,
   recordRednotePostMutationFailure: mocks.failure,
+  verifyRednotePostMutation: mocks.verify,
   withRednotePostProjectionLock: mocks.lock,
 }));
 
@@ -67,6 +69,10 @@ describe('Rednote Posts reconciliation', () => {
     mocks.complete.mockResolvedValue({
       mutation: { ...mutation, state: 'applied' },
     });
+    mocks.verify.mockResolvedValue({
+      ...mutation,
+      state: 'verified',
+    });
     mocks.conflict.mockResolvedValue({
       ...mutation,
       state: 'conflict',
@@ -82,7 +88,21 @@ describe('Rednote Posts reconciliation', () => {
       mutationId: mutation.id,
       appliedAt: '2026-08-07T16:05:00.000Z',
     }));
+    expect(mocks.verify).toHaveBeenCalledWith(expect.objectContaining({
+      mutationId: mutation.id,
+      verifiedAt: '2026-08-07T16:05:00.000Z',
+    }));
     expect(mocks.conflict).not.toHaveBeenCalled();
+  });
+
+  it('finalizes a crash-replayed verified mutation without rewriting Posts', async () => {
+    mocks.load.mockResolvedValue({ ...mutation, state: 'verified' });
+    await expect(reconcileRednotePostMutation(mutation.id, {
+      now: () => new Date('2026-08-07T16:06:00.000Z'),
+    })).resolves.toMatchObject({ state: 'applied' });
+    expect(mocks.project).not.toHaveBeenCalled();
+    expect(mocks.verify).not.toHaveBeenCalled();
+    expect(mocks.complete).toHaveBeenCalledOnce();
   });
 
   it('quarantines a compare conflict without attempting finalization', async () => {

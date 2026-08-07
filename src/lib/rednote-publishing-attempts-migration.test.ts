@@ -209,6 +209,19 @@ describe('rednote publishing attempt migration', () => {
     const db = await migratedDatabase();
     try {
       await db.exec(workerAttempt(
+        '43434343-4343-4343-8343-434343434343',
+        'page-3-unclaimed',
+        false,
+      ));
+      await expect(db.exec(`
+        UPDATE rednote_publish_attempts
+        SET terminal_outcome = 'known_failed',
+            terminal_at = CURRENT_TIMESTAMP,
+            receipt_lookup_state = 'not_required',
+            receipt_lookup_updated_at = CURRENT_TIMESTAMP
+        WHERE id = '43434343-4343-4343-8343-434343434343';
+      `)).rejects.toThrow(/validated Ready worker claim/);
+      await db.exec(workerAttempt(
         '44444444-4444-4444-8444-444444444444',
         'page-3',
       ));
@@ -395,6 +408,33 @@ describe('rednote publishing attempt migration', () => {
       expect(current.rows[0].operator_resolution_started_at).toBeTruthy();
       expect(current.rows[0].operator_resolution_completed_at).toBeNull();
 
+      const completedOperatorId = '91919191-9191-4191-8191-919191919191';
+      await db.exec(`
+        INSERT INTO rednote_publish_attempts (
+          id, contract_revision, source_notion_page_id, source_post_revision,
+          frozen_payload, payload_digest, payload_revision,
+          executor_type, executor_kind, executor_id, requested_at,
+          terminal_outcome, terminal_at, receipt_lookup_state,
+          operator_resolution_started_at, operator_resolution_completed_at
+        ) VALUES (
+          '${completedOperatorId}', 'rednote-publishing/v1', 'page-6-completed',
+          'source-revision', '{}'::jsonb, '${'1'.repeat(64)}',
+          'rednote-browser-payload/v1', 'operator', 'operator', 'operator-4',
+          CURRENT_TIMESTAMP, 'accepted', CURRENT_TIMESTAMP, 'found',
+          CURRENT_TIMESTAMP - INTERVAL '1 second', CURRENT_TIMESTAMP
+        );
+      `);
+      await expect(db.exec(`
+        INSERT INTO rednote_publish_attempt_receipts (
+          attempt_id, rednote_url, rednote_note_id,
+          platform_publish_time, provenance
+        ) VALUES (
+          '${completedOperatorId}',
+          'https://www.rednote.com/explore/completed-operator-note',
+          'completed-operator-note', CURRENT_TIMESTAMP, '{}'::jsonb
+        );
+      `)).rejects.toThrow(/current worker or operator ownership/);
+
       await expect(db.exec(`
         INSERT INTO rednote_publish_attempts (
           contract_revision, source_notion_page_id, source_post_revision,
@@ -457,6 +497,15 @@ describe('rednote publishing attempt migration', () => {
         UPDATE rednote_publish_post_mutations
         SET desired_active_attempt_id = 'changed';
       `)).rejects.toThrow(/immutable/);
+      await expect(db.exec(`
+        UPDATE rednote_publish_post_mutations
+        SET state = 'applied', applied_at = CURRENT_TIMESTAMP;
+      `)).rejects.toThrow(/invalid rednote publish Posts mutation state transition/);
+      await db.exec(`
+        UPDATE rednote_publish_post_mutations SET state = 'verified';
+        UPDATE rednote_publish_post_mutations
+        SET state = 'applied', applied_at = CURRENT_TIMESTAMP;
+      `);
     } finally {
       await db.close();
     }

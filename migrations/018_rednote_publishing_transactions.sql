@@ -127,7 +127,7 @@ CREATE TABLE IF NOT EXISTS rednote_publish_post_mutations (
   claim_occurred_at TIMESTAMP WITH TIME ZONE,
   claim_actor_id TEXT,
   state TEXT NOT NULL DEFAULT 'pending'
-    CHECK (state IN ('pending', 'applied', 'conflict')),
+    CHECK (state IN ('pending', 'verified', 'applied', 'conflict')),
   attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
   diagnostics JSONB NOT NULL DEFAULT '{}'::jsonb
     CHECK (jsonb_typeof(diagnostics) = 'object'),
@@ -159,6 +159,7 @@ CREATE TABLE IF NOT EXISTS rednote_publish_post_mutations (
   ),
   CONSTRAINT rednote_publish_post_mutations_state_time_check CHECK (
     (state = 'pending' AND applied_at IS NULL AND conflict_at IS NULL)
+    OR (state = 'verified' AND applied_at IS NULL AND conflict_at IS NULL)
     OR (state = 'applied' AND applied_at IS NOT NULL)
     OR (state = 'conflict' AND conflict_at IS NOT NULL AND applied_at IS NULL)
   )
@@ -166,7 +167,7 @@ CREATE TABLE IF NOT EXISTS rednote_publish_post_mutations (
 
 CREATE UNIQUE INDEX IF NOT EXISTS rednote_publish_post_mutations_unresolved_idx
   ON rednote_publish_post_mutations (source_notion_page_id)
-  WHERE state IN ('pending', 'conflict');
+  WHERE state IN ('pending', 'verified', 'conflict');
 
 CREATE INDEX IF NOT EXISTS rednote_publish_post_mutations_due_idx
   ON rednote_publish_post_mutations (state, last_attempt_at, created_at)
@@ -222,6 +223,18 @@ BEGIN
        OR NEW.terminal_at IS DISTINCT FROM OLD.terminal_at
      ) THEN
     RAISE EXCEPTION 'rednote publish attempt terminal outcome is immutable once set';
+  END IF;
+
+  IF OLD.terminal_outcome IS NULL
+     AND NEW.terminal_outcome = 'known_failed'
+     AND (
+       NEW.executor_type <> 'worker'
+       OR NEW.activated_at IS NULL
+       OR NEW.claim_source_status <> 'Ready'
+       OR NEW.claim_source_post_revision IS NULL
+       OR NEW.claim_packet_authorized_at IS NULL
+     ) THEN
+    RAISE EXCEPTION 'known failure requires a validated Ready worker claim';
   END IF;
 
   IF NEW.receipt_lookup_state IS DISTINCT FROM OLD.receipt_lookup_state
@@ -313,16 +326,48 @@ BEGIN
     RAISE EXCEPTION 'rednote publish Posts mutation intent is immutable';
   END IF;
 
-  IF OLD.state = 'applied' AND NEW.state IS DISTINCT FROM OLD.state THEN
-    RAISE EXCEPTION 'applied rednote publish Posts mutation cannot change';
-  END IF;
-  IF OLD.state = 'conflict' AND NEW.state NOT IN ('conflict', 'applied') THEN
-    RAISE EXCEPTION 'conflicted rednote publish Posts mutation requires explicit resolution';
+  IF NEW.state IS DISTINCT FROM OLD.state
+     AND NOT (
+       (OLD.state = 'pending' AND NEW.state IN ('verified', 'conflict'))
+       OR (OLD.state = 'verified' AND NEW.state IN ('applied', 'conflict'))
+       OR (OLD.state = 'conflict' AND NEW.state = 'verified')
+     ) THEN
+    RAISE EXCEPTION 'invalid rednote publish Posts mutation state transition';
   END IF;
   IF NEW.attempt_count < OLD.attempt_count THEN
     RAISE EXCEPTION 'rednote publish Posts mutation attempt count cannot decrease';
   END IF;
 
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION guard_rednote_publish_attempt_receipt_insert()
+RETURNS trigger AS $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM rednote_publish_attempts
+    WHERE id = NEW.attempt_id
+      AND terminal_outcome = 'accepted'
+      AND receipt_lookup_state = 'found'
+      AND NOT active
+      AND superseded_by_attempt_id IS NULL
+      AND (
+        (
+          executor_type = 'worker'
+          AND operator_resolution_started_at IS NULL
+          AND operator_resolution_completed_at IS NULL
+        )
+        OR (
+          executor_type = 'operator'
+          AND operator_resolution_started_at IS NOT NULL
+          AND operator_resolution_completed_at IS NULL
+        )
+      )
+  ) THEN
+    RAISE EXCEPTION 'receipt capture requires current worker or operator ownership';
+  END IF;
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;

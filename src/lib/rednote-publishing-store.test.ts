@@ -15,8 +15,11 @@ import {
   finalizeRednoteWorkerClaim,
   prepareRednoteWorkerClaim,
   recordStoredRednoteTerminalOutcome,
+  replayStoredRednoteReceipt,
+  replayStoredRednoteWorkerClaim,
   supersedeStoredRednoteAttempt,
   transferStoredRednoteOperatorResolution,
+  verifyRednotePostMutation,
   type RednoteDatabasePool,
 } from '@/lib/rednote-publishing-store';
 
@@ -145,6 +148,11 @@ async function claimWorker(
     ...claimContext(attemptId),
     pool,
   });
+  await verifyRednotePostMutation({
+    mutationId: prepared.mutation.id,
+    verifiedAt: '2026-08-07T16:05:01.000Z',
+    pool,
+  });
   const completed = await completeRednotePostMutation({
     mutationId: prepared.mutation.id,
     appliedAt: '2026-08-07T16:05:01.000Z',
@@ -209,12 +217,16 @@ describe('Rednote publishing store', () => {
         mutationId: prepared.mutation.id,
         pool,
       })).rejects.toMatchObject({ code: 'REDNOTE_CLAIM_NOT_VERIFIED' });
-      await db.query(
-        `UPDATE rednote_publish_post_mutations
-         SET state = 'applied', applied_at = CURRENT_TIMESTAMP
-         WHERE id = $1`,
-        [prepared.mutation.id],
-      );
+      await expect(completeRednotePostMutation({
+        mutationId: prepared.mutation.id,
+        appliedAt: '2026-08-07T16:05:01.000Z',
+        pool,
+      })).rejects.toMatchObject({ code: 'REDNOTE_MUTATION_NOT_VERIFIED' });
+      await verifyRednotePostMutation({
+        mutationId: prepared.mutation.id,
+        verifiedAt: '2026-08-07T16:05:01.000Z',
+        pool,
+      });
       const claimed = await finalizeRednoteWorkerClaim({
         mutationId: prepared.mutation.id,
         pool,
@@ -225,6 +237,19 @@ describe('Rednote publishing store', () => {
         claimSourcePostRevision: REVISION,
       });
       expect(claimed.claimPacketAuthorizedAt).toBeTruthy();
+      await expect(replayStoredRednoteWorkerClaim({
+        attemptId: claimed.id,
+        expectedActiveAttemptId: null,
+        ...claimContext(claimed.id),
+        pool,
+      })).resolves.toMatchObject({ id: claimed.id, active: true });
+      await expect(replayStoredRednoteWorkerClaim({
+        attemptId: claimed.id,
+        expectedActiveAttemptId: null,
+        ...claimContext(claimed.id),
+        workerRunId: 'different-run',
+        pool,
+      })).rejects.toMatchObject({ code: 'REDNOTE_CLAIM_REPLAY_CONFLICT' });
       await expect(prepareRednoteWorkerClaim({
         attemptId: claimed.id,
         expectedActiveAttemptId: null,
@@ -301,7 +326,9 @@ describe('Rednote publishing store', () => {
         attemptId: attempt.id,
         outcome: 'accepted',
         occurredAt: '2026-08-07T16:10:00.000Z',
-        actorId: 'worker-1',
+        actor: { type: 'worker', id: 'worker-1' },
+        workerRunId: `worker-run-${attempt.id}`,
+        playwrightRunId: `playwright-run-${attempt.id}`,
         observedPost: {
           ...readyPost,
           activeAttemptId: '55555555-5555-4555-8555-555555555555',
@@ -336,7 +363,9 @@ describe('Rednote publishing store', () => {
         attemptId: attempt.id,
         outcome: 'known_failed',
         occurredAt: '2026-08-07T16:10:00.000Z',
-        actorId: 'worker-1',
+        actor: { type: 'worker', id: 'worker-1' },
+        workerRunId: `worker-run-${attempt.id}`,
+        playwrightRunId: `playwright-run-${attempt.id}`,
         observedPost: {
           activeAttemptId: attempt.id,
           sourcePostRevision: '2026-08-07T16:08:00.000Z',
@@ -372,6 +401,48 @@ describe('Rednote publishing store', () => {
         diagnostics: {
           code: 'REDNOTE_KNOWN_FAILURE_LIFECYCLE_DIVERGED',
         },
+      });
+
+      await db.query(
+        `UPDATE rednote_publish_post_mutations
+         SET state = 'verified', conflict_at = NULL
+         WHERE id = $1`,
+        [result.mutation!.id],
+      );
+      await db.query(
+        `UPDATE rednote_publish_post_mutations
+         SET state = 'applied', applied_at = CURRENT_TIMESTAMP
+         WHERE id = $1`,
+        [result.mutation!.id],
+      );
+      const editedPacket = await createWorker(
+        pool,
+        '67676767-6767-4767-8767-676767676767',
+      );
+      const editedClaim = await claimWorker(db, pool, editedPacket.attempt.id);
+      const settled = await recordStoredRednoteTerminalOutcome({
+        attemptId: editedClaim.attempt.id,
+        outcome: 'known_failed',
+        occurredAt: '2026-08-07T16:15:00.000Z',
+        actor: { type: 'worker', id: 'worker-1' },
+        workerRunId: `worker-run-${editedClaim.attempt.id}`,
+        playwrightRunId: `playwright-run-${editedClaim.attempt.id}`,
+        observedPost: {
+          activeAttemptId: editedClaim.attempt.id,
+          sourcePostRevision: '2026-08-07T16:14:00.000Z',
+          status: 'Ready',
+          nextAction: 'Resolve attempt',
+          publishExecution: 'Worker claimed',
+        },
+        pool,
+      });
+      expect(settled.mutation).toMatchObject({
+        state: 'pending',
+        expected: {
+          sourcePostRevision: '2026-08-07T16:14:00.000Z',
+          status: 'Ready',
+        },
+        desired: { status: 'Ready' },
       });
     } finally {
       await db.close();
@@ -409,7 +480,8 @@ describe('Rednote publishing store', () => {
         playwrightRunId,
         pool,
       });
-      expect(replay.id).toBe(first.id);
+      expect(replay.created).toBe(false);
+      expect(replay.event.id).toBe(first.event.id);
       await expect(appendStoredRednoteAttemptEvent({
         attemptId: created.attempt.id,
         event: { ...event, occurredAt: '2026-08-07T16:07:00.000Z' },
@@ -423,6 +495,47 @@ describe('Rednote publishing store', () => {
         attemptId: created.attempt.id,
         event: { ...event, type: 'execution_evidence' },
         workerRunId: 'worker-run-2',
+        pool,
+      })).rejects.toMatchObject({ code: 'REDNOTE_RUN_IDENTITY_CONFLICT' });
+
+      const unclaimed = await createWorker(
+        pool,
+        '78787878-7878-4878-8878-787878787878',
+      );
+      const stale = await appendStoredRednoteAttemptEvent({
+        attemptId: unclaimed.attempt.id,
+        event: {
+          ...event,
+          type: 'execution_evidence',
+          occurredAt: '2026-08-07T16:08:00.000Z',
+        },
+        workerRunId: 'stale-worker-run',
+        playwrightRunId: 'stale-playwright-run',
+        pool,
+      });
+      expect(stale.event).toMatchObject({
+        event_type: 'execution_evidence',
+        diagnostics: {
+          staleCallback: true,
+          requestedEventType: 'execution_evidence',
+        },
+      });
+      const unbound = await db.query<{
+        worker_run_id: string | null;
+        playwright_run_id: string | null;
+      }>(
+        `SELECT worker_run_id, playwright_run_id
+         FROM rednote_publish_attempts WHERE id = $1`,
+        [unclaimed.attempt.id],
+      );
+      expect(unbound.rows[0]).toEqual({
+        worker_run_id: null,
+        playwright_run_id: null,
+      });
+      await expect(appendStoredRednoteAttemptEvent({
+        attemptId: created.attempt.id,
+        event: { ...event, type: 'execution_evidence' },
+        workerRunId,
         pool,
       })).rejects.toMatchObject({ code: 'REDNOTE_RUN_IDENTITY_CONFLICT' });
     } finally {
@@ -448,12 +561,12 @@ describe('Rednote publishing store', () => {
         request: operatorInput.parsed,
         rawRequestDigest: operatorInput.rawRequestDigest,
         expectedActiveAttemptId: attempt.id,
-        observedPost: {
+        validateNew: async () => ({
           ...readyPost,
           activeAttemptId: attempt.id,
           nextAction: 'Resolve attempt',
           publishExecution: 'Worker claimed',
-        },
+        }),
         occurredAt: '2026-08-07T16:20:00.000Z',
         actorId: 'operator@example.com',
         pool,
@@ -478,12 +591,87 @@ describe('Rednote publishing store', () => {
         },
       });
       expect(superseded.mutation).toBeDefined();
-      await db.query(
-        `UPDATE rednote_publish_post_mutations
-         SET state = 'applied', applied_at = CURRENT_TIMESTAMP
-         WHERE id = $1`,
-        [superseded.mutation!.id],
+      await expect(supersedeStoredRednoteAttempt({
+        priorAttemptId: attempt.id,
+        request: operatorInput.parsed,
+        rawRequestDigest: operatorInput.rawRequestDigest,
+        expectedActiveAttemptId: attempt.id,
+        occurredAt: '2026-08-07T16:20:00.000Z',
+        actorId: 'operator@example.com',
+        validateNew: async () => {
+          throw new Error('replay must not re-read Posts');
+        },
+        pool,
+      })).resolves.toMatchObject({
+        created: false,
+        operatorAttempt: { id: superseded.operatorAttempt.id },
+      });
+      const conflictingValidation = vi.fn();
+      await expect(supersedeStoredRednoteAttempt({
+        priorAttemptId: attempt.id,
+        request: operatorInput.parsed,
+        rawRequestDigest: '0'.repeat(64),
+        expectedActiveAttemptId: attempt.id,
+        occurredAt: '2026-08-07T16:20:00.000Z',
+        actorId: 'operator@example.com',
+        validateNew: conflictingValidation,
+        pool,
+      })).rejects.toMatchObject({ code: 'REDNOTE_IDEMPOTENCY_CONFLICT' });
+      expect(conflictingValidation).not.toHaveBeenCalled();
+
+      const invalidOperatorInput = request({
+        requester: 'admin',
+        idempotencyKey: '98989898-9898-4898-8898-989898989898',
+        executor: 'operator',
+      });
+      await expect(supersedeStoredRednoteAttempt({
+        priorAttemptId: attempt.id,
+        request: invalidOperatorInput.parsed,
+        rawRequestDigest: invalidOperatorInput.rawRequestDigest,
+        expectedActiveAttemptId: attempt.id,
+        occurredAt: '2026-08-07T16:21:00.000Z',
+        actorId: 'operator@example.com',
+        validateNew: async () => {
+          throw new Error('authoritative packet validation failed');
+        },
+        pool,
+      })).rejects.toThrow(/authoritative packet validation failed/);
+      const attemptCount = await db.query<{ count: number }>(
+        `SELECT COUNT(*)::int AS count
+         FROM rednote_publish_attempts
+         WHERE source_notion_page_id = $1`,
+        [PAGE_ID],
       );
+      expect(attemptCount.rows[0]?.count).toBe(2);
+      await verifyRednotePostMutation({
+        mutationId: superseded.mutation!.id,
+        verifiedAt: '2026-08-07T16:20:01.000Z',
+        pool,
+      });
+      await completeRednotePostMutation({
+        mutationId: superseded.mutation!.id,
+        appliedAt: '2026-08-07T16:20:01.000Z',
+        pool,
+      });
+      await expect(advanceStoredRednoteReceiptLookup({
+        attemptId: superseded.operatorAttempt.id,
+        state: 'found',
+        occurredAt: '2026-08-07T16:24:00.000Z',
+        actor: { type: 'admin', id: 'other@example.com' },
+        pool,
+      })).rejects.toMatchObject({
+        code: 'REDNOTE_OPERATOR_OWNERSHIP_CONFLICT',
+        status: 403,
+      });
+      await expect(advanceStoredRednoteReceiptLookup({
+        attemptId: superseded.operatorAttempt.id,
+        state: 'not_required',
+        occurredAt: '2026-08-07T16:24:00.000Z',
+        actor: { type: 'admin', id: 'operator@example.com' },
+        pool,
+      })).rejects.toMatchObject({
+        code: 'REDNOTE_RECEIPT_LOOKUP_CONFLICT',
+      });
       const found = await advanceStoredRednoteReceiptLookup({
         attemptId: superseded.operatorAttempt.id,
         state: 'found',
@@ -503,6 +691,28 @@ describe('Rednote publishing store', () => {
         [superseded.operatorAttempt.id],
       );
       expect(beforeCapture.rows[0]?.count).toBe(0);
+      await expect(captureStoredRednoteReceipt({
+        receipt: {
+          attemptId: superseded.operatorAttempt.id,
+          rednoteUrl: 'https://www.xiaohongshu.com/explore/note-1',
+          rednoteNoteId: 'note-1',
+          platformPublishTime: '2026-08-07T16:18:00.000Z',
+          capturedAt: '2026-08-07T16:26:00.000Z',
+          provenance: { source: 'operator_lookup' },
+        },
+        actor: { type: 'admin', id: 'other@example.com' },
+        observedPost: {
+          activeAttemptId: null,
+          sourcePostRevision: '2026-08-07T16:20:01.000Z',
+          status: 'Ready',
+          nextAction: 'Backfill receipt',
+          publishExecution: 'Operator scheduled',
+        },
+        pool,
+      })).rejects.toMatchObject({
+        code: 'REDNOTE_OPERATOR_OWNERSHIP_CONFLICT',
+        status: 403,
+      });
       const captured = await captureStoredRednoteReceipt({
         receipt: {
           attemptId: superseded.operatorAttempt.id,
@@ -534,6 +744,21 @@ describe('Rednote publishing store', () => {
           },
         },
       });
+      await expect(replayStoredRednoteReceipt({
+        receipt: {
+          attemptId: superseded.operatorAttempt.id,
+          rednoteUrl: 'https://www.xiaohongshu.com/explore/note-1',
+          rednoteNoteId: 'note-1',
+          platformPublishTime: '2026-08-07T16:18:00.000Z',
+          capturedAt: '2026-08-07T16:26:00.000Z',
+          provenance: { source: 'operator_lookup' },
+        },
+        actor: { type: 'admin', id: 'operator@example.com' },
+        pool,
+      })).resolves.toMatchObject({
+        created: false,
+        receipt: { rednoteNoteId: 'note-1' },
+      });
       const owner = await db.query<{
         operator_resolution_started_at: string;
         operator_resolution_completed_at: string | null;
@@ -545,6 +770,16 @@ describe('Rednote publishing store', () => {
       );
       expect(owner.rows[0]?.operator_resolution_started_at).toBeTruthy();
       expect(owner.rows[0]?.operator_resolution_completed_at).toBeNull();
+      await expect(completeRednotePostMutation({
+        mutationId: captured.mutation!.id,
+        appliedAt: '2026-08-07T16:27:00.000Z',
+        pool,
+      })).rejects.toMatchObject({ code: 'REDNOTE_MUTATION_NOT_VERIFIED' });
+      await verifyRednotePostMutation({
+        mutationId: captured.mutation!.id,
+        verifiedAt: '2026-08-07T16:27:00.000Z',
+        pool,
+      });
       const finalized = await completeRednotePostMutation({
         mutationId: captured.mutation!.id,
         appliedAt: '2026-08-07T16:27:00.000Z',
@@ -579,12 +814,12 @@ describe('Rednote publishing store', () => {
         request: firstOperator.parsed,
         rawRequestDigest: firstOperator.rawRequestDigest,
         expectedActiveAttemptId: attempt.id,
-        observedPost: {
+        validateNew: async () => ({
           ...readyPost,
           activeAttemptId: attempt.id,
           nextAction: 'Resolve attempt',
           publishExecution: 'Worker claimed',
-        },
+        }),
         occurredAt: '2026-08-07T16:20:00.000Z',
         actorId: 'operator@example.com',
         pool,
@@ -598,13 +833,13 @@ describe('Rednote publishing store', () => {
         priorOperatorAttemptId: superseded.operatorAttempt.id,
         request: replacementInput.parsed,
         rawRequestDigest: replacementInput.rawRequestDigest,
-        observedPost: {
+        validateNew: async () => ({
           activeAttemptId: null,
           sourcePostRevision: '2026-08-07T16:20:01.000Z',
           status: 'Ready',
           nextAction: 'Backfill receipt',
           publishExecution: 'Operator scheduled',
-        },
+        }),
         occurredAt: '2026-08-07T16:30:00.000Z',
         actorId: 'repair@example.com',
         reason: 'Transfer receipt reconciliation to the on-call operator',
@@ -630,6 +865,21 @@ describe('Rednote publishing store', () => {
       expect(
         transferred.operatorAttempt,
       ).not.toHaveProperty('operatorResolutionCompletedAt');
+      await expect(transferStoredRednoteOperatorResolution({
+        priorOperatorAttemptId: superseded.operatorAttempt.id,
+        request: replacementInput.parsed,
+        rawRequestDigest: replacementInput.rawRequestDigest,
+        occurredAt: '2026-08-07T16:30:00.000Z',
+        actorId: 'repair@example.com',
+        reason: 'Transfer receipt reconciliation to the on-call operator',
+        validateNew: async () => {
+          throw new Error('replay must not re-read Posts');
+        },
+        pool,
+      })).resolves.toMatchObject({
+        created: false,
+        operatorAttempt: { id: transferred.operatorAttempt.id },
+      });
       const history = await db.query<{
         evidence: Array<{ kind: string; reference: string }>;
       }>(

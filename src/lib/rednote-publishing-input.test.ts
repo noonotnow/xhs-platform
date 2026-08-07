@@ -230,7 +230,10 @@ describe('Rednote publishing input', () => {
       box('ftyp', Buffer.from('isom0000')),
       box('moov', box('trak', box(
         'mdia',
-        box('hdlr', Buffer.from([0])),
+        box('hdlr', Buffer.concat([
+          Buffer.alloc(8),
+          Buffer.from('vide'),
+        ])),
         box('minf'),
       ))),
       box('mdat', Buffer.from([1])),
@@ -261,6 +264,36 @@ describe('Rednote publishing input', () => {
     await expect(verifyRednoteAssetBytes(
       request,
       async () => ({ bytes: emptyContainer, contentType: 'video/mp4' }),
+    )).rejects.toThrow(/structurally complete MP4/);
+
+    const audioOnly = new Uint8Array(Buffer.concat([
+      box('ftyp', Buffer.from('isom0000')),
+      box('moov', box('trak', box(
+        'mdia',
+        box('hdlr', Buffer.concat([
+          Buffer.alloc(8),
+          Buffer.from('soun'),
+        ])),
+        box('minf'),
+      ))),
+      box('mdat', Buffer.from([1])),
+    ]));
+    const audioRequestValue = rawRequest({
+      publishMode: 'video',
+      mediaAssets: [{
+        assetId: 'videos/assets/post.mp4',
+        deliveryUrl:
+          'https://images.xhs.justlikekatie.com/videos/assets/post.mp4',
+        sha256: createHash('sha256').update(audioOnly).digest('hex'),
+        mimeType: 'video/mp4',
+        mediaType: 'video',
+        role: 'content',
+      }],
+    });
+    refreshPayloadDigest(audioRequestValue);
+    await expect(verifyRednoteAssetBytes(
+      parseRednoteAttemptTransactionRequest(audioRequestValue),
+      async () => ({ bytes: audioOnly, contentType: 'video/mp4' }),
     )).rejects.toThrow(/structurally complete MP4/);
   });
 

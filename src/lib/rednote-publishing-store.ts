@@ -112,7 +112,7 @@ export interface RednotePostMutationRow extends QueryResultRow {
   claim_playwright_run_id: string | null;
   claim_occurred_at: Date | string | null;
   claim_actor_id: string | null;
-  state: 'pending' | 'applied' | 'conflict';
+  state: 'pending' | 'verified' | 'applied' | 'conflict';
   attempt_count: number;
   diagnostics: Record<string, unknown>;
   last_error_code: string | null;
@@ -144,7 +144,7 @@ export interface RednotePostMutationView {
     rednoteNoteId?: string;
     platformPublishTime?: string;
   };
-  state: 'pending' | 'applied' | 'conflict';
+  state: 'pending' | 'verified' | 'applied' | 'conflict';
   diagnostics: Readonly<Record<string, unknown>>;
   createdAt: string;
 }
@@ -170,6 +170,17 @@ export interface RednoteReceiptRow extends QueryResultRow {
   captured_at: Date | string;
   provenance: Record<string, unknown>;
   created_at: Date | string;
+}
+
+export interface RednoteReceiptView {
+  id: string;
+  attemptId: string;
+  rednoteUrl: string;
+  rednoteNoteId: string;
+  platformPublishTime: string;
+  capturedAt: string;
+  provenance: Readonly<Record<string, unknown>>;
+  createdAt: string;
 }
 
 export interface ObservedRednotePostExecution {
@@ -305,6 +316,21 @@ export function rednotePostMutationView(
     },
     state: row.state,
     diagnostics: row.diagnostics,
+    createdAt: timestamp(row.created_at),
+  };
+}
+
+export function rednoteReceiptView(
+  row: RednoteReceiptRow,
+): RednoteReceiptView {
+  return {
+    id: row.id,
+    attemptId: row.attempt_id,
+    rednoteUrl: row.rednote_url,
+    rednoteNoteId: row.rednote_note_id,
+    platformPublishTime: timestamp(row.platform_publish_time),
+    capturedAt: timestamp(row.captured_at),
+    provenance: row.provenance,
     createdAt: timestamp(row.created_at),
   };
 }
@@ -574,6 +600,55 @@ export async function loadRednoteAttempt(
   }
 }
 
+export async function loadRednoteAttemptDetail(
+    attemptId: string,
+    pool: RednoteDatabasePool = getPool(),
+  ) {
+    const client = await pool.connect();
+    try {
+      const attempt = await loadAttemptWith(client, attemptId);
+      if (!attempt) return undefined;
+      const [events, receipt, mutations] = await Promise.all([
+        client.query<RednoteEventRow>(
+          `SELECT * FROM rednote_publish_attempt_events
+           WHERE attempt_id = $1::uuid
+           ORDER BY occurred_at, created_at, id`,
+          [attemptId],
+        ),
+        client.query<RednoteReceiptRow>(
+          `SELECT * FROM rednote_publish_attempt_receipts
+           WHERE attempt_id = $1::uuid`,
+          [attemptId],
+        ),
+        client.query<RednotePostMutationRow>(
+          `SELECT * FROM rednote_publish_post_mutations
+           WHERE attempt_id = $1::uuid
+           ORDER BY created_at, id`,
+          [attemptId],
+        ),
+      ]);
+      return {
+        attempt: rednoteAttemptView(attempt),
+        events: events.rows.map((event) => ({
+          id: event.id,
+          attemptId: event.attempt_id,
+          type: event.event_type,
+          occurredAt: timestamp(event.occurred_at),
+          actor: { type: event.actor_type, id: event.actor_id },
+          evidence: event.evidence,
+          diagnostics: event.diagnostics,
+          createdAt: timestamp(event.created_at),
+        })),
+        receipt: receipt.rows[0]
+          ? rednoteReceiptView(receipt.rows[0])
+          : undefined,
+        mutations: mutations.rows.map(rednotePostMutationView),
+      };
+    } finally {
+      client.release();
+  }
+}
+
 export async function createStoredRednoteAttempt(input: {
   request: RednoteAttemptTransactionRequest;
   rawRequestDigest: string;
@@ -667,6 +742,51 @@ export async function createStoredRednoteAttempt(input: {
     } finally {
       client.release();
     }
+  }
+}
+
+export async function replayStoredRednoteWorkerClaim(input: {
+  attemptId: string;
+  expectedActiveAttemptId: string | null;
+  workerRunId: string;
+  playwrightRunId?: string;
+  occurredAt: string;
+  actorId: string;
+  pool?: RednoteDatabasePool;
+}) {
+  const pool = input.pool ?? getPool();
+  const client = await pool.connect();
+  try {
+    const attempt = await loadAttemptWith(client, input.attemptId);
+    if (!attempt?.active) return undefined;
+    const claim = await client.query<RednotePostMutationRow>(
+      `SELECT * FROM rednote_publish_post_mutations
+       WHERE attempt_id = $1::uuid
+         AND mutation_kind = 'worker_claim'
+         AND state = 'applied'
+       LIMIT 1`,
+      [input.attemptId],
+    );
+    const mutation = claim.rows[0];
+    const exact =
+      attempt.executor_type === 'worker' &&
+      mutation &&
+      (mutation.expected_active_attempt_id ?? null) ===
+        input.expectedActiveAttemptId &&
+      mutation.claim_worker_run_id === input.workerRunId &&
+      (mutation.claim_playwright_run_id ?? undefined) ===
+        input.playwrightRunId &&
+      timestamp(mutation.claim_occurred_at!) === input.occurredAt &&
+      mutation.claim_actor_id === input.actorId;
+    if (!exact) {
+      throw storeError(
+        'The active attempt belongs to a different worker claim',
+        'REDNOTE_CLAIM_REPLAY_CONFLICT',
+      );
+    }
+    return rednoteAttemptView(attempt);
+  } finally {
+    client.release();
   }
 }
 
@@ -1011,7 +1131,7 @@ export async function listPendingRednotePostMutations(
   try {
     const result = await client.query<RednotePostMutationRow>(
       `SELECT * FROM rednote_publish_post_mutations
-       WHERE state = 'pending'
+       WHERE state IN ('pending', 'verified')
        ORDER BY last_attempt_at NULLS FIRST, created_at
        LIMIT $1`,
       [boundedLimit],
@@ -1072,7 +1192,7 @@ export async function conflictRednotePostMutation(input: {
            last_error_code = $3,
            last_error_message = 'Posts compare-and-set precondition changed',
            diagnostics = diagnostics || $4::jsonb
-       WHERE id = $1::uuid AND state = 'pending'
+       WHERE id = $1::uuid AND state IN ('pending', 'verified')
        RETURNING *`,
       [
         input.mutationId,
@@ -1082,6 +1202,37 @@ export async function conflictRednotePostMutation(input: {
       ],
     );
     return result.rows[0] ? rednotePostMutationView(result.rows[0]) : null;
+  } finally {
+    client.release();
+  }
+}
+
+export async function verifyRednotePostMutation(input: {
+  mutationId: string;
+  verifiedAt: string;
+  pool?: RednoteDatabasePool;
+}) {
+  const pool = input.pool ?? getPool();
+  const client = await pool.connect();
+  try {
+    const result = await client.query<RednotePostMutationRow>(
+      `UPDATE rednote_publish_post_mutations
+       SET state = 'verified',
+           attempt_count = attempt_count + 1,
+           last_attempt_at = $2::timestamptz,
+           last_error_code = NULL,
+           last_error_message = NULL
+       WHERE id = $1::uuid AND state IN ('pending', 'verified')
+       RETURNING *`,
+      [input.mutationId, input.verifiedAt],
+    );
+    if (!result.rows[0]) {
+      throw storeError(
+        'Posts mutation cannot be marked verified from its current state',
+        'REDNOTE_MUTATION_VERIFY_CONFLICT',
+      );
+    }
+    return rednotePostMutationView(result.rows[0]);
   } finally {
     client.release();
   }
@@ -1105,6 +1256,13 @@ export async function completeRednotePostMutation(input: {
         'REDNOTE_MUTATION_CONFLICT',
       );
     }
+    if (mutation.state === 'pending') {
+      throw storeError(
+        'Posts mutation must be compare-write-verified before finalization',
+        'REDNOTE_MUTATION_NOT_VERIFIED',
+        503,
+      );
+    }
     let finalizedAttempt = attempt;
     if (mutation.mutation_kind === 'worker_claim') {
       finalizedAttempt = await finalizeWorkerClaimLocked(
@@ -1118,6 +1276,27 @@ export async function completeRednotePostMutation(input: {
       attempt.executor_type === 'operator' &&
       !attempt.operator_resolution_completed_at
     ) {
+      const receiptResult = await client.query<RednoteReceiptRow>(
+        `SELECT * FROM rednote_publish_attempt_receipts
+         WHERE attempt_id = $1::uuid
+         FOR SHARE`,
+        [attempt.id],
+      );
+      const receipt = receiptResult.rows[0];
+      if (
+        !receipt ||
+        mutation.state !== 'verified' ||
+        mutation.desired_rednote_url !== receipt.rednote_url ||
+        mutation.desired_rednote_note_id !== receipt.rednote_note_id ||
+        !mutation.desired_platform_publish_time ||
+        timestamp(mutation.desired_platform_publish_time) !==
+          timestamp(receipt.platform_publish_time)
+      ) {
+        throw storeError(
+          'Operator publication finalization requires the verified immutable receipt',
+          'REDNOTE_OPERATOR_RECEIPT_NOT_VERIFIED',
+        );
+      }
       const completed = await client.query<RednoteAttemptRow>(
         `UPDATE rednote_publish_attempts
          SET operator_resolution_completed_at = $2::timestamptz
@@ -1139,16 +1318,12 @@ export async function completeRednotePostMutation(input: {
     const applied = await client.query<RednotePostMutationRow>(
       `UPDATE rednote_publish_post_mutations
        SET state = 'applied',
-           attempt_count = CASE
-             WHEN state = 'pending' THEN attempt_count + 1
-             ELSE attempt_count
-           END,
            last_attempt_at = $2::timestamptz,
            last_error_code = NULL,
            last_error_message = NULL,
            applied_at = COALESCE(applied_at, $2::timestamptz),
            conflict_at = NULL
-       WHERE id = $1::uuid AND state IN ('pending', 'applied')
+       WHERE id = $1::uuid AND state IN ('verified', 'applied')
        RETURNING *`,
       [
         mutation.id,
@@ -1187,7 +1362,7 @@ export async function finalizeRednoteWorkerClaim(input: {
       404,
     );
   }
-  if (mutation.state !== 'applied') {
+  if (mutation.state !== 'verified' && mutation.state !== 'applied') {
     throw storeError(
       'Worker claim cannot execute before Posts verification',
       'REDNOTE_CLAIM_NOT_VERIFIED',
@@ -1200,6 +1375,29 @@ export async function finalizeRednoteWorkerClaim(input: {
     pool,
   });
   return completed.attempt;
+}
+
+function assertWorkerCallbackIdentity(
+  attempt: RednoteAttemptRow,
+  actor: RednoteAttemptEvent['actor'],
+  workerRunId?: string,
+  playwrightRunId?: string,
+) {
+  if (actor.type !== 'worker') return;
+  const validWorker =
+    Boolean(attempt.worker_run_id) &&
+    workerRunId === attempt.worker_run_id;
+  const validExecutor = attempt.executor_kind === 'playwright'
+    ? Boolean(attempt.playwright_run_id) &&
+      playwrightRunId === attempt.playwright_run_id
+    : playwrightRunId === undefined;
+  if (!validWorker || !validExecutor) {
+    throw storeError(
+      'Worker callback run identity does not match the claimed attempt',
+      'REDNOTE_RUN_IDENTITY_CONFLICT',
+      409,
+    );
+  }
 }
 
 export async function appendStoredRednoteAttemptEvent(input: {
@@ -1215,29 +1413,33 @@ export async function appendStoredRednoteAttemptEvent(input: {
     await begin(client);
     const attempt = await lockedAttempt(client, input.attemptId);
     if (
-      (attempt.worker_run_id &&
-        input.workerRunId &&
-        attempt.worker_run_id !== input.workerRunId) ||
-      (attempt.playwright_run_id &&
-        input.playwrightRunId &&
-        attempt.playwright_run_id !== input.playwrightRunId) ||
-      (attempt.executor_kind !== 'playwright' && input.playwrightRunId)
+      input.event.actor.type === 'worker' &&
+      (
+        !attempt.active ||
+        Boolean(attempt.superseded_by_attempt_id) ||
+        Boolean(attempt.terminal_outcome)
+      )
     ) {
-      throw storeError(
-        'Attempt run identity does not match',
-        'REDNOTE_RUN_IDENTITY_CONFLICT',
-      );
+      const event = await insertEvent(client, {
+        attemptId: attempt.id,
+        type: 'execution_evidence',
+        occurredAt: input.event.occurredAt,
+        actor: input.event.actor,
+        evidence: input.event.evidence,
+        diagnostics: {
+          ...input.event.diagnostics,
+          staleCallback: true,
+          requestedEventType: input.event.type,
+        },
+      });
+      await commit(client);
+      return { event, created: true };
     }
-    await client.query(
-      `UPDATE rednote_publish_attempts
-       SET worker_run_id = COALESCE(worker_run_id, $2),
-           playwright_run_id = COALESCE(playwright_run_id, $3)
-       WHERE id = $1::uuid`,
-      [
-        attempt.id,
-        input.workerRunId ?? null,
-        input.playwrightRunId ?? null,
-      ],
+    assertWorkerCallbackIdentity(
+      attempt,
+      input.event.actor,
+      input.workerRunId,
+      input.playwrightRunId,
     );
     if (input.event.type === 'execution_started') {
       if (
@@ -1272,7 +1474,7 @@ export async function appendStoredRednoteAttemptEvent(input: {
           );
         }
         await commit(client);
-        return row;
+        return { event: row, created: false };
       }
     }
     const event = await insertEvent(client, {
@@ -1280,7 +1482,7 @@ export async function appendStoredRednoteAttemptEvent(input: {
       ...input.event,
     });
     await commit(client);
-    return event;
+    return { event, created: true };
   } catch (error) {
     await rollback(client);
     throw error;
@@ -1293,8 +1495,10 @@ export async function recordStoredRednoteTerminalOutcome(input: {
   attemptId: string;
   outcome: RednoteTerminalAttemptOutcome;
   occurredAt: string;
-  actorId: string;
-  observedPost: ObservedRednotePostExecution;
+  actor: RednoteAttemptEvent['actor'];
+  workerRunId?: string;
+  playwrightRunId?: string;
+  observedPost?: ObservedRednotePostExecution;
   evidence?: readonly RednoteAttemptEvidence[];
   pool?: RednoteDatabasePool;
 }) {
@@ -1303,22 +1507,28 @@ export async function recordStoredRednoteTerminalOutcome(input: {
   try {
     await begin(client);
     const attempt = await lockedAttempt(client, input.attemptId);
+    assertWorkerCallbackIdentity(
+      attempt,
+      input.actor,
+      input.workerRunId,
+      input.playwrightRunId,
+    );
     const current =
       attempt.executor_type === 'worker' &&
       attempt.active &&
       !attempt.superseded_by_attempt_id &&
-      input.observedPost.activeAttemptId === attempt.id;
+      input.observedPost?.activeAttemptId === attempt.id;
     if (!current) {
       const event = await insertEvent(client, {
         attemptId: attempt.id,
         type: 'execution_evidence',
         occurredAt: input.occurredAt,
-        actor: { type: 'worker', id: input.actorId },
+        actor: input.actor,
         evidence: input.evidence,
         diagnostics: {
           staleResult: true,
           code: 'REDNOTE_STALE_RESULT',
-          observedActiveAttemptId: input.observedPost.activeAttemptId,
+          observedActiveAttemptId: input.observedPost?.activeAttemptId ?? null,
         },
       });
       await commit(client);
@@ -1328,6 +1538,7 @@ export async function recordStoredRednoteTerminalOutcome(input: {
         event,
       };
     }
+    const observedPost = input.observedPost!;
     if (attempt.terminal_outcome) {
       if (attempt.terminal_outcome !== input.outcome) {
         throw storeError(
@@ -1350,9 +1561,9 @@ export async function recordStoredRednoteTerminalOutcome(input: {
       (
         attempt.claim_source_status !== 'Ready' ||
         !attempt.claim_packet_authorized_at ||
-        input.observedPost.status !== 'Ready' ||
-        input.observedPost.nextAction !== 'Resolve attempt' ||
-        input.observedPost.publishExecution !== 'Worker claimed'
+        observedPost.status !== 'Ready' ||
+        observedPost.nextAction !== 'Resolve attempt' ||
+        observedPost.publishExecution !== 'Worker claimed'
       );
     const update = await client.query<RednoteAttemptRow>(
       `UPDATE rednote_publish_attempts
@@ -1380,13 +1591,13 @@ export async function recordStoredRednoteTerminalOutcome(input: {
       : input.outcome === 'accepted'
         ? {
             activeAttemptId: attempt.id,
-            status: input.observedPost.status,
+            status: observedPost.status,
             nextAction: 'Backfill receipt' as const,
             publishExecution: 'Worker batched' as const,
           }
         : {
             activeAttemptId: attempt.id,
-            status: input.observedPost.status,
+            status: observedPost.status,
             nextAction: 'Resolve attempt' as const,
             publishExecution: 'Worker claimed' as const,
           };
@@ -1395,7 +1606,7 @@ export async function recordStoredRednoteTerminalOutcome(input: {
       pageId: attempt.source_notion_page_id,
       kind: input.outcome,
       expected: {
-        ...input.observedPost,
+        ...observedPost,
         ...(input.outcome === 'known_failed'
           ? { status: 'Ready' as const }
           : {}),
@@ -1405,7 +1616,7 @@ export async function recordStoredRednoteTerminalOutcome(input: {
       diagnostics: knownFailureDiverged
         ? {
             code: 'REDNOTE_KNOWN_FAILURE_LIFECYCLE_DIVERGED',
-            observedStatus: input.observedPost.status,
+            observedStatus: observedPost.status,
             claimSourceStatus: attempt.claim_source_status,
           }
         : {},
@@ -1414,7 +1625,7 @@ export async function recordStoredRednoteTerminalOutcome(input: {
       attemptId: attempt.id,
       type: 'terminal_outcome_recorded',
       occurredAt: input.occurredAt,
-      actor: { type: 'worker', id: input.actorId },
+      actor: input.actor,
       evidence: input.evidence,
       diagnostics: knownFailureDiverged
         ? { mutationConflict: true, mutationId: mutation.id }
@@ -1439,6 +1650,8 @@ export async function advanceStoredRednoteReceiptLookup(input: {
   state: Exclude<RednoteReceiptLookupState, 'pending'>;
   occurredAt: string;
   actor: RednoteAttemptEvent['actor'];
+  workerRunId?: string;
+  playwrightRunId?: string;
   evidence?: readonly RednoteAttemptEvidence[];
   pool?: RednoteDatabasePool;
 }) {
@@ -1447,6 +1660,12 @@ export async function advanceStoredRednoteReceiptLookup(input: {
   try {
     await begin(client);
     const attempt = await lockedAttempt(client, input.attemptId);
+    assertWorkerCallbackIdentity(
+      attempt,
+      input.actor,
+      input.workerRunId,
+      input.playwrightRunId,
+    );
     if (attempt.terminal_outcome !== 'accepted' || attempt.superseded_by_attempt_id) {
       await insertEvent(client, {
         attemptId: attempt.id,
@@ -1459,6 +1678,25 @@ export async function advanceStoredRednoteReceiptLookup(input: {
       await commit(client);
       return { attempt: rednoteAttemptView(attempt), stale: true };
     }
+    if (
+      attempt.executor_type === 'operator' &&
+      (
+        input.actor.type !== 'admin' ||
+        input.actor.id !== attempt.executor_id
+      )
+    ) {
+      throw storeError(
+        'Operator receipt lookup requires the current operator identity',
+        'REDNOTE_OPERATOR_OWNERSHIP_CONFLICT',
+        403,
+      );
+    }
+    if (input.state === 'not_required') {
+      throw storeError(
+        'Accepted attempts require receipt resolution or explicit transfer',
+        'REDNOTE_RECEIPT_LOOKUP_CONFLICT',
+      );
+    }
     if (attempt.receipt_lookup_state === input.state) {
       await commit(client);
       return { attempt: rednoteAttemptView(attempt), stale: false };
@@ -1467,7 +1705,7 @@ export async function advanceStoredRednoteReceiptLookup(input: {
       attempt.receipt_lookup_state === 'pending' ||
       (
         attempt.receipt_lookup_state === 'not_found' &&
-        (input.state === 'found' || input.state === 'not_required')
+        input.state === 'found'
       );
     if (!valid) {
       throw storeError(
@@ -1479,7 +1717,7 @@ export async function advanceStoredRednoteReceiptLookup(input: {
       `UPDATE rednote_publish_attempts
        SET receipt_lookup_state = $2,
            receipt_lookup_updated_at = $3::timestamptz,
-           active = CASE WHEN $2 IN ('found', 'not_required')
+           active = CASE WHEN $2 = 'found'
                          THEN FALSE ELSE active END
        WHERE id = $1::uuid
        RETURNING *`,
@@ -1518,9 +1756,54 @@ function exactReceipt(row: RednoteReceiptRow, receipt: RednotePublishReceipt) {
   );
 }
 
+export async function replayStoredRednoteReceipt(
+  input: {
+    receipt: RednotePublishReceipt;
+    actor: RednoteAttemptEvent['actor'];
+    workerRunId?: string;
+    playwrightRunId?: string;
+    pool?: RednoteDatabasePool;
+  },
+) {
+  const identity = validateRednoteReceiptIdentity(input.receipt);
+  const normalized = { ...input.receipt, ...identity };
+  const pool = input.pool ?? getPool();
+  const client = await pool.connect();
+  try {
+    const attempt = await loadAttemptWith(client, input.receipt.attemptId);
+    if (!attempt) return undefined;
+    assertWorkerCallbackIdentity(
+      attempt,
+      input.actor,
+      input.workerRunId,
+      input.playwrightRunId,
+    );
+    const existing = await client.query<RednoteReceiptRow>(
+      `SELECT * FROM rednote_publish_attempt_receipts
+       WHERE attempt_id = $1::uuid`,
+      [input.receipt.attemptId],
+    );
+    if (!existing.rows[0]) return undefined;
+    if (!exactReceipt(existing.rows[0], normalized)) {
+      throw storeError(
+        'Attempt already has a different immutable receipt',
+        'REDNOTE_RECEIPT_CONFLICT',
+      );
+    }
+    return {
+      receipt: rednoteReceiptView(existing.rows[0]),
+      created: false as const,
+    };
+  } finally {
+    client.release();
+  }
+}
+
 export async function captureStoredRednoteReceipt(input: {
   receipt: RednotePublishReceipt;
   actor: RednoteAttemptEvent['actor'];
+  workerRunId?: string;
+  playwrightRunId?: string;
   observedPost: ObservedRednotePostExecution;
   pool?: RednoteDatabasePool;
 }) {
@@ -1534,6 +1817,12 @@ export async function captureStoredRednoteReceipt(input: {
   try {
     await begin(client);
     const attempt = await lockedAttempt(client, input.receipt.attemptId);
+    assertWorkerCallbackIdentity(
+      attempt,
+      input.actor,
+      input.workerRunId,
+      input.playwrightRunId,
+    );
     const existing = await client.query<RednoteReceiptRow>(
       `SELECT * FROM rednote_publish_attempt_receipts
        WHERE attempt_id = $1::uuid FOR SHARE`,
@@ -1547,7 +1836,10 @@ export async function captureStoredRednoteReceipt(input: {
         );
       }
       await commit(client);
-      return { receipt: existing.rows[0], created: false };
+      return {
+        receipt: rednoteReceiptView(existing.rows[0]),
+        created: false,
+      };
     }
     const baseEligible =
       attempt.terminal_outcome === 'accepted' &&
@@ -1557,8 +1849,23 @@ export async function captureStoredRednoteReceipt(input: {
     const workerEligible =
       attempt.executor_type === 'worker' &&
       input.observedPost.activeAttemptId === attempt.id;
+    if (
+      attempt.executor_type === 'operator' &&
+      (
+        input.actor.type !== 'admin' ||
+        input.actor.id !== attempt.executor_id
+      )
+    ) {
+      throw storeError(
+        'Operator receipt capture requires the current operator identity',
+        'REDNOTE_OPERATOR_OWNERSHIP_CONFLICT',
+        403,
+      );
+    }
     const operatorEligible =
       attempt.executor_type === 'operator' &&
+      input.actor.type === 'admin' &&
+      input.actor.id === attempt.executor_id &&
       Boolean(attempt.operator_resolution_started_at) &&
       !attempt.operator_resolution_completed_at &&
       input.observedPost.activeAttemptId === null &&
@@ -1659,7 +1966,7 @@ export async function captureStoredRednoteReceipt(input: {
     });
     await commit(client);
     return {
-      receipt: inserted.rows[0]!,
+      receipt: rednoteReceiptView(inserted.rows[0]!),
       mutation: rednotePostMutationView(mutation),
       created: true,
       stale: false,
@@ -1677,9 +1984,9 @@ export async function supersedeStoredRednoteAttempt(input: {
   request: RednoteAttemptTransactionRequest;
   rawRequestDigest: string;
   expectedActiveAttemptId: string;
-  observedPost: ObservedRednotePostExecution;
   occurredAt: string;
   actorId: string;
+  validateNew: () => Promise<ObservedRednotePostExecution>;
   pool?: RednoteDatabasePool;
 }) {
   if (
@@ -1694,18 +2001,18 @@ export async function supersedeStoredRednoteAttempt(input: {
   }
   const pool = input.pool ?? getPool();
   const client = await pool.connect();
+  const requestLock =
+    `rednote-request:admin:${input.request.idempotencyKey}`;
   try {
-    await begin(client);
     await client.query(
-      'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
-      [`rednote-request:admin:${input.request.idempotencyKey}`],
+      'SELECT pg_advisory_lock(hashtextextended($1, 0))',
+      [requestLock],
     );
     const replayId = await requestReplay(
       client,
       'admin',
       input.request.idempotencyKey,
       input.rawRequestDigest,
-      true,
     );
     if (replayId) {
       const replay = await loadAttemptWith(client, replayId);
@@ -1719,9 +2026,37 @@ export async function supersedeStoredRednoteAttempt(input: {
         );
       }
       const prior = await loadAttemptWith(client, input.priorAttemptId);
-      await commit(client);
       return {
         priorAttempt: rednoteAttemptView(prior!),
+        operatorAttempt: rednoteAttemptView(replay),
+        created: false,
+      };
+    }
+    const observedPost = await input.validateNew();
+    await begin(client);
+    const racedReplayId = await requestReplay(
+      client,
+      'admin',
+      input.request.idempotencyKey,
+      input.rawRequestDigest,
+      true,
+    );
+    if (racedReplayId) {
+      const replay = await loadAttemptWith(client, racedReplayId);
+      const prior = await loadAttemptWith(client, input.priorAttemptId);
+      await commit(client);
+      if (
+        !replay ||
+        !prior ||
+        replay.supersedes_attempt_id !== input.priorAttemptId
+      ) {
+        throw storeError(
+          'Idempotent supersession ownership changed',
+          'REDNOTE_IDEMPOTENCY_CONFLICT',
+        );
+      }
+      return {
+        priorAttempt: rednoteAttemptView(prior),
         operatorAttempt: rednoteAttemptView(replay),
         created: false,
       };
@@ -1733,7 +2068,7 @@ export async function supersedeStoredRednoteAttempt(input: {
       !prior.active ||
       prior.superseded_by_attempt_id ||
       input.expectedActiveAttemptId !== prior.id ||
-      input.observedPost.activeAttemptId !== prior.id
+      observedPost.activeAttemptId !== prior.id
     ) {
       throw storeError(
         'The exact active worker ownership changed',
@@ -1827,10 +2162,10 @@ export async function supersedeStoredRednoteAttempt(input: {
       attemptId: operator.id,
       pageId: prior.source_notion_page_id,
       kind: 'operator_supersession',
-      expected: input.observedPost,
+      expected: observedPost,
       desired: {
         activeAttemptId: null,
-        status: input.observedPost.status,
+        status: observedPost.status,
         nextAction: 'Backfill receipt',
         publishExecution: 'Operator scheduled',
       },
@@ -1846,7 +2181,14 @@ export async function supersedeStoredRednoteAttempt(input: {
     await rollback(client);
     throw error;
   } finally {
-    client.release();
+    try {
+      await client.query(
+        'SELECT pg_advisory_unlock(hashtextextended($1, 0))',
+        [requestLock],
+      );
+    } finally {
+      client.release();
+    }
   }
 }
 
@@ -1868,10 +2210,10 @@ export async function transferStoredRednoteOperatorResolution(input: {
   priorOperatorAttemptId: string;
   request: RednoteAttemptTransactionRequest;
   rawRequestDigest: string;
-  observedPost: ObservedRednotePostExecution;
   occurredAt: string;
   actorId: string;
   reason: string;
+  validateNew: () => Promise<ObservedRednotePostExecution>;
   pool?: RednoteDatabasePool;
 }) {
   if (
@@ -1886,18 +2228,18 @@ export async function transferStoredRednoteOperatorResolution(input: {
   }
   const pool = input.pool ?? getPool();
   const client = await pool.connect();
+  const requestLock =
+    `rednote-request:admin:${input.request.idempotencyKey}`;
   try {
-    await begin(client);
     await client.query(
-      'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
-      [`rednote-request:admin:${input.request.idempotencyKey}`],
+      'SELECT pg_advisory_lock(hashtextextended($1, 0))',
+      [requestLock],
     );
     const replayId = await requestReplay(
       client,
       'admin',
       input.request.idempotencyKey,
       input.rawRequestDigest,
-      true,
     );
     if (replayId) {
       const replay = await loadAttemptWith(client, replayId);
@@ -1913,7 +2255,36 @@ export async function transferStoredRednoteOperatorResolution(input: {
           'REDNOTE_IDEMPOTENCY_CONFLICT',
         );
       }
+      return {
+        priorOperatorAttempt: rednoteAttemptView(prior),
+        operatorAttempt: rednoteAttemptView(replay),
+        created: false,
+      };
+    }
+    const observedPost = await input.validateNew();
+    await begin(client);
+    const racedReplayId = await requestReplay(
+      client,
+      'admin',
+      input.request.idempotencyKey,
+      input.rawRequestDigest,
+      true,
+    );
+    if (racedReplayId) {
+      const replay = await loadAttemptWith(client, racedReplayId);
+      const prior = await loadAttemptWith(client, input.priorOperatorAttemptId);
       await commit(client);
+      if (
+        !replay ||
+        !prior ||
+        replay.supersedes_attempt_id !== prior.id ||
+        prior.superseded_by_attempt_id !== replay.id
+      ) {
+        throw storeError(
+          'Idempotent operator transfer ownership changed',
+          'REDNOTE_IDEMPOTENCY_CONFLICT',
+        );
+      }
       return {
         priorOperatorAttempt: rednoteAttemptView(prior),
         operatorAttempt: rednoteAttemptView(replay),
@@ -1921,9 +2292,9 @@ export async function transferStoredRednoteOperatorResolution(input: {
       };
     }
     if (
-      input.observedPost.activeAttemptId !== null ||
-      input.observedPost.publishExecution !== 'Operator scheduled' ||
-      input.observedPost.nextAction !== 'Backfill receipt'
+      observedPost.activeAttemptId !== null ||
+      observedPost.publishExecution !== 'Operator scheduled' ||
+      observedPost.nextAction !== 'Backfill receipt'
     ) {
       throw storeError(
         'Operator transfer requires the exact operator receipt projection',
@@ -1974,7 +2345,7 @@ export async function transferStoredRednoteOperatorResolution(input: {
       if (
         unresolved.attempt_id !== prior.id ||
         unresolved.mutation_kind !== 'operator_supersession' ||
-        !mutationMatchesObserved(unresolved, input.observedPost)
+        !mutationMatchesObserved(unresolved, observedPost)
       ) {
         throw storeError(
           'The unresolved projection needs explicit repair before transfer',
@@ -1983,17 +2354,23 @@ export async function transferStoredRednoteOperatorResolution(input: {
       }
       await client.query(
         `UPDATE rednote_publish_post_mutations
-         SET state = 'applied',
-             applied_at = $2::timestamptz,
+         SET state = 'verified',
              conflict_at = NULL,
              diagnostics = diagnostics ||
                jsonb_build_object(
                  'explicitOperatorRepair', true,
-                 'repairedBy', $3::text
+                 'repairedBy', $2::text
                )
          WHERE id = $1::uuid
            AND state IN ('pending', 'conflict')`,
-        [unresolved.id, input.occurredAt, input.actorId],
+        [unresolved.id, input.actorId],
+      );
+      await client.query(
+        `UPDATE rednote_publish_post_mutations
+         SET state = 'applied',
+            applied_at = $2::timestamptz
+         WHERE id = $1::uuid AND state = 'verified'`,
+        [unresolved.id, input.occurredAt],
       );
     }
     const generated = await client.query<{ id: string }>(
@@ -2068,6 +2445,13 @@ export async function transferStoredRednoteOperatorResolution(input: {
     await rollback(client);
     throw error;
   } finally {
-    client.release();
+    try {
+      await client.query(
+        'SELECT pg_advisory_unlock(hashtextextended($1, 0))',
+        [requestLock],
+      );
+    } finally {
+      client.release();
+    }
   }
 }

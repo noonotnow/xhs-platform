@@ -722,8 +722,17 @@ function assertValidMp4(bytes: Uint8Array) {
       const media = trackChildren.find((box) => box.type === 'mdia');
       if (!media) return false;
       const mediaChildren = parseBoxes(media.contentStart, media.end);
+      const handler = mediaChildren.find((box) => box.type === 'hdlr');
+      const handlerType = handler && handler.contentStart + 12 <= handler.end
+        ? String.fromCharCode(
+            bytes[handler.contentStart + 8],
+            bytes[handler.contentStart + 9],
+            bytes[handler.contentStart + 10],
+            bytes[handler.contentStart + 11],
+          )
+        : null;
       return (
-        mediaChildren.some((box) => box.type === 'hdlr') &&
+        handlerType === 'vide' &&
         mediaChildren.some((box) => box.type === 'minf')
       );
     });

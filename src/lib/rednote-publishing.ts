@@ -11,6 +11,7 @@ import {
   listPendingRednotePostMutations,
   loadRednotePostMutation,
   recordRednotePostMutationFailure,
+  verifyRednotePostMutation,
   withRednotePostProjectionLock,
   type RednoteDatabasePool,
 } from '@/lib/rednote-publishing-store';
@@ -88,6 +89,14 @@ async function reconcileLockedRednotePostMutation(
       409,
     );
   }
+  if (mutation.state === 'verified') {
+    const completed = await completeRednotePostMutation({
+      mutationId,
+      appliedAt: (dependencies.now?.() ?? new Date()).toISOString(),
+      pool: dependencies.pool,
+    });
+    return completed.mutation;
+  }
   const attemptedAt = (dependencies.now?.() ?? new Date()).toISOString();
   try {
     const projection = await projectRednotePostMutation(
@@ -122,6 +131,11 @@ async function reconcileLockedRednotePostMutation(
         409,
       );
     }
+    await verifyRednotePostMutation({
+      mutationId,
+      verifiedAt: attemptedAt,
+      pool: dependencies.pool,
+    });
     const completed = await completeRednotePostMutation({
       mutationId,
       appliedAt: attemptedAt,
