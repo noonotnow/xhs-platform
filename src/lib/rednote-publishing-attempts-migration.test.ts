@@ -18,12 +18,12 @@ async function migratedDatabase() {
 const workerAttempt = (id: string, pageId: string, active = true) => `
   INSERT INTO rednote_publish_attempts (
     id, contract_revision, source_notion_page_id, frozen_payload,
-    payload_digest, payload_revision, executor_type, executor_id,
-    worker_run_id, target_publish_at, requested_at, active
+    payload_digest, payload_revision, executor_type, executor_kind, executor_id,
+    target_publish_at, requested_at, active
   ) VALUES (
     '${id}', 'rednote-publishing/v1', '${pageId}', '{}'::jsonb,
-    '${'a'.repeat(64)}', 'post-snapshot/v1', 'worker', 'worker-1',
-    'run-1', '2026-08-08T16:00:00Z', '2026-08-07T16:00:00Z', ${active}
+    '${'a'.repeat(64)}', 'post-snapshot/v1', 'worker', 'playwright', 'worker-1',
+    '2026-08-08T16:00:00Z', '2026-08-07T16:00:00Z', ${active}
   );
 `;
 
@@ -34,12 +34,12 @@ const operatorAttempt = (
 ) => `
   INSERT INTO rednote_publish_attempts (
     id, contract_revision, source_notion_page_id, frozen_payload,
-    payload_digest, payload_revision, executor_type, executor_id,
+    payload_digest, payload_revision, executor_type, executor_kind, executor_id,
     target_publish_at, requested_at, active, supersedes_attempt_id,
     receipt_lookup_state
   ) VALUES (
     '${id}', 'rednote-publishing/v1', '${pageId}', '{}'::jsonb,
-    '${'b'.repeat(64)}', 'post-snapshot/v1', 'operator', 'operator-1',
+    '${'b'.repeat(64)}', 'post-snapshot/v1', 'operator', 'operator', 'operator-1',
     '2026-08-09T16:00:00Z', '2026-08-08T16:00:00Z', FALSE,
     '${supersedesAttemptId}', 'not_required'
   );
@@ -66,6 +66,47 @@ describe('rednote publishing attempt migration', () => {
         '11111111-1111-4111-8111-111111111111',
         'page-1',
       ));
+      await db.exec(`
+        UPDATE rednote_publish_attempts
+        SET worker_run_id = 'worker-run-1',
+            playwright_run_id = 'playwright-run-1'
+        WHERE id = '11111111-1111-4111-8111-111111111111';
+      `);
+      const boundIdentity = await db.query<{
+        executor_kind: string;
+        worker_run_id: string;
+        playwright_run_id: string;
+      }>(`
+        SELECT executor_kind, worker_run_id, playwright_run_id
+        FROM rednote_publish_attempts
+        WHERE id = '11111111-1111-4111-8111-111111111111'
+      `);
+      expect(boundIdentity.rows[0]).toEqual({
+        executor_kind: 'playwright',
+        worker_run_id: 'worker-run-1',
+        playwright_run_id: 'playwright-run-1',
+      });
+      await expect(db.exec(`
+        UPDATE rednote_publish_attempts
+        SET worker_run_id = 'worker-run-2'
+        WHERE id = '11111111-1111-4111-8111-111111111111';
+      `)).rejects.toThrow(/run identities are immutable once bound/);
+      await expect(db.exec(`
+        UPDATE rednote_publish_attempts
+        SET playwright_run_id = 'playwright-run-2'
+        WHERE id = '11111111-1111-4111-8111-111111111111';
+      `)).rejects.toThrow(/run identities are immutable once bound/);
+      await expect(db.exec(`
+        INSERT INTO rednote_publish_attempts (
+          contract_revision, source_notion_page_id, frozen_payload,
+          payload_digest, payload_revision, executor_type, executor_kind,
+          executor_id, playwright_run_id, requested_at
+        ) VALUES (
+          'rednote-publishing/v1', 'invalid-executor', '{}'::jsonb,
+          '${'c'.repeat(64)}', 'post-snapshot/v1', 'worker', 'microservice',
+          'worker-2', 'not-a-microservice-identity', CURRENT_TIMESTAMP
+        );
+      `)).rejects.toThrow();
       await expect(db.exec(workerAttempt(
         '22222222-2222-4222-8222-222222222222',
         'page-1',

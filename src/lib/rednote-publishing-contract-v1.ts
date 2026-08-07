@@ -42,6 +42,13 @@ export type RednoteTerminalAttemptOutcome =
 export const REDNOTE_EXECUTOR_TYPES = ['worker', 'operator'] as const;
 export type RednoteExecutorType = (typeof REDNOTE_EXECUTOR_TYPES)[number];
 
+export const REDNOTE_EXECUTOR_KINDS = [
+  'playwright',
+  'microservice',
+  'operator',
+] as const;
+export type RednoteExecutorKind = (typeof REDNOTE_EXECUTOR_KINDS)[number];
+
 export const REDNOTE_TRANSACTION_REQUESTERS = [
   'create',
   'plan',
@@ -80,39 +87,137 @@ export const REDNOTE_LEGACY_READ_ALIASES = {
 export type RednoteLegacyReadAlias =
   (typeof REDNOTE_LEGACY_READ_ALIASES)[keyof typeof REDNOTE_LEGACY_READ_ALIASES][number];
 
-export function readCanonicalNextAction(
+export type RednoteNextActionReadResult =
+  | { kind: 'canonical'; value: RednoteNextAction }
+  | {
+      kind: 'legacy_classification_required';
+      legacyValue: RednoteLegacyReadAlias;
+      candidates: readonly ['Backfill receipt', 'Backfill metrics', 'Reconciled'];
+    };
+
+export function resolveNextActionRead(
   value: string,
-): RednoteNextAction | undefined {
+  context: {
+    hasReceiptIdentity: boolean;
+    metricsComplete: boolean;
+  },
+): RednoteNextActionReadResult | undefined {
   if (value === 'Backfill metadata' || value === 'Backfill URL/metrics') {
-    return 'Backfill receipt';
+    if (!context.hasReceiptIdentity) {
+      return { kind: 'canonical', value: 'Backfill receipt' };
+    }
+    if (!context.metricsComplete) {
+      return { kind: 'canonical', value: 'Backfill metrics' };
+    }
+    return {
+      kind: 'legacy_classification_required',
+      legacyValue: value,
+      candidates: ['Backfill receipt', 'Backfill metrics', 'Reconciled'],
+    };
   }
-  return REDNOTE_NEXT_ACTIONS.find((candidate) => candidate === value);
+  const canonical = REDNOTE_NEXT_ACTIONS.find((candidate) => candidate === value);
+  return canonical ? { kind: 'canonical', value: canonical } : undefined;
 }
 
-export function assertCanonicalPropertyWrite(
-  propertyName: string,
+export function assertCanonicalNextActionWrite(
   value: string,
 ): void {
-  if (
-    propertyName === REDNOTE_CANONICAL_PROPERTIES.nextAction &&
-    (value === 'Backfill metadata' || value === 'Backfill URL/metrics')
-  ) {
+  if (value === 'Backfill metadata' || value === 'Backfill URL/metrics') {
     throw new Error(`${value} is a read-only legacy alias; write Backfill receipt`);
   }
-  if (
-    propertyName === REDNOTE_CANONICAL_PROPERTIES.nextAction &&
-    !REDNOTE_NEXT_ACTIONS.some((candidate) => candidate === value)
-  ) {
+  if (!REDNOTE_NEXT_ACTIONS.some((candidate) => candidate === value)) {
     throw new Error(`${value} is not a canonical Next action`);
   }
 }
 
-export interface RednoteExecutorIdentity {
-  type: RednoteExecutorType;
-  id: string;
-  workerRunId?: string;
-  playwrightRunId?: string;
+export function assertCanonicalStatusWrite(
+  value: string,
+): asserts value is RednotePostStatus {
+  if (!REDNOTE_POST_STATUSES.some((candidate) => candidate === value)) {
+    throw new Error(`${value} is not a canonical Status`);
+  }
 }
+
+export function assertCanonicalPublishExecutionWrite(
+  value: string,
+): asserts value is RednotePublishExecution {
+  if (!REDNOTE_PUBLISH_EXECUTIONS.some((candidate) => candidate === value)) {
+    throw new Error(`${value} is not a canonical Publish execution`);
+  }
+}
+
+export type RednoteExecutorIdentity =
+  | {
+      type: 'worker';
+      kind: 'playwright';
+      id: string;
+      workerRunId?: string;
+      playwrightRunId?: string;
+    }
+  | {
+      type: 'worker';
+      kind: 'microservice';
+      id: string;
+      workerRunId?: string;
+      playwrightRunId?: never;
+    }
+  | {
+      type: 'operator';
+      kind: 'operator';
+      id: string;
+      workerRunId?: never;
+      playwrightRunId?: never;
+    };
+
+export type RednoteMediaType = 'image' | 'video';
+export type RednoteMediaRole = 'content' | 'cover' | 'poster';
+
+export interface FrozenRednoteMediaAsset {
+  assetId: string;
+  deliveryUrl: string;
+  sha256: string;
+  mediaType: RednoteMediaType;
+  role: RednoteMediaRole;
+}
+
+interface FrozenRednoteBrowserPayloadBase {
+  sourcePostId: string;
+  title: string;
+  caption: string;
+  tags: readonly string[];
+  scheduledDate: string | null;
+  targetPublishAt: string;
+  timingMode: 'scheduled' | 'post_now';
+  visibility: 'public' | 'private';
+}
+
+export type FrozenRednoteBrowserPayload =
+  | (FrozenRednoteBrowserPayloadBase & {
+      publishMode: 'image';
+      mediaAssets: readonly [
+        FrozenRednoteMediaAsset & { mediaType: 'image'; role: 'content' },
+        ...(FrozenRednoteMediaAsset & {
+          mediaType: 'image';
+          role: 'content';
+        })[],
+      ];
+      coverAsset?: never;
+      posterAsset?: never;
+    })
+  | (FrozenRednoteBrowserPayloadBase & {
+      publishMode: 'video';
+      mediaAssets: readonly [
+        FrozenRednoteMediaAsset & { mediaType: 'video'; role: 'content' },
+      ];
+      coverAsset?: FrozenRednoteMediaAsset & {
+        mediaType: 'image';
+        role: 'cover';
+      };
+      posterAsset?: FrozenRednoteMediaAsset & {
+        mediaType: 'image';
+        role: 'poster';
+      };
+    });
 
 export interface RednoteAttemptTransactionRequest {
   requestedBy: RednoteTransactionRequester;
@@ -127,9 +232,14 @@ export interface FrozenRednoteAttemptPayload {
   payloadRevision: string;
   payloadDigest: string;
   requestedAt: string;
-  targetPublishAt?: string;
   executor: RednoteExecutorIdentity;
-  postSnapshot: Readonly<Record<string, unknown>>;
+  browserPayload: FrozenRednoteBrowserPayload;
+}
+
+export function toRednoteBrowserExecutionPayload(
+  attempt: FrozenRednoteAttemptPayload,
+): FrozenRednoteBrowserPayload {
+  return attempt.browserPayload;
 }
 
 export const REDNOTE_ATTEMPT_EVENT_TYPES = [
@@ -225,4 +335,13 @@ export function assertNewAttemptForRetry(value: {
   if (value.previousAttemptId === value.requestedAttemptId) {
     throw new Error('Intentional retry requires a new attempt ID');
   }
+}
+
+export function isAttemptResultCurrent(value: {
+  resultAttemptId: string;
+  activeAttemptId: string | null;
+  supersededByAttemptId?: string | null;
+}): boolean {
+  return value.activeAttemptId === value.resultAttemptId &&
+    !value.supersededByAttemptId;
 }

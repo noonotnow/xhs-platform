@@ -1,19 +1,66 @@
 import { describe, expect, it } from 'vitest';
 import {
-  assertCanonicalPropertyWrite,
+  assertCanonicalNextActionWrite,
+  assertCanonicalPublishExecutionWrite,
+  assertCanonicalStatusWrite,
   assertNewAttemptForRetry,
   assertPublishedInvariant,
+  type FrozenRednoteAttemptPayload,
+  type FrozenRednoteBrowserPayload,
   hasAtomicPublishedIdentity,
-  readCanonicalNextAction,
+  isAttemptResultCurrent,
   REDNOTE_CANONICAL_PROPERTIES,
+  REDNOTE_EXECUTOR_KINDS,
   REDNOTE_NEXT_ACTIONS,
   REDNOTE_POST_STATUSES,
   REDNOTE_PUBLISH_EXECUTIONS,
   REDNOTE_TERMINAL_ATTEMPT_OUTCOMES,
   REDNOTE_TRANSACTION_REQUESTERS,
+  resolveNextActionRead,
   shouldClearActiveAttempt,
+  toRednoteBrowserExecutionPayload,
   workerAttemptMayRemainActive,
 } from '@/lib/rednote-publishing-contract-v1';
+
+const browserPayload = {
+  sourcePostId: 'notion-page-1',
+  title: 'Canonical title',
+  caption: 'Exact final Caption',
+  tags: ['FirstTag', 'SecondTag'],
+  scheduledDate: '2026-08-08T12:00:00-04:00',
+  targetPublishAt: '2026-08-08T16:00:00.000Z',
+  timingMode: 'scheduled',
+  visibility: 'public',
+  publishMode: 'video',
+  mediaAssets: [{
+    assetId: 'asset-video-1',
+    deliveryUrl: 'https://images.xhs.justlikekatie.com/video.mp4',
+    sha256: 'a'.repeat(64),
+    mediaType: 'video',
+    role: 'content',
+  }],
+  coverAsset: {
+    assetId: 'asset-cover-1',
+    deliveryUrl: 'https://images.xhs.justlikekatie.com/cover.jpg',
+    sha256: 'b'.repeat(64),
+    mediaType: 'image',
+    role: 'cover',
+  },
+} as const satisfies FrozenRednoteBrowserPayload;
+
+const frozenAttempt = {
+  contractRevision: 'rednote-publishing/v1',
+  sourceNotionPageId: 'notion-page-1',
+  payloadRevision: 'rednote-browser-payload/v1',
+  payloadDigest: 'c'.repeat(64),
+  requestedAt: '2026-08-07T16:00:00.000Z',
+  executor: {
+    type: 'worker',
+    kind: 'playwright',
+    id: 'xhs-admin-worker',
+  },
+  browserPayload,
+} as const satisfies FrozenRednoteAttemptPayload;
 
 describe('rednote publishing contract v1', () => {
   it('freezes the exact canonical enum values and property names', () => {
@@ -34,6 +81,9 @@ describe('rednote publishing contract v1', () => {
     expect(REDNOTE_TRANSACTION_REQUESTERS).toEqual([
       'create', 'plan', 'admin',
     ]);
+    expect(REDNOTE_EXECUTOR_KINDS).toEqual([
+      'playwright', 'microservice', 'operator',
+    ]);
     expect(REDNOTE_CANONICAL_PROPERTIES.activeAttemptId)
       .toBe('Active XHS attempt ID');
     expect(REDNOTE_CANONICAL_PROPERTIES.platformPublishTime)
@@ -42,21 +92,51 @@ describe('rednote publishing contract v1', () => {
       .not.toContain('Last attempt');
   });
 
-  it('reads legacy receipt aliases but rejects them for canonical writes', () => {
-    expect(readCanonicalNextAction('Backfill metadata')).toBe('Backfill receipt');
-    expect(readCanonicalNextAction('Backfill URL/metrics')).toBe('Backfill receipt');
-    expect(() => assertCanonicalPropertyWrite(
-      REDNOTE_CANONICAL_PROPERTIES.nextAction,
+  it('classifies legacy aliases from receipt and metrics context and rejects new writes', () => {
+    expect(resolveNextActionRead('Backfill metadata', {
+      hasReceiptIdentity: false,
+      metricsComplete: false,
+    })).toEqual({ kind: 'canonical', value: 'Backfill receipt' });
+    expect(resolveNextActionRead('Backfill URL/metrics', {
+      hasReceiptIdentity: true,
+      metricsComplete: false,
+    })).toEqual({ kind: 'canonical', value: 'Backfill metrics' });
+    expect(resolveNextActionRead('Backfill URL/metrics', {
+      hasReceiptIdentity: true,
+      metricsComplete: true,
+    })).toMatchObject({ kind: 'legacy_classification_required' });
+    expect(() => assertCanonicalNextActionWrite(
       'Backfill metadata',
     )).toThrow(/read-only legacy alias/);
-    expect(() => assertCanonicalPropertyWrite(
-      REDNOTE_CANONICAL_PROPERTIES.nextAction,
+    expect(() => assertCanonicalNextActionWrite(
       'Backfill URL\/metrics',
     )).toThrow(/read-only legacy alias/);
-    expect(() => assertCanonicalPropertyWrite(
-      REDNOTE_CANONICAL_PROPERTIES.nextAction,
+    expect(() => assertCanonicalNextActionWrite(
       'No action',
     )).toThrow(/not a canonical Next action/);
+    expect(() => assertCanonicalStatusWrite('Queued'))
+      .toThrow(/not a canonical Status/);
+    expect(() => assertCanonicalPublishExecutionWrite('Retrying'))
+      .toThrow(/not a canonical Publish execution/);
+  });
+
+  it('freezes the exact browser-ready payload without seeds or notes substitution', () => {
+    expect(toRednoteBrowserExecutionPayload(frozenAttempt))
+      .toEqual(browserPayload);
+    expect(toRednoteBrowserExecutionPayload(frozenAttempt).caption)
+      .toBe('Exact final Caption');
+    expect(toRednoteBrowserExecutionPayload(frozenAttempt).mediaAssets)
+      .toEqual(browserPayload.mediaAssets);
+
+    const creativeDraftWithoutCaption = {
+      ...browserPayload,
+      caption: undefined,
+      seeds: ['Seed text'],
+      notes: 'Editorial notes',
+    };
+    // @ts-expect-error Seeds and notes cannot satisfy the required Caption field.
+    const invalidPayload: FrozenRednoteBrowserPayload = creativeDraftWithoutCaption;
+    expect(invalidPayload.caption).toBeUndefined();
   });
 
   it('represents Published identity atomically', () => {
@@ -89,6 +169,15 @@ describe('rednote publishing contract v1', () => {
     })).toBe(false);
     expect(shouldClearActiveAttempt({ operatorSupersession: true })).toBe(true);
     expect(shouldClearActiveAttempt({ receiptCaptured: true })).toBe(true);
+    expect(isAttemptResultCurrent({
+      resultAttemptId: 'attempt-1',
+      activeAttemptId: 'attempt-2',
+    })).toBe(false);
+    expect(isAttemptResultCurrent({
+      resultAttemptId: 'attempt-1',
+      activeAttemptId: 'attempt-1',
+      supersededByAttemptId: 'attempt-2',
+    })).toBe(false);
   });
 
   it('requires intentional retry to use a new attempt ID', () => {

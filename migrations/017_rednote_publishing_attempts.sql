@@ -10,9 +10,15 @@ CREATE TABLE IF NOT EXISTS rednote_publish_attempts (
   payload_digest TEXT NOT NULL CHECK (payload_digest ~ '^[a-f0-9]{64}$'),
   payload_revision TEXT NOT NULL CHECK (char_length(payload_revision) BETWEEN 1 AND 128),
   executor_type TEXT NOT NULL CHECK (executor_type IN ('worker', 'operator')),
+  executor_kind TEXT NOT NULL
+    CHECK (executor_kind IN ('playwright', 'microservice', 'operator')),
   executor_id TEXT NOT NULL CHECK (char_length(executor_id) > 0),
-  worker_run_id TEXT,
-  playwright_run_id TEXT,
+  worker_run_id TEXT CHECK (
+    worker_run_id IS NULL OR char_length(worker_run_id) > 0
+  ),
+  playwright_run_id TEXT CHECK (
+    playwright_run_id IS NULL OR char_length(playwright_run_id) > 0
+  ),
   target_publish_at TIMESTAMP WITH TIME ZONE,
   requested_at TIMESTAMP WITH TIME ZONE NOT NULL,
   created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -35,8 +41,19 @@ CREATE TABLE IF NOT EXISTS rednote_publish_attempts (
     OR (terminal_outcome IS NOT NULL AND terminal_at IS NOT NULL)
   ),
   CONSTRAINT rednote_publish_attempts_worker_identity_check CHECK (
-    (executor_type = 'worker' AND worker_run_id IS NOT NULL)
-    OR (executor_type = 'operator' AND worker_run_id IS NULL)
+    (
+      executor_type = 'worker'
+      AND executor_kind IN ('playwright', 'microservice')
+    )
+    OR (
+      executor_type = 'operator'
+      AND executor_kind = 'operator'
+      AND worker_run_id IS NULL
+      AND playwright_run_id IS NULL
+    )
+  ),
+  CONSTRAINT rednote_publish_attempts_playwright_identity_check CHECK (
+    executor_kind = 'playwright' OR playwright_run_id IS NULL
   ),
   CONSTRAINT rednote_publish_attempts_active_check CHECK (
     NOT active
@@ -122,15 +139,21 @@ BEGIN
      OR NEW.payload_digest IS DISTINCT FROM OLD.payload_digest
      OR NEW.payload_revision IS DISTINCT FROM OLD.payload_revision
      OR NEW.executor_type IS DISTINCT FROM OLD.executor_type
+     OR NEW.executor_kind IS DISTINCT FROM OLD.executor_kind
      OR NEW.executor_id IS DISTINCT FROM OLD.executor_id
-     OR NEW.worker_run_id IS DISTINCT FROM OLD.worker_run_id
-     OR NEW.playwright_run_id IS DISTINCT FROM OLD.playwright_run_id
      OR NEW.target_publish_at IS DISTINCT FROM OLD.target_publish_at
      OR NEW.requested_at IS DISTINCT FROM OLD.requested_at
      OR NEW.created_at IS DISTINCT FROM OLD.created_at
      OR NEW.supersedes_attempt_id IS DISTINCT FROM OLD.supersedes_attempt_id
      OR NEW.diagnostics IS DISTINCT FROM OLD.diagnostics THEN
     RAISE EXCEPTION 'rednote publish attempt immutable fields cannot be changed';
+  END IF;
+
+  IF (OLD.worker_run_id IS NOT NULL
+      AND NEW.worker_run_id IS DISTINCT FROM OLD.worker_run_id)
+     OR (OLD.playwright_run_id IS NOT NULL
+         AND NEW.playwright_run_id IS DISTINCT FROM OLD.playwright_run_id) THEN
+    RAISE EXCEPTION 'rednote publish attempt run identities are immutable once bound';
   END IF;
 
   IF OLD.terminal_outcome IS NOT NULL
