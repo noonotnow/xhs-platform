@@ -151,6 +151,18 @@ function mapRow(row: LocalPublishJobRow): StoredLocalPublishJob {
   };
 }
 
+export async function getStoredLocalPublishJob(
+  id: string,
+): Promise<StoredLocalPublishJob | null> {
+  const result = await sql<LocalPublishJobRow>`
+    SELECT *
+    FROM local_publish_jobs
+    WHERE id = ${id}::uuid
+    LIMIT 1
+  `;
+  return result.rows[0] ? mapRow(result.rows[0]) : null;
+}
+
 export function jobSummary(job: StoredLocalPublishJob): LocalPublishJobSummary {
   return {
     id: job.id,

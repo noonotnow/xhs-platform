@@ -73,6 +73,8 @@ in Vercel:
 | `NOTION_API_KEY` | Server-only Notion integration token with read/write access to the canonical Posts DB |
 | `NOTION_POSTS_DB_ID` | Canonical Posts database ID shared with the production CREATE workflow |
 | `PLAN_INTEGRATION_TOKEN` | At least 32 random characters shared only with PLAN for page-level operator-scheduled execution state |
+| `CREATE_INTEGRATION_TOKEN` | At least 32 random characters shared only with CREATE for additive Rednote attempt creation |
+| `REDNOTE_PUBLISHING_CONTROL_PLANE_REVISION` | Disabled-by-default Phase 2 capability gate; starting an attempt requires the exact value `rednote-publishing/v1` |
 | `LOCAL_PUBLISH_WORKER_TOKEN` | At least 32 random characters shared only with the trusted Mac-local browser worker |
 | `LOCAL_PUBLISH_JOB_LEASE_SECONDS` | Optional worker claim lease; defaults to 7200 seconds and is clamped to 60–86400 |
 | `LOCAL_PUBLISH_VERIFICATION_BACKOFF_SECONDS` | Optional four-value retry schedule; defaults to `900,3600,21600,86400` seconds (15m, 1h, 6h, 24h) |
@@ -170,6 +172,46 @@ PLAN can read the durable state with
 `GET /api/integrations/plan/operator-scheduled?notionPageId=<id>` using the same
 bearer token. After the existing public-URL verification path reconciles the
 post, this read returns `execution.state = "reconciled"` and `reconciledAt`.
+
+### Additive Rednote publishing control plane
+
+Apply migrations 017 and 018 in order. The Phase 2 transaction APIs are
+disabled unless `REDNOTE_PUBLISHING_CONTROL_PLANE_REVISION` exactly equals
+`rednote-publishing/v1`. Enabling the gate does not redirect CREATE, PLAN, the
+local worker, Playwright, or the microservice; existing writers remain
+unchanged until a separately reviewed cutover.
+
+CREATE, PLAN, and Admin create immutable attempt snapshots at
+`POST /api/integrations/create/rednote-publishing/attempts`,
+`POST /api/integrations/plan/rednote-publishing/attempts`, and
+`POST /admin/api/rednote-publishing/attempts`. Integration calls use their
+dedicated bearer token, and every creation or operator transfer requires a UUID
+`Idempotency-Key`. Exact replay returns the committed result; conflicting key
+reuse returns 409.
+
+Future-worker callbacks use
+`/api/rednote-publishing/attempts/[id]/{claim,events,outcome,receipt-lookup,receipt}`
+with `LOCAL_PUBLISH_WORKER_TOKEN`. After claim, every worker callback must also
+send the bound `X-Rednote-Worker-Run-Id`; Playwright attempts must send the bound
+`X-Rednote-Playwright-Run-Id`. Missing or mismatched callback identities fail
+closed. Admin has read, event, outcome, receipt lookup/capture, supersession,
+operator-transfer, and mutation-reconciliation endpoints under
+`/admin/api/rednote-publishing`. Admin identity always comes from Cloudflare
+Access.
+
+PostgreSQL records immutable attempts, evidence, receipts, and durable Posts
+mutation intents. Notion projection is compare-write-verify, not a distributed
+transaction. A mismatch is quarantined; reconciliation retries only Posts
+metadata and never republishes, requeues, or creates an automatic retry.
+Receipt lookup `found` is evidence only. Only verified receipt capture can
+project `Published / Backfill metrics` with the URL, Note ID, and platform
+publish time. Receipt-pending ownership blocks only a competing execution
+owner, never editorial correction or authenticated operator transfer.
+
+Disabling the gate stops new creation, claim, and supersession while preserving
+attempt reads, evidence and outcome settlement, receipt settlement, and
+projection reconciliation. No Phase 2 route writes Connect Hub, captures
+metrics, marks `Reconciled`, or clears a cross-platform pipeline.
 
 ### Mac-local publishing for CREATE packets
 
