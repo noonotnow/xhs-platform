@@ -178,6 +178,7 @@ BEGIN
       AND terminal_outcome = 'accepted'
       AND receipt_lookup_state = 'found'
       AND NOT active
+      AND superseded_by_attempt_id IS NULL
   ) THEN
     RAISE EXCEPTION 'receipt capture requires an accepted inactive attempt in found state';
   END IF;

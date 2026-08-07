@@ -27,6 +27,24 @@ const workerAttempt = (id: string, pageId: string, active = true) => `
   );
 `;
 
+const operatorAttempt = (
+  id: string,
+  pageId: string,
+  supersedesAttemptId: string,
+) => `
+  INSERT INTO rednote_publish_attempts (
+    id, contract_revision, source_notion_page_id, frozen_payload,
+    payload_digest, payload_revision, executor_type, executor_id,
+    target_publish_at, requested_at, active, supersedes_attempt_id,
+    receipt_lookup_state
+  ) VALUES (
+    '${id}', 'rednote-publishing/v1', '${pageId}', '{}'::jsonb,
+    '${'b'.repeat(64)}', 'post-snapshot/v1', 'operator', 'operator-1',
+    '2026-08-09T16:00:00Z', '2026-08-08T16:00:00Z', FALSE,
+    '${supersedesAttemptId}', 'not_required'
+  );
+`;
+
 describe('rednote publishing attempt migration', () => {
   it('is additive and declares immutable shadow tables without data backfill', () => {
     const migration = readFileSync(
@@ -90,7 +108,7 @@ describe('rednote publishing attempt migration', () => {
     }
   });
 
-  it('keeps requested intent separate from immutable receipt reality', async () => {
+  it('captures an accepted receipt while keeping requested intent separate from platform reality', async () => {
     const db = await migratedDatabase();
     try {
       await db.exec(workerAttempt(
@@ -138,13 +156,12 @@ describe('rednote publishing attempt migration', () => {
     }
   });
 
-  it('requires receipt URL and Note ID together', async () => {
+  it('records known_failed only with a cleared active pointer and no receipt work', async () => {
     const db = await migratedDatabase();
     try {
       await db.exec(workerAttempt(
         '44444444-4444-4444-8444-444444444444',
         'page-3',
-        false,
       ));
       await expect(db.exec(`
         INSERT INTO rednote_publish_attempt_receipts (
@@ -155,12 +172,103 @@ describe('rednote publishing attempt migration', () => {
           CURRENT_TIMESTAMP, '{}'::jsonb
         );
       `)).rejects.toThrow();
-      await expect(db.exec(`
+      await db.exec(`
         UPDATE rednote_publish_attempts
         SET terminal_outcome = 'known_failed',
             terminal_at = CURRENT_TIMESTAMP,
+            receipt_lookup_state = 'not_required',
+            receipt_lookup_updated_at = CURRENT_TIMESTAMP,
             active = FALSE
         WHERE id = '44444444-4444-4444-8444-444444444444';
+      `);
+      const result = await db.query<{
+        terminal_outcome: string;
+        receipt_lookup_state: string;
+        active: boolean;
+      }>(`
+        SELECT terminal_outcome, receipt_lookup_state, active
+        FROM rednote_publish_attempts
+        WHERE id = '44444444-4444-4444-8444-444444444444'
+      `);
+      expect(result.rows[0]).toMatchObject({
+        terminal_outcome: 'known_failed',
+        receipt_lookup_state: 'not_required',
+        active: false,
+      });
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('preserves outcome_unknown evidence through operator supersession and rejects stale results', async () => {
+    const db = await migratedDatabase();
+    const workerId = '55555555-5555-4555-8555-555555555555';
+    const operatorId = '66666666-6666-4666-8666-666666666666';
+    try {
+      await db.exec(workerAttempt(workerId, 'page-4'));
+      await db.exec(operatorAttempt(operatorId, 'page-4', workerId));
+      await db.exec(`
+        UPDATE rednote_publish_attempts
+        SET terminal_outcome = 'outcome_unknown',
+            terminal_at = CURRENT_TIMESTAMP,
+            receipt_lookup_state = 'not_required',
+            receipt_lookup_updated_at = CURRENT_TIMESTAMP,
+            active = FALSE,
+            superseded_by_attempt_id = '${operatorId}'
+        WHERE id = '${workerId}';
+        INSERT INTO rednote_publish_attempt_events (
+          attempt_id, event_type, occurred_at, actor_type, actor_id, evidence
+        ) VALUES (
+          '${workerId}', 'superseded', CURRENT_TIMESTAMP, 'operator', 'operator-1',
+          '[{"kind":"operator_supersession","reference":"${operatorId}"}]'::jsonb
+        );
+      `);
+      const attempts = await db.query<{
+        id: string;
+        terminal_outcome: string | null;
+        active: boolean;
+      }>(`
+        SELECT id, terminal_outcome, active
+        FROM rednote_publish_attempts
+        WHERE source_notion_page_id = 'page-4'
+        ORDER BY requested_at
+      `);
+      expect(attempts.rows).toEqual([
+        { id: workerId, terminal_outcome: 'outcome_unknown', active: false },
+        { id: operatorId, terminal_outcome: null, active: false },
+      ]);
+      await expect(db.exec(`
+        UPDATE rednote_publish_attempts
+        SET terminal_outcome = 'accepted'
+        WHERE id = '${workerId}';
+      `)).rejects.toThrow(/terminal outcome is immutable/);
+      const events = await db.query<{ event_type: string }>(`
+        SELECT event_type
+        FROM rednote_publish_attempt_events
+        WHERE attempt_id = '${workerId}'
+      `);
+      expect(events.rows).toEqual([{ event_type: 'superseded' }]);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('requires receipt URL and Note ID together', async () => {
+    const db = await migratedDatabase();
+    try {
+      await db.exec(workerAttempt(
+        '77777777-7777-4777-8777-777777777777',
+        'page-5',
+        false,
+      ));
+      await expect(db.exec(`
+        INSERT INTO rednote_publish_attempt_receipts (
+          attempt_id, rednote_url, platform_publish_time, provenance
+        ) VALUES (
+          '77777777-7777-4777-8777-777777777777',
+          'https://www.rednote.com/explore/note-5',
+          CURRENT_TIMESTAMP, '{}'::jsonb
+        );
       `)).rejects.toThrow();
     } finally {
       await db.close();
