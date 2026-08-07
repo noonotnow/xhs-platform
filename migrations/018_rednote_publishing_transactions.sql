@@ -2,12 +2,33 @@ ALTER TABLE rednote_publish_attempts
   ADD COLUMN IF NOT EXISTS source_post_revision TEXT NOT NULL
     CHECK (char_length(source_post_revision) BETWEEN 1 AND 128),
   ADD COLUMN IF NOT EXISTS activated_at TIMESTAMP WITH TIME ZONE,
+  ADD COLUMN IF NOT EXISTS claim_source_status TEXT,
+  ADD COLUMN IF NOT EXISTS claim_source_post_revision TEXT,
+  ADD COLUMN IF NOT EXISTS claim_packet_authorized_at TIMESTAMP WITH TIME ZONE,
   ADD COLUMN IF NOT EXISTS operator_resolution_started_at TIMESTAMP WITH TIME ZONE,
   ADD COLUMN IF NOT EXISTS operator_resolution_completed_at TIMESTAMP WITH TIME ZONE;
 
 ALTER TABLE rednote_publish_attempts
   ADD CONSTRAINT rednote_publish_attempts_payload_revision_v1_check
     CHECK (payload_revision = 'rednote-browser-payload/v1'),
+  ADD CONSTRAINT rednote_publish_attempts_claim_source_check CHECK (
+    (
+      activated_at IS NULL
+      AND NOT active
+      AND claim_source_status IS NULL
+      AND claim_source_post_revision IS NULL
+      AND claim_packet_authorized_at IS NULL
+    )
+    OR (
+      executor_type = 'worker'
+      AND activated_at IS NOT NULL
+      AND claim_source_status IS NOT NULL
+      AND claim_source_status = 'Ready'
+      AND claim_source_post_revision IS NOT NULL
+      AND claim_source_post_revision IS NOT DISTINCT FROM source_post_revision
+      AND claim_packet_authorized_at IS NOT NULL
+    )
+  ),
   ADD CONSTRAINT rednote_publish_attempts_operator_resolution_check CHECK (
     (
       operator_resolution_started_at IS NULL
@@ -15,6 +36,7 @@ ALTER TABLE rednote_publish_attempts
     )
     OR (
       executor_type = 'operator'
+      AND terminal_outcome IS NOT NULL
       AND terminal_outcome = 'accepted'
       AND NOT active
       AND operator_resolution_started_at IS NOT NULL
@@ -24,6 +46,14 @@ ALTER TABLE rednote_publish_attempts
       )
     )
   );
+
+ALTER TABLE rednote_publish_attempts
+  DROP CONSTRAINT IF EXISTS rednote_publish_attempts_superseded_by_attempt_id_fkey,
+  ADD CONSTRAINT rednote_publish_attempts_superseded_by_attempt_id_fkey
+    FOREIGN KEY (superseded_by_attempt_id)
+    REFERENCES rednote_publish_attempts(id)
+    ON DELETE RESTRICT
+    DEFERRABLE INITIALLY DEFERRED;
 
 CREATE UNIQUE INDEX IF NOT EXISTS rednote_publish_attempts_operator_resolution_idx
   ON rednote_publish_attempts (source_notion_page_id)
@@ -51,6 +81,25 @@ CREATE TABLE IF NOT EXISTS rednote_publish_post_mutations (
     'operator_supersession', 'receipt_capture'
   )),
   expected_active_attempt_id TEXT,
+  expected_source_post_revision TEXT,
+  expected_status TEXT CHECK (
+    expected_status IS NULL
+    OR expected_status IN ('Not started', 'Draft', 'In progress', 'Ready', 'Published')
+  ),
+  expected_next_action TEXT CHECK (
+    expected_next_action IS NULL
+    OR expected_next_action IN (
+      'Develop packet', 'Ready for publication', 'Resolve attempt',
+      'Backfill receipt', 'Backfill metrics', 'Reconciled', 'Blocked'
+    )
+  ),
+  expected_publish_execution TEXT CHECK (
+    expected_publish_execution IS NULL
+    OR expected_publish_execution IN (
+      'Not attempted', 'Worker claimed', 'Worker batched',
+      'Worker batch failed', 'Operator scheduled'
+    )
+  ),
   desired_active_attempt_id TEXT,
   desired_status TEXT CHECK (
     desired_status IS NULL
@@ -112,6 +161,16 @@ BEGIN
      OR NEW.contract_revision IS DISTINCT FROM OLD.contract_revision
      OR NEW.source_notion_page_id IS DISTINCT FROM OLD.source_notion_page_id
      OR NEW.source_post_revision IS DISTINCT FROM OLD.source_post_revision
+     OR (
+       OLD.activated_at IS NOT NULL
+       AND (
+         NEW.claim_source_status IS DISTINCT FROM OLD.claim_source_status
+         OR NEW.claim_source_post_revision
+           IS DISTINCT FROM OLD.claim_source_post_revision
+         OR NEW.claim_packet_authorized_at
+           IS DISTINCT FROM OLD.claim_packet_authorized_at
+       )
+     )
      OR NEW.source_local_publish_job_id IS DISTINCT FROM OLD.source_local_publish_job_id
      OR NEW.frozen_payload IS DISTINCT FROM OLD.frozen_payload
      OR NEW.payload_digest IS DISTINCT FROM OLD.payload_digest
@@ -161,6 +220,9 @@ BEGIN
   IF NOT OLD.active AND NEW.active THEN
     IF OLD.activated_at IS NOT NULL
        OR NEW.activated_at IS NULL
+       OR NEW.claim_source_status <> 'Ready'
+       OR NEW.claim_source_post_revision <> OLD.source_post_revision
+       OR NEW.claim_packet_authorized_at IS NULL
        OR NEW.executor_type <> 'worker'
        OR NEW.terminal_outcome IS NOT NULL
        OR NEW.superseded_by_attempt_id IS NOT NULL THEN
@@ -208,6 +270,12 @@ BEGIN
      OR NEW.source_notion_page_id IS DISTINCT FROM OLD.source_notion_page_id
      OR NEW.mutation_kind IS DISTINCT FROM OLD.mutation_kind
      OR NEW.expected_active_attempt_id IS DISTINCT FROM OLD.expected_active_attempt_id
+     OR NEW.expected_source_post_revision
+       IS DISTINCT FROM OLD.expected_source_post_revision
+     OR NEW.expected_status IS DISTINCT FROM OLD.expected_status
+     OR NEW.expected_next_action IS DISTINCT FROM OLD.expected_next_action
+     OR NEW.expected_publish_execution
+       IS DISTINCT FROM OLD.expected_publish_execution
      OR NEW.desired_active_attempt_id IS DISTINCT FROM OLD.desired_active_attempt_id
      OR NEW.desired_status IS DISTINCT FROM OLD.desired_status
      OR NEW.desired_next_action IS DISTINCT FROM OLD.desired_next_action

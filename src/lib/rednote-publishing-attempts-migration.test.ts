@@ -19,12 +19,17 @@ const workerAttempt = (id: string, pageId: string, active = true) => `
   INSERT INTO rednote_publish_attempts (
     id, contract_revision, source_notion_page_id, source_post_revision, frozen_payload,
     payload_digest, payload_revision, executor_type, executor_kind, executor_id,
-    target_publish_at, requested_at, active
+    target_publish_at, requested_at, active, activated_at, claim_source_status,
+    claim_source_post_revision, claim_packet_authorized_at
   ) VALUES (
     '${id}', 'rednote-publishing/v1', '${pageId}', '2026-08-07T15:00:00.000Z',
     '{}'::jsonb, '${'a'.repeat(64)}', 'rednote-browser-payload/v1',
     'worker', 'playwright', 'worker-1',
-    '2026-08-08T16:00:00Z', '2026-08-07T16:00:00Z', ${active}
+    '2026-08-08T16:00:00Z', '2026-08-07T16:00:00Z', ${active},
+    ${active ? "'2026-08-07T16:05:00Z'" : 'NULL'},
+    ${active ? "'Ready'" : 'NULL'},
+    ${active ? "'2026-08-07T15:00:00.000Z'" : 'NULL'},
+    ${active ? "'2026-08-07T16:05:00Z'" : 'NULL'}
   );
 `;
 
@@ -325,9 +330,18 @@ describe('rednote publishing attempt migration', () => {
     const operatorId = '99999999-9999-4999-8999-999999999999';
     try {
       await db.exec(workerAttempt(workerId, 'page-6', false));
-      await db.exec(`
+      await expect(db.exec(`
         UPDATE rednote_publish_attempts
         SET active = TRUE, activated_at = CURRENT_TIMESTAMP
+        WHERE id = '${workerId}';
+      `)).rejects.toThrow();
+      await db.exec(`
+        UPDATE rednote_publish_attempts
+        SET active = TRUE,
+            activated_at = CURRENT_TIMESTAMP,
+            claim_source_status = 'Ready',
+            claim_source_post_revision = source_post_revision,
+            claim_packet_authorized_at = CURRENT_TIMESTAMP
         WHERE id = '${workerId}';
         INSERT INTO rednote_publish_attempts (
           id, contract_revision, source_notion_page_id, source_post_revision,
