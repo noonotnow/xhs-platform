@@ -86,6 +86,7 @@ describe('manual reconciliation persistence', () => {
       .mockResolvedValueOnce({ rows: [queuedJob] })
       .mockResolvedValueOnce({ rows: [row('queued')] })
       .mockResolvedValueOnce({ rows: [{ id: queuedJob.id }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [] });
     await expect(insertManualReconciliation({
       notionPageId: row('queued').notion_page_id,
@@ -103,8 +104,53 @@ describe('manual reconciliation persistence', () => {
     expect(mocks.query.mock.calls[1][0]).toContain('pg_advisory_xact_lock');
     expect(mocks.query.mock.calls[4][0]).toContain("status = 'failed'");
     expect(mocks.query.mock.calls[4][0]).toContain('MANUAL_PUBLICATION_ATTESTED');
+    expect(mocks.query.mock.calls[5][0]).toContain("SET state = 'failed'");
     expect(mocks.query.mock.calls.flatMap((call) => call[0])).not.toContain('DELETE');
     expect(mocks.release).toHaveBeenCalledOnce();
+  });
+
+  it('atomically releases an expired ambiguous claim into operator reconciliation', async () => {
+    const expiredJob = {
+      id: row('queued').source_local_job_id,
+      status: 'staged',
+      claim_token: '55555555-5555-4555-8555-555555555555',
+      claimed_at: '2026-08-03T12:00:00.000Z',
+      claim_expires_at: '2026-08-03T12:30:00.000Z',
+      staged_at: '2026-08-03T12:05:00.000Z',
+      dispatch_authorized_at: '2026-08-03T12:06:00.000Z',
+      dispatched_at: null,
+      note_id: null,
+      share_url: null,
+      verified_at: null,
+      reconciled_at: null,
+      success_attestation_id: null,
+      external_disposition_request_id: null,
+    };
+    mocks.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [expiredJob] })
+      .mockResolvedValueOnce({ rows: [row('queued')] })
+      .mockResolvedValueOnce({ rows: [{ id: expiredJob.id }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await expect(insertManualReconciliation({
+      notionPageId: row('queued').notion_page_id,
+      noteId: 'note_123',
+      shareUrl: 'https://www.rednote.com/explore/note_123',
+      expected,
+      idempotencyKey: row('queued').idempotency_key,
+    })).resolves.toMatchObject({
+      created: true,
+      request: { sourceLocalJobId: expiredJob.id },
+    });
+
+    const closeQuery = String(mocks.query.mock.calls[4][0]);
+    expect(closeQuery).toContain('claim_token = NULL');
+    expect(closeQuery).toContain('PUBLISH_ATTEMPT_OUTCOME_UNKNOWN');
+    expect(closeQuery).toContain("status IN ('claimed', 'staged')");
+    expect(String(mocks.query.mock.calls[5][0])).toContain("SET state = 'failed'");
   });
 
   it('does not supersede a claimed worker lifecycle with manual publication truth', async () => {
@@ -116,6 +162,7 @@ describe('manual reconciliation persistence', () => {
         status: 'claimed',
         claim_token: '55555555-5555-4555-8555-555555555555',
         claimed_at: '2026-08-03T12:00:00.000Z',
+        claim_expires_at: '2099-08-03T12:30:00.000Z',
         staged_at: null,
         dispatch_authorized_at: null,
         dispatched_at: null,

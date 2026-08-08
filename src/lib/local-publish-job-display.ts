@@ -19,7 +19,6 @@ export function hasLiveUnsafeAutomationOwnership(
   if (
     job.noteId
     || job.shareUrl
-    || job.dispatchAuthorizedAt
     || job.dispatchedAt
     || job.verifiedAt
     || job.reconciledAt
@@ -39,6 +38,21 @@ export function hasLiveUnsafeAutomationOwnership(
     );
   }
   return false;
+}
+
+export function hasExpiredPublishClaim(
+  job: LocalPublishJobSummary | undefined,
+  now = Date.now(),
+) {
+  return Boolean(
+    job
+    && (job.status === 'claimed' || job.status === 'staged')
+    && job.claimExpiresAt
+    && new Date(job.claimExpiresAt).getTime() <= now
+    && !job.dispatchedAt
+    && !job.noteId
+    && !job.shareUrl,
+  );
 }
 
 export function displayedLocalPublishJob(

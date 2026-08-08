@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   directManualSchedulingCandidate,
   displayedLocalPublishJob,
+  hasExpiredPublishClaim,
   hasLiveUnsafeAutomationOwnership,
   isActiveLocalPublishJob,
   publicationOperationalTruth,
@@ -58,6 +59,16 @@ describe('local publish job display selection', () => {
       ...job('authorized', 'staged'),
       claimExpiresAt: '2026-01-01T00:00:00.000Z',
       dispatchAuthorizedAt: '2026-01-01T00:00:00.000Z',
+    }, Date.parse('2026-08-06T12:00:00.000Z'))).toBe(false);
+    expect(hasExpiredPublishClaim({
+      ...job('authorized', 'staged'),
+      claimExpiresAt: '2026-01-01T00:00:00.000Z',
+      dispatchAuthorizedAt: '2026-01-01T00:00:00.000Z',
+    }, Date.parse('2026-08-06T12:00:00.000Z'))).toBe(true);
+    expect(hasLiveUnsafeAutomationOwnership({
+      ...job('live-authorized', 'staged'),
+      claimExpiresAt: '2026-08-06T13:00:00.000Z',
+      dispatchAuthorizedAt: '2026-08-06T12:00:00.000Z',
     }, Date.parse('2026-08-06T12:00:00.000Z'))).toBe(true);
   });
 

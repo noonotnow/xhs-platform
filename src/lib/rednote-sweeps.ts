@@ -4,6 +4,7 @@ import {
   createPublishBatch,
   dueSweepKinds,
 } from '@/lib/rednote-publish-batches';
+import { releaseExpiredStoredLocalPublishClaims } from '@/lib/local-publish-job-store';
 
 function localDate(now: Date) {
   return new Intl.DateTimeFormat('en-CA', {
@@ -56,6 +57,7 @@ async function recoverKnownReceipts() {
 
 export async function runDueRednoteSweeps(now = new Date()) {
   const results = [];
+  const releasedClaims = await releaseExpiredStoredLocalPublishClaims();
   for (const cadence of dueSweepKinds(now)) {
     const inserted = await sql<{ id: string }>`
       INSERT INTO rednote_sweep_runs (cadence, local_date)
@@ -80,7 +82,7 @@ export async function runDueRednoteSweeps(now = new Date()) {
             batch_id = ${batch?.id ?? null}::uuid
         WHERE id = ${runId}::uuid
       `;
-      results.push({ cadence, batch, recoveredReceipts });
+      results.push({ cadence, batch, recoveredReceipts, releasedClaims });
     } catch (error) {
       await sql`
         DELETE FROM rednote_sweep_runs

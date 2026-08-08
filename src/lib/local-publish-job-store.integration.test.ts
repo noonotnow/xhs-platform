@@ -28,6 +28,7 @@ import {
   deferStoredLocalPublishVerification,
   deferStoredOperatorAttestedVerification,
   listLocalPublishJobs,
+  releaseExpiredStoredLocalPublishClaims,
 } from '@/lib/local-publish-job-store';
 
 const scheduledJobId = '11111111-1111-4111-8111-111111111111';
@@ -222,7 +223,8 @@ describe('local publish job PostgreSQL execution', () => {
          item_hash text NOT NULL,
          state text NOT NULL,
          dispatch_mode text NOT NULL,
-         local_publish_job_id uuid
+         local_publish_job_id uuid,
+         updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
       CREATE TABLE manual_reconciliation_requests (
         request_kind text NOT NULL,
@@ -269,6 +271,7 @@ describe('local publish job PostgreSQL execution', () => {
       noteId: 'note_older',
       shareUrl: 'https://www.rednote.com/explore/note_older',
     });
+
     await insertJob({
       id: attestedJobId,
       status: 'operator_attested',
@@ -338,6 +341,55 @@ describe('local publish job PostgreSQL execution', () => {
       { id: scheduledJobId, claim_attempts: 0, claim_token: null },
       expect.objectContaining({ id: attestedJobId, claim_attempts: 1 }),
     ]);
+  });
+
+  it('terminalizes an expired claim and its linked batch item in one statement', async () => {
+    await insertAttestedBatchAuthorization({ state: 'claimed' });
+    await insertJob({
+      id: scheduledJobId,
+      status: 'claimed',
+      dueOffset: '-1 day',
+      claimed: true,
+      batchItemId,
+    });
+    await database.query(
+      `UPDATE local_publish_jobs
+       SET claim_expires_at = CURRENT_TIMESTAMP - INTERVAL '1 minute'
+       WHERE id = $1::uuid`,
+      [scheduledJobId],
+    );
+    await database.query(
+      `UPDATE rednote_publish_batch_items
+       SET local_publish_job_id = $1::uuid
+       WHERE id = $2::uuid`,
+      [scheduledJobId, batchItemId],
+    );
+
+    await expect(releaseExpiredStoredLocalPublishClaims())
+      .resolves.toEqual([scheduledJobId]);
+
+    await expect(database.query<{
+      status: string;
+      claim_token: string | null;
+      error_code: string;
+    }>(
+      `SELECT status, claim_token, error_code
+       FROM local_publish_jobs
+       WHERE id = $1::uuid`,
+      [scheduledJobId],
+    )).resolves.toMatchObject({
+      rows: [{
+        status: 'failed',
+        claim_token: null,
+        error_code: 'CLAIM_LEASE_EXPIRED',
+      }],
+    });
+    await expect(database.query<{ state: string }>(
+      `SELECT state
+       FROM rednote_publish_batch_items
+       WHERE id = $1::uuid`,
+      [batchItemId],
+    )).resolves.toMatchObject({ rows: [{ state: 'failed' }] });
   });
 
   it('rejects a targeted attested release with missing authorization without fallback', async () => {
