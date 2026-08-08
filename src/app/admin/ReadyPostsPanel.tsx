@@ -39,6 +39,7 @@ import { isMovCompatibilityTrialEligible } from '@/lib/mov-compatibility-trial';
 import {
   directManualSchedulingCandidate,
   displayedLocalPublishJob,
+  hasExpiredPublishClaim,
   hasLiveUnsafeAutomationOwnership,
   isActiveLocalPublishJob,
   publicationOperationalTruth,
@@ -166,21 +167,29 @@ function jobStatusCopy(
   }
 
   if (job.status === 'claimed') {
+    const expired = hasExpiredPublishClaim(job);
     return {
-      tone: movTrial ? 'warning' : 'pending',
-      title: movTrial
+      tone: expired || movTrial ? 'warning' : 'pending',
+      title: expired
+        ? 'Worker lease expired · reconciliation only'
+        : movTrial
         ? 'Unverified MOV staging trial claimed'
         : 'Claimed by the Mac worker',
-      detail: movTrial
+      detail: expired
+        ? 'The frozen attempt will not be dispatched again. Worker failed is now Katie-owned report truth.'
+        : movTrial
         ? 'Creator staging or human review is in progress. Publishing still requires the exact job approval.'
         : 'Browser staging or human review is in progress. This post is not published yet.',
     };
   }
   if (job.status === 'staged') {
+    const expired = hasExpiredPublishClaim(job);
     return {
-      tone: 'pending',
-      title: 'Staged in RedNote Creator',
-      detail: 'The packet is staged but has not been submitted. A definitive staging error may still fail safely.',
+      tone: expired ? 'warning' : 'pending',
+      title: expired ? 'Staging lease expired · reconciliation only' : 'Staged in RedNote Creator',
+      detail: expired
+        ? 'Automatic dispatch is permanently closed. Worker failed is now Katie-owned report truth.'
+        : 'The packet is staged but has not been submitted. A definitive staging error may still fail safely.',
     };
   }
   if (job.status === 'submitted' || job.status === 'scheduled') {

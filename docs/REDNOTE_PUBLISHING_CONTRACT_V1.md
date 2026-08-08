@@ -28,6 +28,13 @@ active worker-originated attempt per Notion Post. A single
 Receipts require URL, Note ID, confirmed platform publish time, and provenance;
 requested/target time remains separate intent.
 
+A worker claim is a bounded lease for one immutable attempt, not durable
+ownership of the live CREATE record. Expired pre-receipt claims are terminalized
+and released; they are never claimed again for dispatch. If dispatch
+authorization makes the outcome ambiguous, automatic publishing remains
+permanently closed while operator handling and public-post reconciliation remain
+available.
+
 No legacy rows are classified or copied by this migration. A later backfill must
 leave ambiguous outcomes unknown and quarantine them for review rather than
 turning historical failures into successes or retries. Human/operator

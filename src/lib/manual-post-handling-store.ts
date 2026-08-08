@@ -93,11 +93,8 @@ function hasLiveUnsafeOwnership(job: LocalOwnershipRow, now: number) {
   }
   if (job.status === 'staged') {
     return Boolean(
-      job.dispatch_authorized_at
-      || (
-        job.claim_expires_at
-        && new Date(job.claim_expires_at).getTime() > now
-      ),
+      job.claim_expires_at
+      && new Date(job.claim_expires_at).getTime() > now,
     );
   }
   if (job.status === 'claimed') {
@@ -279,6 +276,7 @@ export async function insertManualPostHandling(input: {
     await client.query(
       `UPDATE local_publish_jobs
        SET status = 'failed',
+          claim_token = NULL,
           error_code = $2,
           error_message = $3,
            claim_expires_at = CURRENT_TIMESTAMP,

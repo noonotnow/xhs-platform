@@ -173,6 +173,7 @@ export async function insertManualReconciliation(input: {
       status: string;
       claim_token: string | null;
       claimed_at: Date | string | null;
+      claim_expires_at: Date | string | null;
       staged_at: Date | string | null;
       dispatch_authorized_at: Date | string | null;
       dispatched_at: Date | string | null;
@@ -183,7 +184,7 @@ export async function insertManualReconciliation(input: {
       success_attestation_id: string | null;
       external_disposition_request_id: string | null;
     }>(
-      `SELECT id, status, claim_token, claimed_at, staged_at,
+      `SELECT id, status, claim_token, claimed_at, claim_expires_at, staged_at,
               dispatch_authorized_at, dispatched_at, note_id, share_url,
               verified_at, reconciled_at, success_attestation_id,
               external_disposition_request_id
@@ -217,7 +218,18 @@ export async function insertManualReconciliation(input: {
         !source.reconciled_at &&
         !source.success_attestation_id &&
         !source.external_disposition_request_id;
-      if (!pristineQueued) {
+      const expiredAttempt =
+        ['claimed', 'staged'].includes(source.status) &&
+        Boolean(source.claim_expires_at) &&
+        new Date(source.claim_expires_at!).getTime() <= Date.now() &&
+        !source.dispatched_at &&
+        !source.note_id &&
+        !source.share_url &&
+        !source.verified_at &&
+        !source.reconciled_at &&
+        !source.success_attestation_id &&
+        !source.external_disposition_request_id;
+      if (!pristineQueued && !expiredAttempt) {
         throw new LocalPublishJobError(
           'A worker already owns or advanced this local publish job',
           'ACTIVE_JOB_EXISTS',
@@ -242,20 +254,42 @@ export async function insertManualReconciliation(input: {
       ],
     );
     if (inserted.rows[0]) {
-      if (source?.status === 'queued') {
+      if (
+        source?.status === 'queued' ||
+        source?.status === 'claimed' ||
+        source?.status === 'staged'
+      ) {
         const stopped = await client.query(
           `UPDATE local_publish_jobs
            SET status = 'failed',
-               error_code = 'MANUAL_PUBLICATION_ATTESTED',
-               error_message = 'Operator reported an existing public post; dispatch is closed pending verification',
-               completed_at = CURRENT_TIMESTAMP,
-               updated_at = CURRENT_TIMESTAMP
+              claim_token = NULL,
+              claim_expires_at = CURRENT_TIMESTAMP,
+              error_code = CASE
+                WHEN dispatch_authorized_at IS NOT NULL
+                  THEN 'PUBLISH_ATTEMPT_OUTCOME_UNKNOWN'
+                ELSE 'MANUAL_PUBLICATION_ATTESTED'
+              END,
+              error_message = CASE
+                WHEN dispatch_authorized_at IS NOT NULL
+                  THEN 'Operator reported an existing public post after the publish lease expired; automatic dispatch is permanently closed pending reconciliation'
+                ELSE 'Operator reported an existing public post; dispatch is closed pending verification'
+              END,
+              completed_at = CURRENT_TIMESTAMP,
+              updated_at = CURRENT_TIMESTAMP
            WHERE id = $1::uuid
-             AND status = 'queued'
-             AND claim_token IS NULL
-             AND claimed_at IS NULL
-             AND staged_at IS NULL
-             AND dispatch_authorized_at IS NULL
+             AND (
+               (
+                 status = 'queued'
+                 AND claim_token IS NULL
+                 AND claimed_at IS NULL
+                 AND staged_at IS NULL
+                 AND dispatch_authorized_at IS NULL
+               )
+               OR (
+                 status IN ('claimed', 'staged')
+                 AND claim_expires_at <= CURRENT_TIMESTAMP
+               )
+             )
              AND dispatched_at IS NULL
              AND note_id IS NULL
              AND share_url IS NULL
@@ -273,6 +307,14 @@ export async function insertManualReconciliation(input: {
             409,
           );
         }
+        await client.query(
+          `UPDATE rednote_publish_batch_items
+           SET state = 'failed',
+               updated_at = CURRENT_TIMESTAMP
+           WHERE local_publish_job_id = $1::uuid
+             AND state IN ('queued', 'claimed', 'staged')`,
+          [source.id],
+        );
       }
       await client.query('COMMIT');
       return { request: mapRow(inserted.rows[0]), created: true };

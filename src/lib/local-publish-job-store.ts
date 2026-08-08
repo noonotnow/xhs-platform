@@ -367,15 +367,7 @@ export async function claimNextStoredLocalPublishJob(
       WHERE (
         (
           ${lane} IN ('all', 'dispatch')
-          AND (
-            status = 'queued'
-            OR (status = 'claimed' AND claim_expires_at <= CURRENT_TIMESTAMP)
-            OR (
-              status = 'staged'
-              AND dispatch_authorized_at IS NULL
-              AND claim_expires_at <= CURRENT_TIMESTAMP
-            )
-          )
+          AND status = 'queued'
         )
           OR (
             ${lane} IN ('all', 'verification')
@@ -477,6 +469,49 @@ export async function claimNextStoredLocalPublishJob(
   const row = result.rows[0];
   if (!row?.claim_token || !row.claim_expires_at) return null;
   return claimedResponse(row);
+}
+
+export async function releaseExpiredStoredLocalPublishClaims() {
+  const result = await sql<{ id: string }>`
+    WITH released AS (
+      UPDATE local_publish_jobs
+      SET status = 'failed',
+          claim_token = NULL,
+          claim_expires_at = CURRENT_TIMESTAMP,
+          error_code = CASE
+            WHEN dispatch_authorized_at IS NOT NULL
+              THEN 'PUBLISH_ATTEMPT_OUTCOME_UNKNOWN'
+            ELSE 'CLAIM_LEASE_EXPIRED'
+          END,
+          error_message = CASE
+            WHEN dispatch_authorized_at IS NOT NULL
+              THEN 'The publish lease expired after dispatch authorization. Automatic dispatch is permanently closed; reconcile the existing post or record operator handling.'
+            ELSE 'The publish lease expired without a terminal result. Automatic dispatch is permanently closed; review the frozen attempt before operator handling or reconciliation.'
+          END,
+          completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
+          updated_at = CURRENT_TIMESTAMP
+      WHERE status IN ('claimed', 'staged')
+        AND claim_expires_at <= CURRENT_TIMESTAMP
+        AND dispatched_at IS NULL
+        AND note_id IS NULL
+        AND share_url IS NULL
+        AND verified_at IS NULL
+        AND reconciled_at IS NULL
+        AND success_attestation_id IS NULL
+        AND external_disposition_request_id IS NULL
+      RETURNING id
+    ),
+    released_items AS (
+      UPDATE rednote_publish_batch_items
+      SET state = 'failed',
+          updated_at = CURRENT_TIMESTAMP
+      WHERE local_publish_job_id IN (SELECT id FROM released)
+        AND state IN ('claimed', 'staged')
+      RETURNING local_publish_job_id
+    )
+    SELECT id FROM released
+  `;
+  return result.rows.map((row) => row.id);
 }
 
 async function claimedResponse(row: LocalPublishJobRow): Promise<ClaimedLocalPublishJob> {
@@ -1055,37 +1090,50 @@ export async function failStoredLocalPublishJob(
   message: string,
 ) {
   const result = await sql<LocalPublishJobRow>`
-    UPDATE local_publish_jobs
-    SET status = 'failed',
-        error_code = ${code},
-        error_message = ${message},
-        completed_at = CURRENT_TIMESTAMP,
-        updated_at = CURRENT_TIMESTAMP
-    WHERE id = ${id}::uuid
-      AND status IN ('claimed', 'staged')
-      AND claim_token = ${claimToken}::uuid
-      AND claim_expires_at > CURRENT_TIMESTAMP
-      AND external_disposition_request_id IS NULL
-      AND NOT EXISTS (
-        SELECT 1
-        FROM plan_operator_scheduled_posts AS manual_handling
-        WHERE manual_handling.notion_page_id = local_publish_jobs.notion_page_id
-      )
-      AND NOT EXISTS (
-        SELECT 1
-        FROM manual_reconciliation_requests AS disposition
-        WHERE disposition.request_kind = 'targeted_local_job'
-          AND disposition.source_local_job_id = local_publish_jobs.id
-      )
-    RETURNING *
+    WITH failed AS (
+      UPDATE local_publish_jobs
+      SET status = 'failed',
+          claim_token = NULL,
+          claim_expires_at = CURRENT_TIMESTAMP,
+          error_code = ${code},
+          error_message = ${message},
+          completed_at = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${id}::uuid
+        AND status IN ('claimed', 'staged')
+        AND claim_token = ${claimToken}::uuid
+        AND claim_expires_at > CURRENT_TIMESTAMP
+        AND external_disposition_request_id IS NULL
+        AND NOT EXISTS (
+          SELECT 1
+          FROM plan_operator_scheduled_posts AS manual_handling
+          WHERE manual_handling.notion_page_id = local_publish_jobs.notion_page_id
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM manual_reconciliation_requests AS disposition
+          WHERE disposition.request_kind = 'targeted_local_job'
+            AND disposition.source_local_job_id = local_publish_jobs.id
+        )
+      RETURNING *
+    ),
+    failed_items AS (
+      UPDATE rednote_publish_batch_items
+      SET state = 'failed',
+          updated_at = CURRENT_TIMESTAMP
+      WHERE local_publish_job_id IN (SELECT id FROM failed)
+        AND state IN ('claimed', 'staged')
+      RETURNING local_publish_job_id
+    )
+    SELECT * FROM failed
   `;
   if (result.rows[0]) return mapRow(result.rows[0]);
 
   const job = await loadResultJob(id);
-  assertMatchingClaim(job, claimToken);
   if (job.status === 'failed' && job.errorCode === code && job.errorMessage === message) {
     return job;
   }
+  assertMatchingClaim(job, claimToken);
   if (job.status === 'claimed' || job.status === 'staged') {
     assertUnexpiredClaim(job);
   }

@@ -20,6 +20,7 @@ import {
   normalizeStoredLocalPublishSnapshot,
   prepareStoredLocalPublishVerification,
   recordStoredLocalPublishDispatch,
+  releaseExpiredStoredLocalPublishClaims,
   stageStoredLocalPublishJob,
 } from '@/lib/local-publish-job-store';
 import type { LocalPublishSnapshot } from '@/types/local-publish-job';
@@ -138,16 +139,15 @@ function queuedRow() {
 describe('local publish atomic claim storage', () => {
   beforeEach(() => mocks.sql.mockReset());
 
-  it('uses one locking statement for queued work and stale lease recovery', async () => {
+  it('uses one locking statement without reissuing expired dispatch leases', async () => {
     mocks.sql.mockResolvedValue({ rows: [claimedRow()], rowCount: 1 });
 
     const claimed = await claimNextStoredLocalPublishJob(7_200, 'dispatch');
     const query = (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
 
     expect(query).toContain("status = 'queued'");
-    expect(query).toContain("status = 'claimed' AND claim_expires_at <= CURRENT_TIMESTAMP");
-    expect(query).toContain("status = 'staged'");
-    expect(query).toContain('dispatch_authorized_at IS NULL');
+    expect(query).not.toContain("status = 'claimed' AND claim_expires_at <= CURRENT_TIMESTAMP");
+    expect(query).not.toContain("status = 'staged'\n              AND dispatch_authorized_at IS NULL");
     expect(query).toContain('external_disposition_request_id IS NULL');
     expect(query).toContain('plan_operator_scheduled_posts');
     expect(query).not.toContain('operator_scheduled.reconciled_at IS NULL');
@@ -167,6 +167,25 @@ describe('local publish atomic claim storage', () => {
     });
     expect(claimed).not.toHaveProperty('notionLastEditedTime');
     expect(claimed).not.toHaveProperty('snapshotRevision');
+  });
+
+  it('terminalizes expired claims and their batch items without creating a new attempt', async () => {
+    mocks.sql.mockResolvedValue({
+      rows: [{ id: claimedRow().id }],
+      rowCount: 1,
+    });
+
+    await expect(releaseExpiredStoredLocalPublishClaims())
+      .resolves.toEqual([claimedRow().id]);
+
+    const query = (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
+    expect(query).toContain("status IN ('claimed', 'staged')");
+    expect(query).toContain('claim_expires_at <= CURRENT_TIMESTAMP');
+    expect(query).toContain('claim_token = NULL');
+    expect(query).toContain("'PUBLISH_ATTEMPT_OUTCOME_UNKNOWN'");
+    expect(query).toContain("SET state = 'failed'");
+    expect(query).not.toContain("SET status = 'queued'");
+    expect(query).not.toContain('gen_random_uuid()');
   });
 
   it('durably consumes a staged dispatch permit before the publish click', async () => {
@@ -573,6 +592,36 @@ describe('local publish atomic claim storage', () => {
       'PUBLIC_LOOKUP_DELAY',
       'Public lookup is not ready',
     )).rejects.toMatchObject({ code: 'INVALID_JOB_TRANSITION', status: 409 });
+  });
+
+  it('releases worker ownership when a pre-receipt attempt fails terminally', async () => {
+    mocks.sql.mockResolvedValueOnce({
+      rows: [{
+        ...claimedRow(),
+        status: 'failed',
+        claim_token: null,
+        claim_expires_at: '2026-08-01T12:01:00.000Z',
+        error_code: 'CREATOR_REJECTED_UPLOAD',
+        error_message: 'Creator rejected the upload',
+        completed_at: '2026-08-01T12:01:00.000Z',
+      }],
+      rowCount: 1,
+    });
+
+    await expect(failStoredLocalPublishJob(
+      claimedRow().id,
+      claimedRow().claim_token,
+      'CREATOR_REJECTED_UPLOAD',
+      'Creator rejected the upload',
+    )).resolves.toMatchObject({
+      status: 'failed',
+      errorCode: 'CREATOR_REJECTED_UPLOAD',
+    });
+
+    const query = (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
+    expect(query).toContain('claim_token = NULL');
+    expect(query).toContain('claim_expires_at = CURRENT_TIMESTAMP');
+    expect(query).toContain("SET state = 'failed'");
   });
 
   it('signals the local slot to release after operator attestation', async () => {
