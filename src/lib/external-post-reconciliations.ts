@@ -62,7 +62,7 @@ export async function reconcileVerifiedExternalPost(input: {
   idempotencyKey: string;
   targetNotionPageId?: string;
   targetDispositionId?: string;
-  manualHandling?: { expectedNotionVersion: string };
+  manualHandling?: Record<string, never>;
   source?: 'automation' | 'manual' | 'recovery';
 }) {
   const started = await beginExternalReconciliation(

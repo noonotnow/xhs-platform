@@ -1,13 +1,14 @@
 # Rednote publishing contract v1
 
-`rednote-publishing/v1` and migration `017` are an additive shadow contract for
-the future XHS Admin control plane. Existing workers, routes, legacy lifecycle
-tables, and production behavior remain unchanged. This phase does not dual-write,
-backfill, claim, publish, reconcile, or cut over any runtime path.
+`rednote-publishing/v1` supplies shared field and invariant definitions for XHS
+Admin. Migration `017` remains additive shadow storage; existing runtime
+workers do not dual-write it. CREATE-owned production fields remain independent
+from publication execution and receipt reconciliation.
 
 The authoritative TypeScript API is
-`src/lib/rednote-publishing-contract-v1.ts`. It freezes canonical Post status,
-next-action, and publish-execution values; attempt outcomes; executor identity;
+`src/lib/rednote-publishing-contract-v1.ts`. It freezes canonical production
+status/next-action values, Publication Status and Publication Next Step values,
+attempt outcomes, executor identity,
 frozen payload, event/evidence, and receipt shapes; Published identity; active
 attempt lifecycle; and new-attempt retry semantics. The frozen browser payload
 contains exact title, Caption, ordered tags, stable ordered media identities and
@@ -16,6 +17,15 @@ arbitrary creative fields are not part of the execution contract. `Backfill
 receipt` is the only writable receipt queue. `Backfill metadata` and `Backfill
 URL/metrics` are read-only aliases accepted solely when interpreting legacy
 records with receipt/metrics completeness context.
+
+Manual scheduling or posting attestation writes only
+`Publication Status = Verify receipt` and
+`Publication Next Step = Verify receipt`. A verified result writes
+`Publication Status = Published` and
+`Publication Next Step = Backfill metrics` only when Rednote URL and Rednote
+Note ID are both stable. No publication path may change Status, Next action,
+Production Next Step, Publish packet ready, ScheduledDate, copy, media, or
+later CREATE edits.
 
 Migration `017_rednote_publishing_attempts.sql` adds immutable attempts,
 append-only events/evidence, and immutable receipts. Frozen attempt inputs never

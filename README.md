@@ -122,19 +122,20 @@ new worker dispatch until the platform deployment is healthy.
 
 In XHS Admin, an operator can open Creator, copy reviewed copy and assets, then
 choose **Mark handled manually** as scheduled or published. The server re-reads
-Notion and requires the exact revision and canonical `Approved` status. Missing
-packet readiness, caption/media flags, canonical MEDIA registration, and MOV or
-CapCut compatibility are returned as warnings; they do not prevent recording
-operator truth. The durable PostgreSQL marker immediately quarantines inactive,
-expired, failed, or abandoned automation. Only a live Creator-capable claim,
-stage, submission, or incompatible verified publication conflicts.
+Notion and requires only canonical `Status = Ready` plus
+`Publish packet ready = true`; the client revision is retained as context but
+does not lock the live CREATE record. The durable PostgreSQL marker immediately
+quarantines inactive, expired, failed, or abandoned automation. Only a live
+Creator-capable claim, stage, submission, or incompatible verified publication
+conflicts.
 
-Notion remains `Approved` while the receipt is pending or verification is
-retrying. Paste the public RedNote URL or note ID in Admin to verify it. Success
-atomically writes a manual publication receipt, then backfills only RedNote
-identity, `Published At`, the additive RedNote platform tag, `Status =
-Published`, and the existing `Backfill URL/metrics` next action. It does not
-rewrite copy, set packet readiness, clear needs flags, or invent MEDIA URLs.
+Attestation writes only `Publication Status = Verify receipt` and
+`Publication Next Step = Verify receipt`. Paste the public RedNote URL or note
+ID in Admin to verify it. A verified receipt with both Rednote URL and Rednote
+Note ID writes `Publication Status = Published`,
+`Publication Next Step = Backfill metrics`, the two identifiers, and
+`Published At`. It never changes CREATE-owned Status, Next action, Production
+Next Step, packet readiness, ScheduledDate, copy, media, flags, or later edits.
 Failed verification remains durable, visible, and non-dispatchable.
 
 The authenticated API is `GET|POST /admin/api/manual-post-handlings`. POST
@@ -158,13 +159,18 @@ header, and:
 }
 ```
 
-XHS re-reads the canonical Approved post and requires exact revision and
-`ScheduledDate` agreement. A successful response contains
+XHS re-reads the canonical post and requires `Status = Ready`,
+`Publish packet ready = true`, and exact `ScheduledDate` agreement.
+`expectedNotionVersion` is stale-client observability only; unrelated CREATE
+edits do not block publication attestation. A successful response contains
 `execution.state = "operator_scheduled_receipt_pending"` plus `scheduledAt`,
-`notionVersion`, `recordedAt`, and the canonical page ID. Exact replay returns
-HTTP 200; creation returns HTTP 201. A different use of the key or page returns
-`PLAN_OPERATOR_SCHEDULED_REPLAY_MISMATCH` (409). This operation never publishes
-and never writes a public identity.
+the observed `notionVersion`, `recordedAt`, the canonical page ID,
+`publicationStatus = "Verify receipt"`, and
+`publicationNextStep = "Verify receipt"`. Exact replay returns HTTP 200;
+creation returns HTTP 201. A different use of the key or page returns
+`PLAN_OPERATOR_SCHEDULED_REPLAY_MISMATCH` (409). This operation suppresses
+automated dispatch, never publishes, never writes a public identity, and never
+mutates CREATE production fields.
 
 PLAN can read the durable state with
 `GET /api/integrations/plan/operator-scheduled?notionPageId=<id>` using the same
@@ -541,7 +547,7 @@ conservatively blocks recovery until it finishes.
 ### Manual receipt verification
 
 XHS Admin owns reconciliation for a post that an operator handled manually.
-First choose **Mark handled manually** on the stable canonical `Approved` row.
+First choose **Mark handled manually** on a canonical Ready, packet-ready row.
 Then enter the exact public RedNote URL or bare note ID and queue verification.
 A terminal failed or expired local publish job is quarantined as audit history.
 Queued or verifying manual reconciliation blocks another local publish job for
@@ -726,12 +732,13 @@ Posts created outside this queue can be reconciled by the same trusted worker:
    Unknown fields, including media URLs, are rejected.
 3. The server matches the canonical Posts database by exact `Rednote Note ID`
    first, then exact `Rednote URL`. Conflicting or duplicate matches fail safely.
-   A match is updated; otherwise one row is created.
-4. Only a successful reconciliation writes `Status=Published`, the verified note
-   ID and URL, final title/caption, RedNote platform/video flags,
-   `Needs media=false`, `Needs caption=false`, and
-   `Next action=Backfill URL/metrics`. It appends an external-reconciliation note
-   but never invents or writes a canonical MEDIA URL.
+   A match is updated; a missing canonical target fails closed rather than
+   creating a CREATE-owned row.
+4. Only a successful reconciliation with both stable identifiers writes
+   `Publication Status=Published`,
+   `Publication Next Step=Backfill metrics`, the verified note ID and URL, and
+   `Published At`. It never rewrites production status/actions, copy, media,
+   packet readiness, scheduling, or needs flags.
 
 The receipt table makes retries idempotent by UUID, note ID, and share URL. A
 processing receipt can be reclaimed after five minutes if a request crashes;

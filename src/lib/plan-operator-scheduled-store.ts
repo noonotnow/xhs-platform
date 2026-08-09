@@ -1,5 +1,9 @@
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
 import type { PlanOperatorScheduledInput } from '@/lib/plan-operator-scheduled-input';
+import type {
+  RednotePublicationNextStep,
+  RednotePublicationStatus,
+} from '@/lib/rednote-publishing-contract-v1';
 import {
   findManualPostHandlingByIdempotencyKey,
   insertManualPostHandling,
@@ -17,6 +21,8 @@ export interface PlanOperatorScheduledState {
   recordedBy: string;
   recordedAt: string;
   reconciledAt?: string;
+  publicationStatus: RednotePublicationStatus;
+  publicationNextStep: RednotePublicationNextStep;
 }
 
 function mapHandling(
@@ -33,6 +39,12 @@ function mapHandling(
     recordedBy: handling.recordedBy,
     recordedAt: handling.createdAt,
     ...(handling.reconciledAt ? { reconciledAt: handling.reconciledAt } : {}),
+    publicationStatus: handling.receiptStatus === 'reconciled'
+      ? 'Published' as const
+      : 'Verify receipt' as const,
+    publicationNextStep: handling.receiptStatus === 'reconciled'
+      ? 'Backfill metrics' as const
+      : 'Verify receipt' as const,
   };
 }
 
@@ -41,7 +53,6 @@ function replayMatches(
   input: PlanOperatorScheduledInput,
 ) {
   return handling.notionPageId === input.notionPageId
-    && handling.notionVersion === input.expectedNotionVersion
     && handling.scheduledAt === input.expectedScheduledAt
     && handling.mode === 'scheduled'
     && handling.recordedBy === 'plan';
@@ -106,11 +117,12 @@ export async function listPlanOperatorScheduledPageIds(pageIds: string[]) {
 export async function insertPlanOperatorScheduledState(
   input: PlanOperatorScheduledInput,
   idempotencyKey: string,
+  observedNotionVersion = input.expectedNotionVersion,
 ) {
   try {
     const result = await insertManualPostHandling({
       notionPageId: input.notionPageId,
-      notionVersion: input.expectedNotionVersion,
+      notionVersion: observedNotionVersion,
       mode: 'scheduled',
       scheduledAt: input.expectedScheduledAt,
       warnings: [],
