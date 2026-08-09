@@ -67,6 +67,32 @@ describe('local publish job routes', () => {
     expect(mocks.list).not.toHaveBeenCalled();
   });
 
+  it('returns the authoritative jobs and attestation candidates from the exact Admin route', async () => {
+    const jobs = [{ id: jobId, status: 'operator_attested' }];
+    const successAttestationCandidates = [{
+      id: '44444444-4444-4444-8444-444444444444',
+      jobId,
+      contractRevision: 'operator-success-attestation/v1',
+    }];
+    mocks.list.mockResolvedValue(jobs);
+    mocks.attestationCandidates.mockResolvedValue(successAttestationCandidates);
+
+    const response = await listJobs(request('/admin/api/local-publish-jobs'));
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-xhs-admin-api-contract'))
+      .toBe('local-publish-jobs/v1');
+    expect(response.headers.get('x-xhs-source-commit')).toBe('development');
+    expect(response.headers.get('x-xhs-state-authority')).toBe('postgresql');
+    expect(response.headers.get('x-xhs-local-worker-state')).toBe('excluded');
+    await expect(response.json()).resolves.toEqual({
+      jobs,
+      successAttestationCandidates,
+    });
+    expect(mocks.list).toHaveBeenCalledOnce();
+    expect(mocks.attestationCandidates).toHaveBeenCalledOnce();
+  });
+
   it('queues an operator-confirmed request with the idempotency header', async () => {
     const job = { id: jobId, status: 'queued' };
     mocks.queue.mockResolvedValue({ job, created: true });

@@ -138,19 +138,76 @@ describe('PLAN operator-scheduled store', () => {
     );
   });
 
-  it('accepts exact replay and rejects a mismatched replay with a named 409', async () => {
+  it.each([
+    ['UTC Z versus +00:00', '2026-08-07T14:30:00.000+00:00'],
+    ['offset-equivalent -04:00 versus Z', '2026-08-07T10:30:00.000-04:00'],
+  ])('accepts scheduled timestamp replay by instant: %s', async (_label, scheduledAt) => {
     mocks.sql.mockResolvedValueOnce(result([marker()]));
-    await expect(loadPlanOperatorScheduledReplay(input, key)).resolves.toMatchObject({
+    await expect(loadPlanOperatorScheduledReplay({
+      ...input,
+      expectedScheduledAt: scheduledAt,
+    }, key)).resolves.toMatchObject({
       notionPageId: input.notionPageId,
       scheduledAt: input.expectedScheduledAt,
     });
+  });
 
-    mocks.sql.mockResolvedValueOnce(result([marker({
-      scheduled_at: '2026-08-07T14:31:00.000Z',
-    })]));
+  it.each([
+    ['different instant', marker({ scheduled_at: '2026-08-07T14:31:00.000Z' }), input, key],
+    ['malformed stored timestamp', marker({ scheduled_at: 'not-a-timestamp' }), input, key],
+    ['different page', marker({ notion_page_id: 'different-page' }), input, key],
+    [
+      'equivalent but non-exact revision',
+      marker({ notion_last_edited_time: '2026-08-06T16:00:00.000+00:00' }),
+      input,
+      key,
+    ],
+    ['different idempotency key', marker({ idempotency_key: 'different-key' }), input, key],
+    ['different mode', marker({ handling_mode: 'published' }), input, key],
+    ['different provenance', marker({ recorded_by: 'admin' }), input, key],
+    ['different warnings', marker({ warnings: ['unexpected warning'] }), input, key],
+  ])('rejects replay identity mismatch: %s', async (
+    _label,
+    stored,
+    requestedInput,
+    requestedKey,
+  ) => {
+    mocks.sql.mockResolvedValueOnce(result([stored]));
+    await expect(
+      loadPlanOperatorScheduledReplay(requestedInput, requestedKey),
+    ).rejects.toMatchObject({
+      code: 'PLAN_OPERATOR_SCHEDULED_REPLAY_MISMATCH',
+      status: 409,
+    });
+  });
+
+  it('rejects when the page and idempotency key resolve to different rows', async () => {
+    mocks.sql.mockResolvedValueOnce(result([
+      marker(),
+      marker({
+        id: '55555555-5555-4555-8555-555555555555',
+        notion_page_id: 'different-page',
+      }),
+    ]));
     await expect(loadPlanOperatorScheduledReplay(input, key)).rejects.toMatchObject({
       code: 'PLAN_OPERATOR_SCHEDULED_REPLAY_MISMATCH',
       status: 409,
     });
+  });
+
+  it('canonicalizes scheduled timestamps before the timestamptz insert', async () => {
+    mocks.query.mockImplementation(async (text: string) => {
+      if (text.includes('INSERT INTO plan_operator_scheduled_posts')) {
+        return result([marker()]);
+      }
+      return result();
+    });
+    await insertPlanOperatorScheduledState({
+      ...input,
+      expectedScheduledAt: '2026-08-07T10:30:00.000-04:00',
+    }, key);
+    const insertCall = mocks.query.mock.calls.find(([text]) =>
+      String(text).includes('INSERT INTO plan_operator_scheduled_posts'));
+    expect(insertCall?.[1]).toContain('2026-08-07T14:30:00.000Z');
   });
 });

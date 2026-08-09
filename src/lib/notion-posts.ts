@@ -329,6 +329,12 @@ export function mapReadyXhsPost(
     publishPacketReady,
   );
   const thumbnailUrl = urls(property(page, schema, 'thumbnail'))[0] ?? '';
+  const xhsNoteId = plainText(property(page, schema, 'xhsNoteId')).trim();
+  const xhsShareUrl = plainText(property(page, schema, 'xhsShareUrl')).trim();
+  const publishedAt = (
+    date(property(page, schema, 'publishedAt'))
+    || plainText(property(page, schema, 'publishedAt'))
+  ).trim();
   const manualWarnings = [...automationBlockers];
   if (!thumbnailUrl) manualWarnings.push('Cover thumbnail is missing');
   return {
@@ -351,6 +357,9 @@ export function mapReadyXhsPost(
     scheduledDate: scheduledDate || null,
     ...(publishAt ? { publishAt } : {}),
     lastEditedTime: page.last_edited_time,
+    ...(xhsNoteId ? { xhsNoteId } : {}),
+    ...(xhsShareUrl ? { xhsShareUrl } : {}),
+    ...(publishedAt ? { publishedAt } : {}),
     automationBlockers,
     manualWarnings,
     publishBlockers: automationBlockers,
