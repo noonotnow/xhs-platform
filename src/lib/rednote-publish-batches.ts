@@ -58,7 +58,8 @@ function primaryMedia(post: ReadyXhsPost) {
 
 export function buildBatchSnapshot(post: ReadyXhsPost): LocalPublishSnapshot | null {
   if (
-    post.status.trim().toLowerCase() === 'published' ||
+    post.publicationStatus?.trim().toLowerCase() === 'published' ||
+    (!post.publicationStatus && post.status.trim().toLowerCase() === 'published') ||
     post.candidateKind !== 'packet_ready' ||
     post.automationBlockers.length > 0 ||
     !post.publishAt

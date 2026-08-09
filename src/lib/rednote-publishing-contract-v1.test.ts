@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   assertCanonicalNextActionWrite,
   assertCanonicalPublishExecutionWrite,
+  assertCanonicalPublicationNextStepWrite,
+  assertCanonicalPublicationStatusWrite,
   assertCanonicalStatusWrite,
   assertNewAttemptForRetry,
   assertPublishedInvariant,
@@ -13,6 +15,8 @@ import {
   REDNOTE_EXECUTOR_KINDS,
   REDNOTE_NEXT_ACTIONS,
   REDNOTE_POST_STATUSES,
+  REDNOTE_PUBLICATION_NEXT_STEPS,
+  REDNOTE_PUBLICATION_STATUSES,
   REDNOTE_PUBLISH_EXECUTIONS,
   REDNOTE_TERMINAL_ATTEMPT_OUTCOMES,
   REDNOTE_TRANSACTION_REQUESTERS,
@@ -75,6 +79,13 @@ describe('rednote publishing contract v1', () => {
       'Not attempted', 'Worker claimed', 'Worker batched',
       'Worker batch failed', 'Operator scheduled',
     ]);
+    expect(REDNOTE_PUBLICATION_STATUSES).toEqual([
+      'Not attempted', 'Worker claimed', 'Worker failed', 'Verify receipt',
+      'Backfill metadata', 'Published',
+    ]);
+    expect(REDNOTE_PUBLICATION_NEXT_STEPS).toEqual([
+      'Worker failed', 'Verify receipt', 'Backfill metrics',
+    ]);
     expect(REDNOTE_TERMINAL_ATTEMPT_OUTCOMES).toEqual([
       'accepted', 'known_failed', 'outcome_unknown',
     ]);
@@ -88,6 +99,10 @@ describe('rednote publishing contract v1', () => {
       .toBe('Active XHS attempt ID');
     expect(REDNOTE_CANONICAL_PROPERTIES.platformPublishTime)
       .toBe('Platform publish time');
+    expect(REDNOTE_CANONICAL_PROPERTIES.publicationStatus)
+      .toBe('Publication Status');
+    expect(REDNOTE_CANONICAL_PROPERTIES.publicationNextStep)
+      .toBe('Publication Next Step');
     expect(Object.values(REDNOTE_CANONICAL_PROPERTIES))
       .not.toContain('Last attempt');
   });
@@ -118,6 +133,10 @@ describe('rednote publishing contract v1', () => {
       .toThrow(/not a canonical Status/);
     expect(() => assertCanonicalPublishExecutionWrite('Retrying'))
       .toThrow(/not a canonical Publish execution/);
+    expect(() => assertCanonicalPublicationStatusWrite('Approved'))
+      .toThrow(/not a canonical Publication Status/);
+    expect(() => assertCanonicalPublicationNextStepWrite('Backfill metadata'))
+      .toThrow(/not a canonical Publication Next Step/);
   });
 
   it('freezes the exact browser-ready payload without seeds or notes substitution', () => {
@@ -146,10 +165,15 @@ describe('rednote publishing contract v1', () => {
     })).toBe(true);
     expect(hasAtomicPublishedIdentity({ rednoteUrl: 'url-only' })).toBe(false);
     expect(() => assertPublishedInvariant({
-      status: 'Published',
+      publicationStatus: 'Published',
       rednoteUrl: null,
       rednoteNoteId: null,
     })).toThrow(/requires Rednote URL and Rednote Note ID atomically/);
+    expect(() => assertPublishedInvariant({
+      publicationStatus: 'Published',
+      rednoteUrl: 'https://www.rednote.com/explore/note-1',
+      rednoteNoteId: 'note-1',
+    })).not.toThrow();
   });
 
   it('keeps only unresolved worker-originated work active', () => {

@@ -4,9 +4,13 @@ const mocks = vi.hoisted(() => ({
   getPost: vi.fn(),
   replay: vi.fn(),
   insert: vi.fn(),
+  markAwaitingReceipt: vi.fn(),
 }));
 
-vi.mock('@/lib/notion-posts', () => ({ getReadyXhsPost: mocks.getPost }));
+vi.mock('@/lib/notion-posts', () => ({
+  getReadyXhsPost: mocks.getPost,
+  markXhsPostAwaitingReceipt: mocks.markAwaitingReceipt,
+}));
 vi.mock('@/lib/plan-operator-scheduled-store', () => ({
   loadPlanOperatorScheduledReplay: mocks.replay,
   insertPlanOperatorScheduledState: mocks.insert,
@@ -23,7 +27,8 @@ const input = { notionPageId, expectedNotionVersion, expectedScheduledAt };
 function post(overrides: Record<string, unknown> = {}) {
   return {
     id: notionPageId,
-    status: 'Approved',
+    status: 'Ready',
+    publishPacketReady: true,
     lastEditedTime: expectedNotionVersion,
     publishAt: expectedScheduledAt,
     ...overrides,
@@ -47,18 +52,29 @@ describe('PLAN operator-scheduled orchestration', () => {
       execution: { state: 'operator_scheduled_receipt_pending' },
     });
     expect(mocks.getPost).toHaveBeenCalledWith(notionPageId);
-    expect(mocks.insert).toHaveBeenCalledWith(input, idempotencyKey);
+    expect(mocks.insert).toHaveBeenCalledWith(
+      input,
+      idempotencyKey,
+      expectedNotionVersion,
+    );
+    expect(mocks.markAwaitingReceipt).toHaveBeenCalledWith(notionPageId);
   });
 
-  it('rejects stale Notion revisions and schedules with named conflicts', async () => {
+  it('treats the client revision as context but still protects the exact schedule', async () => {
+    const currentRevision = '2026-08-06T16:01:00.000Z';
     mocks.getPost.mockResolvedValueOnce(post({
-      lastEditedTime: '2026-08-06T16:01:00.000Z',
+      lastEditedTime: currentRevision,
     }));
-    await expect(markPlanOperatorScheduled(input, idempotencyKey)).rejects.toMatchObject({
-      code: 'PLAN_OPERATOR_SCHEDULED_STALE_REVISION',
-      status: 409,
+    await expect(markPlanOperatorScheduled(input, idempotencyKey)).resolves.toMatchObject({
+      created: true,
     });
+    expect(mocks.insert).toHaveBeenLastCalledWith(
+      input,
+      idempotencyKey,
+      currentRevision,
+    );
 
+    mocks.insert.mockClear();
     mocks.getPost.mockResolvedValueOnce(post({
       publishAt: '2026-08-07T14:31:00.000Z',
     }));
@@ -69,10 +85,15 @@ describe('PLAN operator-scheduled orchestration', () => {
     expect(mocks.insert).not.toHaveBeenCalled();
   });
 
-  it('requires the canonical post to remain Approved', async () => {
-    mocks.getPost.mockResolvedValue(post({ status: 'Published' }));
+  it('requires the canonical post to be clearly Ready and packet-ready', async () => {
+    mocks.getPost.mockResolvedValue(post({ status: 'In progress' }));
     await expect(markPlanOperatorScheduled(input, idempotencyKey)).rejects.toMatchObject({
-      code: 'PLAN_OPERATOR_SCHEDULED_STATUS_CONFLICT',
+      code: 'PLAN_OPERATOR_SCHEDULED_NOT_READY',
+      status: 409,
+    });
+    mocks.getPost.mockResolvedValue(post({ publishPacketReady: false }));
+    await expect(markPlanOperatorScheduled(input, idempotencyKey)).rejects.toMatchObject({
+      code: 'PLAN_OPERATOR_SCHEDULED_NOT_READY',
       status: 409,
     });
   });
@@ -88,5 +109,6 @@ describe('PLAN operator-scheduled orchestration', () => {
     });
     expect(mocks.getPost).not.toHaveBeenCalled();
     expect(mocks.insert).not.toHaveBeenCalled();
+    expect(mocks.markAwaitingReceipt).toHaveBeenCalledWith(notionPageId);
   });
 });

@@ -21,6 +21,7 @@ import { reconcileVerifiedExternalPost } from '@/lib/external-post-reconciliatio
 import {
   getReadyXhsPost,
   getXhsPostForManualHandling,
+  markXhsPostAwaitingReceipt,
 } from '@/lib/notion-posts';
 import { normalizeLocalPublishJobError } from '@/lib/local-publish-jobs';
 import { loadManualPostHandlingByPage } from '@/lib/manual-post-handling-store';
@@ -51,9 +52,7 @@ function expectedSnapshot(
     title: post.headline.trim(),
     caption: post.caption,
     mediaType: post.hasVideo ? 'video' as const : 'image' as const,
-    ...(manualHandled
-      ? { notionVersion: post.lastEditedTime, matchFields }
-      : {}),
+    ...(manualHandled ? { matchFields: [] } : {}),
   };
 }
 
@@ -108,6 +107,7 @@ export async function createManualReconciliation(
         409,
       );
     }
+    await markXhsPostAwaitingReceipt(input.notionPageId);
     return {
       reconciliation: manualReconciliationSummary(existing),
       created: false,
@@ -120,11 +120,9 @@ export async function createManualReconciliation(
   if (handling) {
     if (
       handling.receiptStatus !== 'pending'
-      || post.status.trim().toLowerCase() !== 'approved'
-      || post.lastEditedTime !== handling.notionVersion
     ) {
       throw new LocalPublishJobError(
-        'The manually handled post changed or is no longer canonical Approved',
+        'The manually handled post no longer has pending receipt reconciliation',
         'MANUAL_RECONCILIATION_NOT_ALLOWED',
         409,
       );
@@ -137,6 +135,7 @@ export async function createManualReconciliation(
     expected: expectedSnapshot(post, Boolean(handling)),
     idempotencyKey,
   });
+  await markXhsPostAwaitingReceipt(input.notionPageId);
   return {
     reconciliation: manualReconciliationSummary(result.request),
     created: result.created,
@@ -166,11 +165,9 @@ export async function retryFailedManualReconciliation(
   if (handling) {
     if (
       handling.receiptStatus !== 'pending'
-      || post.status.trim().toLowerCase() !== 'approved'
-      || post.lastEditedTime !== handling.notionVersion
     ) {
       throw new LocalPublishJobError(
-        'The manually handled post changed or is no longer canonical Approved',
+        'The manually handled post no longer has pending receipt reconciliation',
         'MANUAL_RECONCILIATION_NOT_ALLOWED',
         409,
       );
@@ -255,13 +252,7 @@ export async function submitManualReconciliationResult(
       idempotencyKey: request.id,
       targetNotionPageId: request.notionPageId,
       source: 'manual',
-      ...(request.expected.notionVersion
-        ? {
-            manualHandling: {
-              expectedNotionVersion: request.expected.notionVersion,
-            },
-          }
-        : {}),
+      ...(request.expected.notionVersion ? { manualHandling: {} } : {}),
     });
     return manualReconciliationSummary(await completeManualReconciliation(
       id,

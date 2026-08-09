@@ -25,6 +25,9 @@ const resolved: ResolvedSchema = {
   headline: 'Headline',
   platform: 'Platform',
   status: 'Status',
+  productionNextStep: null,
+  publicationStatus: 'Publication Status',
+  publicationNextStep: 'Publication Next Step',
   thumbnail: null,
   mediaUrls: 'Image URLs',
   caption: 'Caption',
@@ -53,6 +56,14 @@ const schemaProperties: PropertyMap = {
   'Rednote Note ID': { type: 'rich_text' },
   'Rednote URL': { type: 'url' },
   'Published At': { type: 'date' },
+  'Publication Status': {
+    type: 'status',
+    status: { options: [{ name: 'Published' }, { name: 'Verify receipt' }] },
+  },
+  'Publication Next Step': {
+    type: 'select',
+    select: { options: [{ name: 'Backfill metrics' }, { name: 'Verify receipt' }] },
+  },
   'Next action': {
     type: 'select',
     select: { options: [{ name: 'Backfill URL/metrics' }, { name: 'No action' }] },
@@ -90,7 +101,7 @@ describe('external post Notion reconciliation', () => {
       });
   });
 
-  it('builds the same safe Published snapshot for updates and creates without media URLs', () => {
+  it('builds a publication-only Published receipt update', () => {
     const properties = buildExternalPublishedProperties(
       resolved,
       {},
@@ -101,21 +112,17 @@ describe('external post Notion reconciliation', () => {
 
     expect(properties).not.toHaveProperty('Image URLs');
     expect(properties).toMatchObject({
-      Headline: { title: [{ text: { content: snapshot.title } }] },
-      Caption: { rich_text: [{ text: { content: snapshot.caption } }] },
-      Platform: { multi_select: [{ name: 'RedNote' }] },
-      Status: { status: { name: 'Published' } },
-      'Has video': { checkbox: true },
-      'Needs media': { checkbox: false },
-      'Needs caption': { checkbox: false },
-      'Publish packet ready': { checkbox: false },
+      'Publication Status': { status: { name: 'Published' } },
+      'Publication Next Step': { select: { name: 'Backfill metrics' } },
       'Rednote Note ID': { rich_text: [{ text: { content: snapshot.noteId } }] },
       'Rednote URL': { url: snapshot.shareUrl },
-      'Next action': { select: { name: 'Backfill URL/metrics' } },
     });
+    expect(properties).not.toHaveProperty('Status');
+    expect(properties).not.toHaveProperty('Next action');
+    expect(properties).not.toHaveProperty('Publish packet ready');
   });
 
-  it('preserves existing platform tags when updating a matched cross-post', () => {
+  it('does not rewrite existing platform tags when updating a matched cross-post', () => {
     const matchedPage = {
       properties: {
         Platform: {
@@ -136,12 +143,10 @@ describe('external post Notion reconciliation', () => {
       '2026-08-04T12:00:00.000Z',
       matchedPage,
     );
-    expect(properties.Platform).toEqual({
-      multi_select: [{ name: 'Weibo' }, { name: 'RedNote' }],
-    });
+    expect(properties).not.toHaveProperty('Platform');
   });
 
-  it('uses established Platform precedence when Platform and Platforms coexist', () => {
+  it('ignores production Platform alias ambiguity for publication-only updates', () => {
     const aliasedSchema = {
       ...schemaProperties,
       Platforms: { type: 'multi_select' },
@@ -162,9 +167,7 @@ describe('external post Notion reconciliation', () => {
       '2026-08-04T12:00:00.000Z',
     );
 
-    expect(properties.Platform).toEqual({
-      multi_select: [{ name: 'RedNote' }],
-    });
+    expect(properties).not.toHaveProperty('Platform');
     expect(properties).not.toHaveProperty('Platforms');
   });
 
@@ -187,19 +190,19 @@ describe('external post Notion reconciliation', () => {
     )).toThrow('Cannot backfill xhsNoteId: multiple aliases are present');
   });
 
-  it('requires the exact Backfill URL/metrics option', () => {
+  it('requires the exact Backfill metrics publication option', () => {
     expect(() => buildExternalPublishedProperties(
       resolved,
       {},
       {
         ...schemaProperties,
-        'Next action': {
+        'Publication Next Step': {
           type: 'select',
-          select: { options: [{ name: 'No action' }] },
+          select: { options: [{ name: 'Verify receipt' }] },
         },
       },
       snapshot,
       '2026-08-04T12:00:00.000Z',
-    )).toThrow('no Backfill URL/metrics option');
+    )).toThrow('no Backfill metrics option');
   });
 });

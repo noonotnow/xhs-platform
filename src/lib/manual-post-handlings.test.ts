@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   find: vi.fn(),
   insert: vi.fn(),
   getPost: vi.fn(),
+  markAwaitingReceipt: vi.fn(),
 }));
 
 vi.mock('@/lib/manual-post-handling-store', () => ({
@@ -13,6 +14,7 @@ vi.mock('@/lib/manual-post-handling-store', () => ({
 }));
 vi.mock('@/lib/notion-posts', () => ({
   getXhsPostForManualHandling: mocks.getPost,
+  markXhsPostAwaitingReceipt: mocks.markAwaitingReceipt,
 }));
 
 import { markManualPostHandled } from '@/lib/manual-post-handlings';
@@ -26,11 +28,11 @@ const input = {
 };
 const post = {
   id: input.notionPageId,
-  status: 'Approved',
+  status: 'Ready',
+  publishPacketReady: true,
   lastEditedTime: revision,
   publishAt: '2026-08-07T14:30:00.000Z',
   manualWarnings: [
-    'Publish packet is not ready',
     'Needs media is still checked',
     'MOV media requires the CapCut compatibility workflow',
   ],
@@ -47,7 +49,7 @@ describe('manual post handling service', () => {
     });
   });
 
-  it('records exact Approved operator truth while preserving automation warnings', async () => {
+  it('records current Ready operator truth while preserving automation warnings', async () => {
     await expect(markManualPostHandled(input, key)).resolves.toMatchObject({
       created: true,
     });
@@ -60,16 +62,22 @@ describe('manual post handling service', () => {
       recordedBy: 'admin',
       idempotencyKey: key,
     });
+    expect(mocks.markAwaitingReceipt).toHaveBeenCalledWith(post.id);
   });
 
   it.each([
-    ['Draft', revision, 'POST_NOT_APPROVED'],
-    ['Published', revision, 'POST_ALREADY_PUBLISHED'],
-    ['Approved', '2026-08-06T16:01:00.000Z', 'NOTION_REVISION_CONFLICT'],
-  ])('rejects status or revision drift: %s', async (status, lastEditedTime, code) => {
-    mocks.getPost.mockResolvedValue({ ...post, status, lastEditedTime });
+    ['Draft', true],
+    ['Ready', false],
+  ])('rejects non-ready evidence: %s / packet=%s', async (status, publishPacketReady) => {
+    const lastEditedTime = '2026-08-06T16:01:00.000Z';
+    mocks.getPost.mockResolvedValue({
+      ...post,
+      status,
+      publishPacketReady,
+      lastEditedTime,
+    });
     await expect(markManualPostHandled(input, key)).rejects.toMatchObject({
-      code,
+      code: 'POST_NOT_READY',
       status: 409,
     });
     expect(mocks.insert).not.toHaveBeenCalled();
@@ -87,5 +95,6 @@ describe('manual post handling service', () => {
     });
     expect(mocks.getPost).not.toHaveBeenCalled();
     expect(mocks.insert).not.toHaveBeenCalled();
+    expect(mocks.markAwaitingReceipt).toHaveBeenCalledWith(input.notionPageId);
   });
 });

@@ -8,7 +8,10 @@ import {
   insertManualPostHandling,
   listManualPostHandlings,
 } from '@/lib/manual-post-handling-store';
-import { getXhsPostForManualHandling } from '@/lib/notion-posts';
+import {
+  getXhsPostForManualHandling,
+  markXhsPostAwaitingReceipt,
+} from '@/lib/notion-posts';
 
 export async function markManualPostHandled(
   rawInput: unknown,
@@ -19,7 +22,6 @@ export async function markManualPostHandled(
   if (replay) {
     if (
       replay.notionPageId !== input.notionPageId
-      || replay.notionVersion !== input.expectedLastEditedTime
       || replay.mode !== input.mode
       || replay.recordedBy !== 'admin'
     ) {
@@ -29,29 +31,16 @@ export async function markManualPostHandled(
         409,
       );
     }
+    await markXhsPostAwaitingReceipt(input.notionPageId);
     return { handling: replay, created: false };
   }
 
   const post = await getXhsPostForManualHandling(input.notionPageId);
   const status = post.status.trim().toLowerCase();
-  if (status === 'published') {
+  if (status !== 'ready' || !post.publishPacketReady) {
     throw new ManualPostHandlingError(
-      'This post is already Published in Notion',
-      'POST_ALREADY_PUBLISHED',
-      409,
-    );
-  }
-  if (status !== 'approved') {
-    throw new ManualPostHandlingError(
-      'Manual handling requires canonical Notion Status Approved',
-      'POST_NOT_APPROVED',
-      409,
-    );
-  }
-  if (post.lastEditedTime !== input.expectedLastEditedTime) {
-    throw new ManualPostHandlingError(
-      'The Notion post changed; refresh before recording operator handling',
-      'NOTION_REVISION_CONFLICT',
+      'Manual handling requires a Ready post with its publish packet ready',
+      'POST_NOT_READY',
       409,
     );
   }
@@ -76,6 +65,7 @@ export async function markManualPostHandled(
       409,
     );
   }
+  await markXhsPostAwaitingReceipt(post.id);
   return result;
 }
 

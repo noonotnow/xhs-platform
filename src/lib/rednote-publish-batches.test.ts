@@ -109,6 +109,16 @@ describe('bounded RedNote publish batches', () => {
     expect(untimed).toEqual(before);
   });
 
+  it('never dispatches a publication-confirmed post under a legacy Ready status', () => {
+    const now = new Date('2026-08-04T13:00:00.000Z');
+    const published = post('2026-08-04T14:00:00.000Z', {
+      status: 'Ready',
+      publicationStatus: 'Published',
+    });
+
+    expect(buildBatchItems([published], 'bootstrap', now)).toEqual([]);
+  });
+
   it('accounts for a late bootstrap item and visibly blocks a trial-only MOV sibling', () => {
     const now = new Date('2026-08-04T14:04:00.000Z');
     const day3 = post('2026-08-04T13:30:00.000Z', {

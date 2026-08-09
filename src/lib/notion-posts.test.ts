@@ -6,6 +6,7 @@ import {
   isCanonicalMediaMov,
   isCanonicalMediaVideo,
   buildManualPublishedProperties,
+  buildPublicationAwaitingReceiptProperties,
   buildPublishedProperties,
   mapReadyXhsPost,
   normalizeNotionPostsError,
@@ -170,6 +171,16 @@ function pageFixture(): PageObjectResponse {
       },
       'Rednote URL': { id: 'share', type: 'url', url: null },
       'Rednote Note ID': { id: 'note-id', type: 'rich_text', rich_text: [] },
+      'Publication Status': {
+        id: 'publication-status',
+        type: 'status',
+        status: { id: 'not-attempted', name: 'Not attempted', color: 'gray' },
+      },
+      'Publication Next Step': {
+        id: 'publication-next-step',
+        type: 'select',
+        select: { id: 'verify', name: 'Verify receipt', color: 'yellow' },
+      },
       'Next action': {
         id: 'next',
         type: 'select',
@@ -417,7 +428,7 @@ describe('Notion Posts mapping', () => {
     });
   });
 
-  it('treats a status-only Published record as a candidate only for explicit reconciliation', () => {
+  it('does not treat CREATE Status as publication authority', () => {
     const fixture = pageFixture();
     fixture.properties.Status = {
       id: 'status',
@@ -430,11 +441,18 @@ describe('Notion Posts mapping', () => {
       ),
     );
 
-    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toBeNull();
-    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases, true)).toMatchObject({
+    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toMatchObject({
       candidateKind: 'packet_ready',
       publishPacketReady: true,
     });
+    fixture.properties['Publication Status'] = {
+      id: 'publication-status',
+      type: 'status',
+      status: { id: 'published', name: 'Published', color: 'green' },
+    };
+    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases)).toBeNull();
+    expect(toReadyPostCandidate(fixture, resolved, duplicateAliases, true))
+      .toMatchObject({ candidateKind: 'packet_ready' });
   });
 
   it('requires canonical primary media for the declared packet type', () => {
@@ -532,6 +550,9 @@ describe('Notion Posts mapping', () => {
       headline: 'Headline',
       platform: 'Platform',
       status: 'Status',
+      productionNextStep: null,
+      publicationStatus: 'Publication Status',
+      publicationNextStep: 'Publication Next Step',
       thumbnail: 'Thumbnail',
       mediaUrls: 'Image URLs',
       caption: 'Caption',
@@ -556,6 +577,7 @@ describe('Notion Posts mapping', () => {
         'Publish packet ready': { type: 'checkbox' },
         'Image URLs': { type: 'rich_text' },
         Status: { type: 'status' },
+        'Publication Status': { type: 'status' },
       }, 'database')).resolves.toEqual([]);
 
       expect(query).toHaveBeenCalledWith(expect.objectContaining({
@@ -564,7 +586,7 @@ describe('Notion Posts mapping', () => {
       }));
       expect(query.mock.calls[0][0]).toMatchObject({
         filter: {
-          property: 'Status',
+          property: 'Publication Status',
           status: { does_not_equal: 'Published' },
         },
       });
@@ -579,19 +601,20 @@ describe('Notion Posts mapping', () => {
         'Publish packet ready': { type: 'checkbox' },
         'Image URLs': { type: 'rich_text' },
         Status: { type: 'status' },
+        'Publication Status': { type: 'status' },
       }, 'database', true);
 
       expect(query.mock.calls[0][0]).toMatchObject({
         filter: {
           or: [
             {
-              property: 'Status',
+              property: 'Publication Status',
               status: { does_not_equal: 'Published' },
             },
             {
               and: [
                 {
-                  property: 'Status',
+                  property: 'Publication Status',
                   status: { equals: 'Published' },
                 },
                 {
@@ -603,7 +626,7 @@ describe('Notion Posts mapping', () => {
             {
               and: [
                 {
-                  property: 'Status',
+                  property: 'Publication Status',
                   status: { equals: 'Published' },
                 },
                 {
@@ -946,17 +969,25 @@ describe('Notion Posts mapping', () => {
       };
       const schemaProperties = Object.fromEntries(
         Object.entries(fixture.properties).map(([name, value]) => {
-          if (name === 'Next action') {
+          if (name === 'Publication Status') {
+            return [name, {
+              type: value.type,
+              status: {
+                options: [
+                  { name: 'Not attempted' },
+                  { name: 'Verify receipt' },
+                  { name: 'Published' },
+                ],
+              },
+            }];
+          }
+          if (name === 'Publication Next Step') {
             return [name, {
               type: value.type,
               select: {
                 options: [
-                  { name: 'Attach media' },
-                  { name: 'Write caption' },
-                  { name: 'Review packet' },
-                  { name: 'Paste to XHS admin' },
-                  { name: 'Backfill URL/metrics' },
-                  { name: 'No action' },
+                  { name: 'Verify receipt' },
+                  { name: 'Backfill metrics' },
                 ],
               },
             }];
@@ -978,16 +1009,13 @@ describe('Notion Posts mapping', () => {
         },
         '2026-07-31T20:00:00.000Z',
       )).toEqual({
-        Status: { status: { name: 'Published' } },
+        'Publication Status': { status: { name: 'Published' } },
+        'Publication Next Step': { select: { name: 'Backfill metrics' } },
         'Rednote URL': { url: 'https://www.rednote.com/explore/note-123' },
         'Rednote Note ID': {
           rich_text: [{ type: 'text', text: { content: 'note-123' } }],
         },
-        'Publish packet ready': { checkbox: true },
-        'Needs media': { checkbox: false },
-        'Needs caption': { checkbox: false },
         'Published At': { date: { start: '2026-07-31T20:00:00.000Z' } },
-        'Next action': { select: { name: 'Backfill URL/metrics' } },
       });
 
       expect(buildPublishedProperties(
@@ -1019,10 +1047,15 @@ describe('Notion Posts mapping', () => {
     const schemaProperties = Object.fromEntries(
       Object.entries(fixture.properties).map(([name, value]) => [
         name,
-        name === 'Next action'
+        name === 'Publication Status'
           ? {
               type: value.type,
-              select: { options: [{ name: 'Backfill URL/metrics' }] },
+              status: { options: [{ name: 'Published' }] },
+            }
+          : name === 'Publication Next Step'
+          ? {
+              type: value.type,
+              select: { options: [{ name: 'Backfill metrics' }] },
             }
           : { type: value.type },
       ]),
@@ -1044,12 +1077,14 @@ describe('Notion Posts mapping', () => {
     );
 
     expect(properties).toMatchObject({
-      Platform: { multi_select: [{ name: 'Instagram' }, { name: 'RedNote' }] },
-      Status: { status: { name: 'Published' } },
+      'Publication Status': { status: { name: 'Published' } },
+      'Publication Next Step': { select: { name: 'Backfill metrics' } },
       'Rednote URL': { url: 'https://www.rednote.com/explore/note-123' },
-      'Next action': { select: { name: 'Backfill URL/metrics' } },
       'Published At': { date: { start: '2026-08-06T20:00:00.000Z' } },
     });
+    expect(properties).not.toHaveProperty('Platform');
+    expect(properties).not.toHaveProperty('Status');
+    expect(properties).not.toHaveProperty('Next action');
     expect(properties).not.toHaveProperty('Caption');
     expect(properties).not.toHaveProperty('Publish packet ready');
     expect(properties).not.toHaveProperty('Needs media');
@@ -1057,10 +1092,41 @@ describe('Notion Posts mapping', () => {
     expect(properties).not.toHaveProperty('Image URLs');
   });
 
+  it('marks unresolved operator evidence with only publication reconciliation fields', () => {
+    const fixture = pageFixture();
+    const schemaProperties = Object.fromEntries(
+      Object.entries(fixture.properties).map(([name, value]) => [
+        name,
+        name === 'Publication Status'
+          ? {
+              type: value.type,
+              status: { options: [{ name: 'Verify receipt' }, { name: 'Published' }] },
+            }
+          : name === 'Publication Next Step'
+            ? {
+                type: value.type,
+                select: { options: [{ name: 'Verify receipt' }, { name: 'Backfill metrics' }] },
+              }
+            : { type: value.type },
+      ]),
+    );
+    const { resolved, duplicateAliases } = resolvePostsSchema(schemaProperties);
+
+    expect(buildPublicationAwaitingReceiptProperties(
+      fixture,
+      resolved,
+      duplicateAliases,
+      schemaProperties,
+    )).toEqual({
+      'Publication Status': { status: { name: 'Verify receipt' } },
+      'Publication Next Step': { select: { name: 'Verify receipt' } },
+    });
+  });
+
   it('recognizes an identical published result without rewriting published metadata', () => {
         const fixture = pageFixture();
-        fixture.properties.Status = {
-          id: 'status',
+        fixture.properties['Publication Status'] = {
+          id: 'publication-status',
           type: 'status',
           status: { id: 'published', name: 'Published', color: 'green' },
         };
@@ -1074,12 +1140,12 @@ describe('Notion Posts mapping', () => {
           type: 'rich_text',
           rich_text: richText('note-123'),
         };
-        fixture.properties['Next action'] = {
-          id: 'next',
+        fixture.properties['Publication Next Step'] = {
+          id: 'publication-next-step',
           type: 'select',
           select: {
             id: 'backfill',
-            name: 'Backfill URL/metrics',
+            name: 'Backfill metrics',
             color: 'blue',
           },
         };
@@ -1174,23 +1240,28 @@ describe('Notion Posts mapping', () => {
     }, 'Next action')).toBeNull();
   });
 
-  it('preserves No action when publication metrics are already reconciled', () => {
+  it('always routes a verified receipt to Backfill metrics', () => {
     const fixture = pageFixture();
-    fixture.properties['Next action'] = {
-      id: 'next',
+    fixture.properties['Publication Next Step'] = {
+      id: 'publication-next-step',
       type: 'select',
-      select: { id: 'none', name: 'No action', color: 'gray' },
+      select: { id: 'verify', name: 'Verify receipt', color: 'gray' },
     };
     const schemaProperties = Object.fromEntries(
       Object.entries(fixture.properties).map(([name, value]) => [
         name,
-        name === 'Next action'
+        name === 'Publication Status'
+          ? {
+              type: value.type,
+              status: { options: [{ name: 'Published' }] },
+            }
+          : name === 'Publication Next Step'
           ? {
               type: value.type,
               select: {
                 options: [
-                  { name: 'Backfill URL/metrics' },
-                  { name: 'No action' },
+                  { name: 'Backfill metrics' },
+                  { name: 'Verify receipt' },
                 ],
               },
             }
@@ -1211,7 +1282,7 @@ describe('Notion Posts mapping', () => {
       },
       '2026-07-31T20:00:00.000Z',
     )).toMatchObject({
-      'Next action': { select: { name: 'No action' } },
+      'Publication Next Step': { select: { name: 'Backfill metrics' } },
     });
   });
 

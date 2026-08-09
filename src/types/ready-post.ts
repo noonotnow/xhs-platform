@@ -9,6 +9,9 @@ export interface XhsPost {
   headline: string;
   caption: string;
   status: string;
+  productionNextStep?: string;
+  publicationStatus?: string;
+  publicationNextStep?: string;
   publishPacketReady: boolean;
   hasVideo: boolean;
   needsMedia: boolean;

@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   load: vi.fn(),
   reconcileDisposition: vi.fn(),
   retryDisposition: vi.fn(),
+  markAwaitingReceipt: vi.fn(),
 }));
 
 vi.mock('@/lib/manual-reconciliation-store', async (importOriginal) => {
@@ -37,6 +38,7 @@ vi.mock('@/lib/notion-posts', async (importOriginal) => {
     ...original,
     getReadyXhsPost: mocks.getPost,
     getXhsPostForManualHandling: mocks.getManualPost,
+    markXhsPostAwaitingReceipt: mocks.markAwaitingReceipt,
   };
 });
 vi.mock('@/lib/manual-post-handling-store', () => ({
@@ -173,7 +175,7 @@ describe('manual reconciliation orchestration', () => {
     expect(mocks.insert).not.toHaveBeenCalled();
   });
 
-  it('allows a stable Approved handled post to verify despite media warnings', async () => {
+  it('allows a pending handled post to verify despite later CREATE edits', async () => {
     mocks.find.mockResolvedValue(null);
     mocks.loadHandling.mockResolvedValue({
       notionPageId: request.notionPageId,
@@ -184,8 +186,8 @@ describe('manual reconciliation orchestration', () => {
       id: request.notionPageId,
       headline: request.expected.title,
       caption: request.expected.caption,
-      status: 'Approved',
-      lastEditedTime: '2026-08-03T12:00:00.000Z',
+      status: 'Ready',
+      lastEditedTime: '2026-08-03T13:00:00.000Z',
       hasVideo: true,
       manualWarnings: [
         'Needs media is still checked',
@@ -204,8 +206,7 @@ describe('manual reconciliation orchestration', () => {
     }, request.idempotencyKey)).resolves.toMatchObject({ created: true });
     expect(mocks.insert).toHaveBeenCalledWith(expect.objectContaining({
       expected: expect.objectContaining({
-        notionVersion: '2026-08-03T12:00:00.000Z',
-        matchFields: ['title', 'caption'],
+        matchFields: [],
       }),
     }));
   });

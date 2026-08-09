@@ -37,6 +37,7 @@ import type {
 export type PropertyMap = Record<string, {
   type: string;
   select?: { options: Array<{ name: string }> };
+  status?: { options: Array<{ name: string }> };
 }>;
 type PageProperty = PageObjectResponse['properties'][string];
 type PropertyUpdates = UpdatePageParameters['properties'];
@@ -48,6 +49,9 @@ const PROPERTY_ALIASES = {
   headline: ['Headline', 'Name', 'Title'],
   platform: ['Platform', 'Platforms'],
   status: ['Status'],
+  productionNextStep: ['Production Next Step'],
+  publicationStatus: ['Publication Status'],
+  publicationNextStep: ['Publication Next Step'],
   thumbnail: ['Thumbnail', 'Thumbnail URL'],
   mediaUrls: ['Image URLs', 'Image URL', 'Images'],
   caption: ['Caption', 'Caption text', 'Weibo text', 'Weibo Text', 'Weibo'],
@@ -337,6 +341,9 @@ export function mapReadyXhsPost(
     headline: plainText(property(page, schema, 'headline')),
     caption: legacyCopy.caption,
     status: plainText(property(page, schema, 'status')),
+    productionNextStep: plainText(property(page, schema, 'productionNextStep')),
+    publicationStatus: plainText(property(page, schema, 'publicationStatus')),
+    publicationNextStep: plainText(property(page, schema, 'publicationNextStep')),
     publishPacketReady,
     hasVideo: checkbox(property(page, schema, 'hasVideo')),
     needsMedia: checkbox(property(page, schema, 'needsMedia')),
@@ -365,7 +372,14 @@ function isUnpublishedRednotePost(page: PageObjectResponse, schema: ResolvedSche
     platform.includes('xiaohongshu') ||
     platform.includes('小红书'),
   );
-  return isRednote && normalized(plainText(property(page, schema, 'status'))) !== 'published';
+  const publicationStatus = normalized(
+    plainText(property(page, schema, 'publicationStatus')),
+  );
+  const legacyStatus = normalized(plainText(property(page, schema, 'status')));
+  const isPublished = publicationStatus
+    ? publicationStatus === 'published'
+    : legacyStatus === 'published';
+  return isRednote && !isPublished;
 }
 
 export function classifyReadyPostCandidate(post: XhsPost): ReadyPostCandidateKind {
@@ -380,7 +394,12 @@ export function toReadyPostCandidate(
   duplicates: Partial<Record<CanonicalProperty, string[]>>,
   includePublished = false,
 ): ReadyXhsPost | null {
-  const isPublished = normalized(plainText(property(page, schema, 'status'))) === 'published';
+  const publicationStatus = normalized(
+    plainText(property(page, schema, 'publicationStatus')),
+  );
+  const isPublished = publicationStatus
+    ? publicationStatus === 'published'
+    : normalized(plainText(property(page, schema, 'status'))) === 'published';
   if (
     !isUnpublishedRednotePost(page, schema) &&
     !(includePublished && isPublished && values(property(page, schema, 'platform'))
@@ -467,11 +486,15 @@ export async function queryReadyCandidatePages(
   databaseId = getDatabaseId(),
   includePublishedCandidates = false,
 ) {
-  const statusType = schema.status ? properties[schema.status]?.type : undefined;
-  const unpublishedFilter: DatabaseFilter | undefined = schema.status && statusType === 'status'
-    ? { property: schema.status, status: { does_not_equal: 'Published' } }
-    : schema.status && statusType === 'select'
-      ? { property: schema.status, select: { does_not_equal: 'Published' } }
+  const publicationStatusName = schema.publicationStatus ?? schema.status;
+  const publicationStatusType = publicationStatusName
+    ? properties[publicationStatusName]?.type
+    : undefined;
+  const unpublishedFilter: DatabaseFilter | undefined =
+    publicationStatusName && publicationStatusType === 'status'
+    ? { property: publicationStatusName, status: { does_not_equal: 'Published' } }
+    : publicationStatusName && publicationStatusType === 'select'
+      ? { property: publicationStatusName, select: { does_not_equal: 'Published' } }
       : undefined;
   const supportsServerCandidateFilter =
     schema.publishPacketReady &&
@@ -480,18 +503,18 @@ export async function queryReadyCandidatePages(
     properties[schema.mediaUrls]?.type === 'rich_text';
   const filter: DatabaseFilter | undefined =
     includePublishedCandidates &&
-      schema.status &&
-      statusType === 'status' &&
+      publicationStatusName &&
+      publicationStatusType === 'status' &&
       supportsServerCandidateFilter
       ? {
           or: [
             {
-              property: schema.status,
+              property: publicationStatusName,
               status: { does_not_equal: 'Published' },
             },
             {
               and: [
-                { property: schema.status, status: { equals: 'Published' } },
+                { property: publicationStatusName, status: { equals: 'Published' } },
                 {
                   property: schema.publishPacketReady!,
                   checkbox: { equals: true },
@@ -500,7 +523,7 @@ export async function queryReadyCandidatePages(
             },
             {
               and: [
-                { property: schema.status, status: { equals: 'Published' } },
+                { property: publicationStatusName, status: { equals: 'Published' } },
                 {
                   property: schema.mediaUrls!,
                   rich_text: { contains: '.mov' },
@@ -510,18 +533,18 @@ export async function queryReadyCandidatePages(
           ],
         }
       : includePublishedCandidates &&
-          schema.status &&
-          statusType === 'select' &&
+          publicationStatusName &&
+          publicationStatusType === 'select' &&
           supportsServerCandidateFilter
         ? {
             or: [
               {
-                property: schema.status,
+                property: publicationStatusName,
                 select: { does_not_equal: 'Published' },
               },
               {
                 and: [
-                  { property: schema.status, select: { equals: 'Published' } },
+                  { property: publicationStatusName, select: { equals: 'Published' } },
                   {
                     property: schema.publishPacketReady!,
                     checkbox: { equals: true },
@@ -530,7 +553,7 @@ export async function queryReadyCandidatePages(
               },
               {
                 and: [
-                  { property: schema.status, select: { equals: 'Published' } },
+                  { property: publicationStatusName, select: { equals: 'Published' } },
                   {
                     property: schema.mediaUrls!,
                     rich_text: { contains: '.mov' },
@@ -729,6 +752,98 @@ export function publishedNextAction(
     null;
 }
 
+function requiredPublicationOption(
+  properties: PropertyMap,
+  propertyName: string,
+  expected: string,
+) {
+  const property = properties[propertyName];
+  const options = property?.type === 'status'
+    ? property.status?.options
+    : property?.select?.options;
+  const option = options?.find(
+    (candidate) => normalized(candidate.name) === normalized(expected),
+  )?.name;
+  if (!option) {
+    throw new NotionPostsError(
+      `${propertyName} has no ${expected} option`,
+      'NOTION_SCHEMA_ERROR',
+      503,
+    );
+  }
+  return option;
+}
+
+function buildVerifiedPublicationProperties(
+  schema: ResolvedSchema,
+  duplicates: Partial<Record<CanonicalProperty, string[]>>,
+  schemaProperties: PropertyMap,
+  result: Pick<PublishReadyPostResponse, 'noteId' | 'shareUrl'>,
+  publishedAt: string,
+) {
+  const shareUrl = normalizeRednoteShareUrl(result.noteId, result.shareUrl);
+  if (!isRednoteNoteId(result.noteId) || !shareUrl) {
+    throw new NotionPostsError(
+      'The publication result does not contain both stable RedNote identifiers',
+      'INVALID_SUCCESS_RESULT',
+      400,
+    );
+  }
+  const publicationStatusName = assertWritable(
+    schema,
+    duplicates,
+    'publicationStatus',
+    true,
+  );
+  const publicationNextStepName = assertWritable(
+    schema,
+    duplicates,
+    'publicationNextStep',
+    true,
+  );
+  const noteIdName = assertWritable(schema, duplicates, 'xhsNoteId', true);
+  const shareUrlName = assertWritable(schema, duplicates, 'xhsShareUrl', true);
+  const properties: PropertyUpdates = {
+    [publicationStatusName]: textUpdate(
+      schemaProperties[publicationStatusName].type,
+      requiredPublicationOption(
+        schemaProperties,
+        publicationStatusName,
+        'Published',
+      ),
+    ),
+    [publicationNextStepName]: textUpdate(
+      schemaProperties[publicationNextStepName].type,
+      requiredPublicationOption(
+        schemaProperties,
+        publicationNextStepName,
+        'Backfill metrics',
+      ),
+    ),
+    [noteIdName]: textUpdate(
+      schemaProperties[noteIdName].type,
+      result.noteId,
+    ),
+    [shareUrlName]: textUpdate(
+      schemaProperties[shareUrlName].type,
+      shareUrl,
+    ),
+  };
+  const publishedAtName = assertWritable(
+    schema,
+    duplicates,
+    'publishedAt',
+    false,
+  );
+  if (publishedAtName) {
+    const type = schemaProperties[publishedAtName].type;
+    properties[publishedAtName] = type === 'date'
+      ? { date: { start: publishedAt } }
+      : textUpdate(type, publishedAt);
+  }
+  return properties;
+}
+
 export function buildPublishedProperties(
   page: PageObjectResponse,
   schema: ResolvedSchema,
@@ -737,67 +852,14 @@ export function buildPublishedProperties(
   result: PublishReadyPostResponse,
   publishedAt: string,
 ) {
-  const shareUrl = normalizeRednoteShareUrl(result.noteId, result.shareUrl);
-  if (!isRednoteNoteId(result.noteId) || !shareUrl) {
-    throw new NotionPostsError(
-      'The publication result does not contain a valid RedNote identity',
-      'INVALID_SUCCESS_RESULT',
-      400,
-    );
-  }
-  const properties: PropertyUpdates = {};
-  const statusName = assertWritable(schema, duplicates, 'status', true);
-  const shareUrlName = assertWritable(schema, duplicates, 'xhsShareUrl', true);
-  properties[statusName!] = textUpdate(page.properties[statusName!].type, 'Published');
-  properties[shareUrlName!] = textUpdate(page.properties[shareUrlName!].type, shareUrl);
-
-  const noteIdName = assertWritable(schema, duplicates, 'xhsNoteId', true);
-  properties[noteIdName] = textUpdate(page.properties[noteIdName].type, result.noteId);
-  for (const [key, value] of [
-    ['publishPacketReady', true],
-    ['needsMedia', false],
-    ['needsCaption', false],
-  ] as const) {
-    const name = assertWritable(schema, duplicates, key, true);
-    properties[name] = checkboxUpdate(page.properties[name].type, value);
-  }
-  const publishedAtName = assertWritable(
+  void page;
+  return buildVerifiedPublicationProperties(
     schema,
     duplicates,
-    'publishedAt',
-    false,
+    schemaProperties,
+    result,
+    publishedAt,
   );
-  if (
-    publishedAtName &&
-    !(date(page.properties[publishedAtName]) || plainText(page.properties[publishedAtName])).trim()
-  ) {
-    const type = page.properties[publishedAtName].type;
-    properties[publishedAtName] = type === 'date'
-      ? { date: { start: publishedAt } }
-      : textUpdate(type, publishedAt);
-  }
-  const nextActionName = assertWritable(
-    schema,
-    duplicates,
-    'nextAction',
-    true,
-  );
-  const currentNextAction = plainText(page.properties[nextActionName]);
-  const nextAction = normalized(currentNextAction) === 'no action'
-    ? currentNextAction
-    : publishedNextAction(schemaProperties, nextActionName);
-  if (!nextAction) {
-    throw new NotionPostsError(
-      'Next action has no Backfill URL/metrics or No action option',
-      'NOTION_SCHEMA_ERROR',
-      503,
-    );
-  }
-  properties[nextActionName] = textUpdate(
-    page.properties[nextActionName].type,
-    nextAction,
-  );
-  return properties;
 }
 
 export function publishedResultState(
@@ -808,9 +870,6 @@ export function publishedResultState(
 ) {
   const shareUrl = normalizeRednoteShareUrl(result.noteId, result.shareUrl);
   if (!shareUrl) return 'conflict' as const;
-  const status = normalized(plainText(property(page, schema, 'status')));
-  if (status !== 'published') return 'unpublished' as const;
-
   const storedShareUrl = plainText(property(page, schema, 'xhsShareUrl'));
   const normalizedStoredShareUrl = normalizeRednoteShareUrl(
     result.noteId,
@@ -827,23 +886,118 @@ export function publishedResultState(
     return 'conflict' as const;
   }
   if (!storedShareUrl || !storedNoteId) return 'unpublished' as const;
-
-  const flagsMatch =
-    checkbox(property(page, schema, 'publishPacketReady')) &&
-    !checkbox(property(page, schema, 'needsMedia')) &&
-    !checkbox(property(page, schema, 'needsCaption'));
+  const status = normalized(
+    plainText(property(page, schema, 'publicationStatus')),
+  );
   const publishedAtMatches = !schema.publishedAt ||
     Boolean(
       date(property(page, schema, 'publishedAt')) ||
       plainText(property(page, schema, 'publishedAt')).trim(),
     );
-  const nextAction = normalized(plainText(property(page, schema, 'nextAction')));
-  const nextActionMatches = Boolean(schema.nextAction) &&
-    (nextAction === 'backfill url/metrics' || nextAction === 'no action');
+  const nextStep = normalized(
+    plainText(property(page, schema, 'publicationNextStep')),
+  );
   const canonicalUrlMatches = storedShareUrl === shareUrl;
-  return canonicalUrlMatches && flagsMatch && publishedAtMatches && nextActionMatches
+  return canonicalUrlMatches &&
+      status === 'published' &&
+      nextStep === 'backfill metrics' &&
+      publishedAtMatches
     ? 'match' as const
     : 'unpublished' as const;
+}
+
+export function buildPublicationAwaitingReceiptProperties(
+  page: PageObjectResponse,
+  schema: ResolvedSchema,
+  duplicates: Partial<Record<CanonicalProperty, string[]>>,
+  schemaProperties: PropertyMap,
+) {
+  const storedShareUrl = plainText(property(page, schema, 'xhsShareUrl')).trim();
+  const storedNoteId = plainText(property(page, schema, 'xhsNoteId')).trim();
+  if (Boolean(storedShareUrl) !== Boolean(storedNoteId)) {
+    throw new NotionPostsError(
+      'The canonical post has a partial RedNote identity and requires operator reconciliation',
+      'NOTION_PUBLISH_CONFLICT',
+      409,
+    );
+  }
+  if (storedShareUrl && storedNoteId) {
+    const status = normalized(
+      plainText(property(page, schema, 'publicationStatus')),
+    );
+    const nextStep = normalized(
+      plainText(property(page, schema, 'publicationNextStep')),
+    );
+    if (status === 'published' && nextStep === 'backfill metrics') {
+      return {};
+    }
+    throw new NotionPostsError(
+      'The canonical post already has a complete RedNote identity and requires receipt reconciliation',
+      'NOTION_PUBLISH_CONFLICT',
+      409,
+    );
+  }
+  if (
+    normalized(plainText(property(page, schema, 'publicationStatus'))) ===
+      'published'
+  ) {
+    throw new NotionPostsError(
+      'Publication Status cannot be Published without both stable RedNote identifiers',
+      'NOTION_PUBLISH_CONFLICT',
+      409,
+    );
+  }
+  const publicationStatusName = assertWritable(
+    schema,
+    duplicates,
+    'publicationStatus',
+    true,
+  );
+  const publicationNextStepName = assertWritable(
+    schema,
+    duplicates,
+    'publicationNextStep',
+    true,
+  );
+  return {
+    [publicationStatusName]: textUpdate(
+      schemaProperties[publicationStatusName].type,
+      requiredPublicationOption(
+        schemaProperties,
+        publicationStatusName,
+        'Verify receipt',
+      ),
+    ),
+    [publicationNextStepName]: textUpdate(
+      schemaProperties[publicationNextStepName].type,
+      requiredPublicationOption(
+        schemaProperties,
+        publicationNextStepName,
+        'Verify receipt',
+      ),
+    ),
+  };
+}
+
+export async function markXhsPostAwaitingReceipt(pageId: string) {
+  assertPageId(pageId);
+  const client = getClient();
+  const { resolved, duplicateAliases, properties: schemaProperties } =
+    await loadSchema(client);
+  const rawPage = await client.pages.retrieve({ page_id: pageId });
+  if (!isFullPage(rawPage)) {
+    throw new NotionPostsError('Notion returned a partial page', 'NOTION_PAGE_ERROR', 502);
+  }
+  assertPostsDatabaseParent(rawPage);
+  const properties = buildPublicationAwaitingReceiptProperties(
+    rawPage,
+    resolved,
+    duplicateAliases,
+    schemaProperties,
+  );
+  if (Object.keys(properties).length > 0) {
+    await client.pages.update({ page_id: pageId, properties });
+  }
 }
 
 export async function markXhsPostPublished(
@@ -933,30 +1087,6 @@ export function chooseExternalReconciliationTarget(
   return { page: null, outcome: 'created' };
 }
 
-function platformUpdate(type: string, current?: PageProperty) {
-  if (type === 'multi_select') {
-    const existing = current?.type === 'multi_select'
-      ? current.multi_select.map((option) => ({ name: option.name }))
-      : [];
-    if (!existing.some((option) => normalized(option.name) === 'rednote')) {
-      existing.push({ name: 'RedNote' });
-    }
-    return { multi_select: existing };
-  }
-  return textUpdate(type, 'RedNote');
-}
-
-function checkboxUpdate(type: string, value: boolean) {
-  if (type !== 'checkbox') {
-    throw new NotionPostsError(
-      `Notion property type ${type} cannot store a reconciliation flag`,
-      'NOTION_SCHEMA_ERROR',
-      503,
-    );
-  }
-  return { checkbox: value };
-}
-
 export function buildExternalPublishedProperties(
   schema: ResolvedSchema,
   duplicates: Partial<Record<CanonicalProperty, string[]>>,
@@ -965,96 +1095,14 @@ export function buildExternalPublishedProperties(
   reconciledAt: string,
   existingPage?: PageObjectResponse,
 ) {
-  const properties: CreatePageParameters['properties'] = {};
-  const requiredKeys = [
-    'headline',
-    'caption',
-    'platform',
-    'status',
-    'hasVideo',
-    'needsMedia',
-    'needsCaption',
-    'xhsNoteId',
-    'xhsShareUrl',
-    'nextAction',
-  ] as const;
-  const names = Object.fromEntries(requiredKeys.map((key) => [
-    key,
-    assertWritable(
-      schema,
-      duplicates,
-      key,
-      true,
-      key === 'platform',
-    ),
-  ])) as Record<(typeof requiredKeys)[number], string>;
-
-  const nextActionOptions = schemaProperties[names.nextAction]?.select?.options ?? [];
-  const nextAction = nextActionOptions.find(
-    (option) => normalized(option.name) === 'backfill url/metrics',
-  )?.name;
-  if (!nextAction) {
-    throw new NotionPostsError(
-      'Next action has no Backfill URL/metrics option',
-      'NOTION_SCHEMA_ERROR',
-      503,
-    );
-  }
-
-  properties[names.headline] = textUpdate(
-    schemaProperties[names.headline].type,
-    snapshot.title,
-  );
-  properties[names.caption] = textUpdate(
-    schemaProperties[names.caption].type,
-    snapshot.caption,
-  );
-  properties[names.platform] = platformUpdate(
-    schemaProperties[names.platform].type,
-    existingPage?.properties[names.platform],
-  );
-  properties[names.status] = textUpdate(schemaProperties[names.status].type, 'Published');
-  properties[names.hasVideo] = checkboxUpdate(
-    schemaProperties[names.hasVideo].type,
-    snapshot.mediaType === 'video',
-  );
-  properties[names.needsMedia] = checkboxUpdate(
-    schemaProperties[names.needsMedia].type,
-    false,
-  );
-  properties[names.needsCaption] = checkboxUpdate(
-    schemaProperties[names.needsCaption].type,
-    false,
-  );
-  properties[names.xhsNoteId] = textUpdate(
-    schemaProperties[names.xhsNoteId].type,
-    snapshot.noteId,
-  );
-  properties[names.xhsShareUrl] = textUpdate(
-    schemaProperties[names.xhsShareUrl].type,
-    snapshot.shareUrl,
-  );
-  properties[names.nextAction] = textUpdate(
-    schemaProperties[names.nextAction].type,
-    nextAction,
-  );
-
-  const packetReadyName = duplicates.publishPacketReady
-    ? null
-    : assertWritable(schema, duplicates, 'publishPacketReady', false);
-  if (packetReadyName && schemaProperties[packetReadyName].type === 'checkbox') {
-    properties[packetReadyName] = { checkbox: false };
-  }
-  const publishedAtName = duplicates.publishedAt
-    ? null
-    : assertWritable(schema, duplicates, 'publishedAt', false);
-  if (publishedAtName) {
-    const type = schemaProperties[publishedAtName].type;
-    properties[publishedAtName] = type === 'date'
-      ? { date: { start: reconciledAt } }
-      : textUpdate(type, reconciledAt);
-  }
-  return properties;
+  void existingPage;
+  return buildVerifiedPublicationProperties(
+    schema,
+    duplicates,
+    schemaProperties,
+    snapshot,
+    reconciledAt,
+  ) as CreatePageParameters['properties'];
 }
 
 export function buildManualPublishedProperties(
@@ -1065,67 +1113,14 @@ export function buildManualPublishedProperties(
   reconciledAt: string,
   existingPage: PageObjectResponse,
 ) {
-  const properties: CreatePageParameters['properties'] = {};
-  const requiredKeys = [
-    'platform',
-    'status',
-    'xhsNoteId',
-    'xhsShareUrl',
-    'nextAction',
-  ] as const;
-  const names = Object.fromEntries(requiredKeys.map((key) => [
-    key,
-    assertWritable(
-      schema,
-      duplicates,
-      key,
-      true,
-      key === 'platform',
-    ),
-  ])) as Record<(typeof requiredKeys)[number], string>;
-  const nextActionOptions = schemaProperties[names.nextAction]?.select?.options ?? [];
-  const nextAction = nextActionOptions.find(
-    (option) => normalized(option.name) === 'backfill url/metrics',
-  )?.name;
-  if (!nextAction) {
-    throw new NotionPostsError(
-      'Next action has no Backfill URL/metrics option',
-      'NOTION_SCHEMA_ERROR',
-      503,
-    );
-  }
-
-  properties[names.platform] = platformUpdate(
-    schemaProperties[names.platform].type,
-    existingPage.properties[names.platform],
-  );
-  properties[names.status] = textUpdate(
-    schemaProperties[names.status].type,
-    'Published',
-  );
-  properties[names.xhsNoteId] = textUpdate(
-    schemaProperties[names.xhsNoteId].type,
-    snapshot.noteId,
-  );
-  properties[names.xhsShareUrl] = textUpdate(
-    schemaProperties[names.xhsShareUrl].type,
-    snapshot.shareUrl,
-  );
-  properties[names.nextAction] = textUpdate(
-    schemaProperties[names.nextAction].type,
-    nextAction,
-  );
-
-  const publishedAtName = duplicates.publishedAt
-    ? null
-    : assertWritable(schema, duplicates, 'publishedAt', false);
-  if (publishedAtName) {
-    const type = schemaProperties[publishedAtName].type;
-    properties[publishedAtName] = type === 'date'
-      ? { date: { start: reconciledAt } }
-      : textUpdate(type, reconciledAt);
-  }
-  return properties;
+  void existingPage;
+  return buildVerifiedPublicationProperties(
+    schema,
+    duplicates,
+    schemaProperties,
+    snapshot,
+    reconciledAt,
+  ) as CreatePageParameters['properties'];
 }
 
 function externalReconciliationNote(noteId: string) {
@@ -1179,7 +1174,7 @@ export async function reconcileExternalXhsPost(
   snapshot: ExternalPostSnapshot,
   reconciledAt: string,
   targetPageId?: string,
-  manualHandling?: { expectedNotionVersion: string },
+  manualHandling?: Record<string, never>,
 ) {
   const client = getClient();
   const { resolved, duplicateAliases, properties: schemaProperties } =
@@ -1253,37 +1248,6 @@ export async function reconcileExternalXhsPost(
         outcome: 'targeted_page' as const,
       };
     }
-    const current = toReadyPostCandidate(rawTarget, resolved, duplicateAliases, true);
-    if (
-      !current
-      || (
-        manualHandling
-          ? current.status.trim().toLowerCase() !== 'approved'
-            || current.lastEditedTime !== manualHandling.expectedNotionVersion
-          : current.candidateKind !== 'packet_ready'
-      )
-    ) {
-      throw new NotionPostsError(
-        'The canonical post changed and is no longer eligible for manual reconciliation',
-        'NOTION_RECONCILIATION_TARGET_CHANGED',
-        409,
-      );
-    }
-    const currentMediaType = current.hasVideo ? 'video' : 'image';
-    if (
-      !manualHandling
-      && (
-        current.headline.trim() !== snapshot.title
-        || current.caption !== snapshot.caption
-        || currentMediaType !== snapshot.mediaType
-      )
-    ) {
-      throw new NotionPostsError(
-        'The canonical post metadata changed after reconciliation was requested',
-        'NOTION_RECONCILIATION_TARGET_CHANGED',
-        409,
-      );
-    }
     const properties = manualHandling
       ? buildManualPublishedProperties(
           resolved,
@@ -1309,33 +1273,24 @@ export async function reconcileExternalXhsPost(
     };
   }
   const target = chooseExternalReconciliationTarget(noteMatches, urlMatches);
+  if (!target.page) {
+    throw new NotionPostsError(
+      'A verified receipt cannot create or select a CREATE-owned Posts record',
+      'NOTION_RECONCILIATION_TARGET_REQUIRED',
+      409,
+    );
+  }
   const properties = buildExternalPublishedProperties(
     resolved,
     duplicateAliases,
     schemaProperties,
     snapshot,
     reconciledAt,
-    target.page ?? undefined,
+    target.page,
   );
   const note = externalReconciliationNote(snapshot.noteId);
 
-  if (target.page) {
-    await client.pages.update({ page_id: target.page.id, properties });
-    await ensureExternalReconciliationNote(client, target.page.id, note);
-    return { notionPageId: target.page.id, outcome: target.outcome };
-  }
-
-  const created = await client.pages.create({
-    parent: { database_id: getDatabaseId() },
-    properties,
-    children: reconciliationNoteChildren(note),
-  });
-  if (!isFullPage(created)) {
-    throw new NotionPostsError(
-      'Notion returned a partial page after reconciliation',
-      'NOTION_PAGE_ERROR',
-      502,
-    );
-  }
-  return { notionPageId: created.id, outcome: target.outcome };
+  await client.pages.update({ page_id: target.page.id, properties });
+  await ensureExternalReconciliationNote(client, target.page.id, note);
+  return { notionPageId: target.page.id, outcome: target.outcome };
 }

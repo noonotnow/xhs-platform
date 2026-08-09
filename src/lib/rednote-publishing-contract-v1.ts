@@ -21,6 +21,25 @@ export const REDNOTE_NEXT_ACTIONS = [
 ] as const;
 export type RednoteNextAction = (typeof REDNOTE_NEXT_ACTIONS)[number];
 
+export const REDNOTE_PUBLICATION_STATUSES = [
+  'Not attempted',
+  'Worker claimed',
+  'Worker failed',
+  'Verify receipt',
+  'Backfill metadata',
+  'Published',
+] as const;
+export type RednotePublicationStatus =
+  (typeof REDNOTE_PUBLICATION_STATUSES)[number];
+
+export const REDNOTE_PUBLICATION_NEXT_STEPS = [
+  'Worker failed',
+  'Verify receipt',
+  'Backfill metrics',
+] as const;
+export type RednotePublicationNextStep =
+  (typeof REDNOTE_PUBLICATION_NEXT_STEPS)[number];
+
 export const REDNOTE_PUBLISH_EXECUTIONS = [
   'Not attempted',
   'Worker claimed',
@@ -69,6 +88,9 @@ export type RednoteReceiptLookupState =
 export const REDNOTE_CANONICAL_PROPERTIES = {
   status: 'Status',
   nextAction: 'Next action',
+  productionNextStep: 'Production Next Step',
+  publicationStatus: 'Publication Status',
+  publicationNextStep: 'Publication Next Step',
   publishExecution: 'Publish execution',
   activeAttemptId: 'Active XHS attempt ID',
   scheduledDate: 'ScheduledDate',
@@ -135,6 +157,22 @@ export function assertCanonicalStatusWrite(
 ): asserts value is RednotePostStatus {
   if (!REDNOTE_POST_STATUSES.some((candidate) => candidate === value)) {
     throw new Error(`${value} is not a canonical Status`);
+  }
+}
+
+export function assertCanonicalPublicationStatusWrite(
+  value: string,
+): asserts value is RednotePublicationStatus {
+  if (!REDNOTE_PUBLICATION_STATUSES.some((candidate) => candidate === value)) {
+    throw new Error(`${value} is not a canonical Publication Status`);
+  }
+}
+
+export function assertCanonicalPublicationNextStepWrite(
+  value: string,
+): asserts value is RednotePublicationNextStep {
+  if (!REDNOTE_PUBLICATION_NEXT_STEPS.some((candidate) => candidate === value)) {
+    throw new Error(`${value} is not a canonical Publication Next Step`);
   }
 }
 
@@ -292,13 +330,13 @@ export function hasAtomicPublishedIdentity(value: {
 }
 
 export function assertPublishedInvariant(value: {
-  status: RednotePostStatus;
+  publicationStatus: RednotePublicationStatus;
   rednoteUrl?: string | null;
   rednoteNoteId?: string | null;
 }): void {
   if (
     !hasAtomicPublishedIdentity(value) ||
-    (value.status === 'Published' &&
+    (value.publicationStatus === 'Published' &&
       (!value.rednoteUrl || !value.rednoteNoteId))
   ) {
     throw new Error('Published requires Rednote URL and Rednote Note ID atomically');
