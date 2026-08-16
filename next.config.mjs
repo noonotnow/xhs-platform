@@ -1,5 +1,10 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  experimental: {
+    // Enables src/instrumentation.ts, which runs DB migrations at server
+    // startup before the first request is handled.
+    instrumentationHook: true,
+  },
   images: {
     remotePatterns: [
       {
