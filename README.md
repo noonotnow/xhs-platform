@@ -114,9 +114,9 @@ Manual Creator publishing is the default path. Automation is optional and must
 be explicitly selected; `ScheduledDate` is expected on every post but never
 opts a post into automation, marks it complete, locks it, or hides it.
 
-Apply `migrations/015_plan_operator_scheduled_posts.sql`, then
-`migrations/016_manual_first_receipt_lane.sql` before deploying this release.
-Migration 016 generalizes the existing PLAN marker, so deploy the database
+Apply `migrations/016_plan_operator_scheduled_posts.sql`, then
+`migrations/017_manual_first_receipt_lane.sql` before deploying this release.
+Migration 017 generalizes the existing PLAN marker, so deploy the database
 migration first, the XHS platform second, and worker changes last. Do not enable
 new worker dispatch until the platform deployment is healthy.
 
@@ -145,7 +145,7 @@ requires a UUID `Idempotency-Key` and exact
 
 ### PLAN operator-scheduled integration
 
-Apply migrations 015 and 016 in order, then configure the same
+Apply migrations 016 and 017 in order, then configure the same
 `PLAN_INTEGRATION_TOKEN` in XHS and PLAN. PLAN calls
 `POST /api/integrations/plan/operator-scheduled` with
 `Authorization: Bearer <PLAN_INTEGRATION_TOKEN>`, a UUID `Idempotency-Key`
@@ -324,7 +324,7 @@ enters reconciliation immediately; it is never returned as dispatch work.
 
 #### Operator-attested scheduled success
 
-Apply `migrations/013_operator_success_attestations.sql` before enabling the
+Apply `migrations/014_operator_success_attestations.sql` before enabling the
 operator action. Deploy in this order: migration and platform code with
 `LOCAL_PUBLISH_WORKER_ATTESTATION_CONTRACT_REVISION` unset, a worker that
 implements `operator-success-attestation/v1`, then the exact environment value
