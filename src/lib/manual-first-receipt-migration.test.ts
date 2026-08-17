@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 describe('manual-first receipt migration', () => {
   it('adds durable pending/reconciled identity and dispatch guards additively', () => {
     const migration = readFileSync(
-      join(process.cwd(), 'migrations/016_manual_first_receipt_lane.sql'),
+      join(process.cwd(), 'migrations/017_manual_first_receipt_lane.sql'),
       'utf8',
     );
     expect(migration).toContain("handling_mode IN ('scheduled', 'published')");
