@@ -23,6 +23,7 @@ interface ManualPostHandlingRow extends QueryResultRow {
   share_url: string | null;
   published_at: Date | string | null;
   reconciled_at: Date | string | null;
+  stable_link_captured_at: Date | string | null;
   idempotency_key: string;
   recorded_at: Date | string;
   updated_at: Date | string;
@@ -67,6 +68,9 @@ function mapRow(row: ManualPostHandlingRow): ManualPostHandlingSummary {
     ...(row.share_url ? { shareUrl: row.share_url } : {}),
     ...(optionalIso(row.published_at) ? { publishedAt: optionalIso(row.published_at) } : {}),
     ...(optionalIso(row.reconciled_at) ? { reconciledAt: optionalIso(row.reconciled_at) } : {}),
+    ...(optionalIso(row.stable_link_captured_at)
+      ? { stableLinkCapturedAt: optionalIso(row.stable_link_captured_at) }
+      : {}),
     createdAt: iso(row.recorded_at),
     updatedAt: iso(row.updated_at),
   };
