@@ -4,6 +4,7 @@ import {
   parseManualReconciliationWorkerResult,
 } from '@/lib/manual-reconciliation-input';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
+import { syncReconciledPlanProvenance } from '@/lib/plan-reconciliation-sync';
 import {
   assertManualVerifiedSnapshot,
   claimDueManualReconciliations,
@@ -184,7 +185,44 @@ export async function claimManualReconciliations(limit: number) {
   return claimDueManualReconciliations(limit, leaseSeconds());
 }
 
-export async function submitManualReconciliationResult(
+async function reconciliationSummaryWithPlanSync(
+    reconciliation: Awaited<ReturnType<typeof loadManualReconciliation>>,
+    ) {
+    const summary = manualReconciliationSummary(reconciliation);
+    try {
+      const handling = await loadManualPostHandlingByPage(reconciliation.notionPageId);
+      if (
+        handling?.mode !== 'scheduled'
+        || handling.recordedBy !== 'plan'
+        || handling.receiptStatus !== 'reconciled'
+      ) {
+        return summary;
+      }
+      const planProvenanceSync = await syncReconciledPlanProvenance(reconciliation.notionPageId);
+      if (planProvenanceSync.status !== 'synced') {
+        console.warn('[XHS] PLAN reconciliation provenance sync did not complete', {
+          notionPageId: reconciliation.notionPageId,
+          code: planProvenanceSync.code,
+        });
+      }
+      return { ...summary, planProvenanceSync };
+    } catch (error) {
+      console.error('[XHS] PLAN reconciliation provenance sync lookup failed', {
+        notionPageId: reconciliation.notionPageId,
+        name: error instanceof Error ? error.name : 'UnknownError',
+      });
+      return {
+        ...summary,
+        planProvenanceSync: {
+          status: 'failed' as const,
+          code: 'PLAN_RECONCILIATION_SYNC_LOOKUP_FAILED',
+          message: 'XHS could not determine whether this reconciled receipt needs PLAN provenance sync.',
+        },
+      };
+    }
+    }
+
+    export async function submitManualReconciliationResult(
   id: string,
   claimToken: string,
   rawResult: unknown,
@@ -245,7 +283,7 @@ export async function submitManualReconciliationResult(
     }
   }
 
-  if (request.status === 'reconciled') return manualReconciliationSummary(request);
+  if (request.status === 'reconciled') return reconciliationSummaryWithPlanSync(request);
   try {
     const receipt = await reconcileVerifiedExternalPost({
       snapshot: result.snapshot,
@@ -254,7 +292,7 @@ export async function submitManualReconciliationResult(
       source: 'manual',
       ...(request.expected.notionVersion ? { manualHandling: {} } : {}),
     });
-    return manualReconciliationSummary(await completeManualReconciliation(
+    return reconciliationSummaryWithPlanSync(await completeManualReconciliation(
       id,
       claimToken,
       receipt.id,
