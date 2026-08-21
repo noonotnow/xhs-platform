@@ -486,6 +486,16 @@ export async function queryReadyCandidatePages(
   databaseId = getDatabaseId(),
   includePublishedCandidates = false,
 ) {
+  const platformName = schema.platform;
+  const platformType = platformName ? properties[platformName]?.type : undefined;
+  // Scope to Rednote posts only — this is the XHS admin panel.
+  const platformFilter: DatabaseFilter | undefined =
+    platformName && platformType === 'select'
+      ? { property: platformName, select: { equals: 'Rednote' } }
+      : platformName && platformType === 'multi_select'
+        ? { property: platformName, multi_select: { contains: 'Rednote' } }
+        : undefined;
+
   const publicationStatusName = schema.publicationStatus ?? schema.status;
   const publicationStatusType = publicationStatusName
     ? properties[publicationStatusName]?.type
@@ -496,102 +506,54 @@ export async function queryReadyCandidatePages(
     : publicationStatusName && publicationStatusType === 'select'
       ? { property: publicationStatusName, select: { does_not_equal: 'Published' } }
       : undefined;
-  const supportsServerCandidateFilter =
-    schema.publishPacketReady &&
-    properties[schema.publishPacketReady]?.type === 'checkbox' &&
-    schema.mediaUrls &&
-    properties[schema.mediaUrls]?.type === 'rich_text';
-  const filter: DatabaseFilter | undefined =
-    includePublishedCandidates &&
-      publicationStatusName &&
-      publicationStatusType === 'status' &&
-      supportsServerCandidateFilter
-      ? {
-          or: [
-            {
-              property: publicationStatusName,
-              status: { does_not_equal: 'Published' },
-            },
-            {
-              and: [
-                { property: publicationStatusName, status: { equals: 'Published' } },
-                {
-                  property: schema.publishPacketReady!,
-                  checkbox: { equals: true },
-                },
-              ],
-            },
-            {
-              and: [
-                { property: publicationStatusName, status: { equals: 'Published' } },
-                {
-                  property: schema.mediaUrls!,
-                  rich_text: { contains: '.mov' },
-                },
-              ],
-            },
-          ],
-        }
-      : includePublishedCandidates &&
-          publicationStatusName &&
-          publicationStatusType === 'select' &&
-          supportsServerCandidateFilter
-        ? {
-            or: [
-              {
-                property: publicationStatusName,
-                select: { does_not_equal: 'Published' },
-              },
-              {
-                and: [
-                  { property: publicationStatusName, select: { equals: 'Published' } },
-                  {
-                    property: schema.publishPacketReady!,
-                    checkbox: { equals: true },
-                  },
-                ],
-              },
-              {
-                and: [
-                  { property: publicationStatusName, select: { equals: 'Published' } },
-                  {
-                    property: schema.mediaUrls!,
-                    rich_text: { contains: '.mov' },
-                  },
-                ],
-              },
-            ],
-          }
-        : includePublishedCandidates
-          ? undefined
-          : unpublishedFilter;
-  // Paginate until all results are fetched. A safety cap prevents runaway
-  // queries if the database grows very large.
-  const PAGE_CAP = 500;
-  const allResults: PageObjectResponse[] = [];
-  let cursor: string | undefined;
-  do {
-    const response: QueryDatabaseResponse = await client.databases.query({
-      database_id: databaseId,
-      page_size: 100,
-      sorts: [{ timestamp: 'last_edited_time', direction: 'descending' }],
-      ...(filter ? { filter } : {}),
-      ...(cursor ? { start_cursor: cursor } : {}),
+  const actionableCandidateFilter = buildReadyPostCandidatesQueryFilter(
+    schema.publishPacketReady,
+    schema.publishPacketReady
+      ? properties[schema.publishPacketReady]?.type
+      : undefined,
+    schema.mediaUrls,
+    schema.mediaUrls ? properties[schema.mediaUrls]?.type : undefined,
+  );
+  // The Admin panel's post picker needs dispatchable packets and MOV staging
+  // trials—not every unfinished Rednote idea in the production database.
+  // Manual receipt verification is loaded from the local job store separately.
+  const filter = (
+    actionableCandidateFilter
+      ? includePublishedCandidates
+        ? actionableCandidateFilter
+        : unpublishedFilter
+          ? { and: [unpublishedFilter, actionableCandidateFilter] }
+          : actionableCandidateFilter
+      : includePublishedCandidates
+        ? undefined
+        : unpublishedFilter
+  ) as DatabaseFilter | undefined;
+  // Combine the publication-status filter with the platform filter.
+  // The Notion SDK's generated union is narrower for nested compound filters
+  // than the API accepts, so preserve the runtime shape with an explicit cast.
+  const combinedFilter = (
+    filter && platformFilter
+      ? { and: [platformFilter, filter] }
+      : (filter ?? platformFilter)
+  ) as DatabaseFilter | undefined;
+
+  // Keep the Admin response bounded. Notion databases can contain many
+  // historical packet-ready records; loading them all makes the Admin route
+  // slow and used to turn a large backlog into a 503. The query is sorted by
+  // last edited time, so the first page contains the newest actionable records.
+  const response: QueryDatabaseResponse = await client.databases.query({
+    database_id: databaseId,
+    page_size: 100,
+    sorts: [{ timestamp: 'last_edited_time', direction: 'descending' }],
+    ...(combinedFilter ? { filter: combinedFilter } : {}),
+  });
+  if (response.has_more) {
+    console.warn('Admin candidate list truncated at 100 Notion records', {
+      databaseId,
+      includePublishedCandidates,
     });
-    const page = response.results.filter(isFullPage);
-    allResults.push(...page);
-    cursor = response.has_more && response.next_cursor
-      ? response.next_cursor
-      : undefined;
-  } while (cursor && allResults.length < PAGE_CAP);
-  if (allResults.length >= PAGE_CAP) {
-    throw new NotionPostsError(
-      `More than ${PAGE_CAP} active Posts records were found; reduce or archive the database before retrying`,
-      'READY_POSTS_LIMIT_EXCEEDED',
-      503,
-    );
   }
-  return allResults;
+  return response.results.filter(isFullPage);
 }
 
 async function notionBoundary<T>(
