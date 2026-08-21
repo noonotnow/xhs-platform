@@ -242,6 +242,7 @@ describe('manual reconciliation persistence', () => {
       'COMMIT',
     ]));
     expect(statements.join('\n')).toContain("source = 'manual'");
+    expect(statements.join('\n')).toContain('stable_link_captured_at = CURRENT_TIMESTAMP');
   });
 
   it('rolls back when the durable manual handling cannot be reconciled', async () => {
