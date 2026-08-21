@@ -15,6 +15,7 @@ export interface ManualPostHandlingSummary {
   shareUrl?: string;
   publishedAt?: string;
   reconciledAt?: string;
+  stableLinkCapturedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
