@@ -39,6 +39,9 @@ function mapHandling(
     recordedBy: handling.recordedBy,
     recordedAt: handling.createdAt,
     ...(handling.reconciledAt ? { reconciledAt: handling.reconciledAt } : {}),
+    ...(handling.stableLinkCapturedAt
+      ? { stableLinkCapturedAt: handling.stableLinkCapturedAt }
+      : {}),
     publicationStatus: handling.receiptStatus === 'reconciled'
       ? 'Published' as const
       : 'Verify receipt' as const,
