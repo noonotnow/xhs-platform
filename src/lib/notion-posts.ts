@@ -506,75 +506,28 @@ export async function queryReadyCandidatePages(
     : publicationStatusName && publicationStatusType === 'select'
       ? { property: publicationStatusName, select: { does_not_equal: 'Published' } }
       : undefined;
-  const supportsServerCandidateFilter =
-    schema.publishPacketReady &&
-    properties[schema.publishPacketReady]?.type === 'checkbox' &&
-    schema.mediaUrls &&
-    properties[schema.mediaUrls]?.type === 'rich_text';
-  const filter: DatabaseFilter | undefined =
-    includePublishedCandidates &&
-      publicationStatusName &&
-      publicationStatusType === 'status' &&
-      supportsServerCandidateFilter
-      ? {
-          or: [
-            {
-              property: publicationStatusName,
-              status: { does_not_equal: 'Published' },
-            },
-            {
-              and: [
-                { property: publicationStatusName, status: { equals: 'Published' } },
-                {
-                  property: schema.publishPacketReady!,
-                  checkbox: { equals: true },
-                },
-              ],
-            },
-            {
-              and: [
-                { property: publicationStatusName, status: { equals: 'Published' } },
-                {
-                  property: schema.mediaUrls!,
-                  rich_text: { contains: '.mov' },
-                },
-              ],
-            },
-          ],
-        }
-      : includePublishedCandidates &&
-          publicationStatusName &&
-          publicationStatusType === 'select' &&
-          supportsServerCandidateFilter
-        ? {
-            or: [
-              {
-                property: publicationStatusName,
-                select: { does_not_equal: 'Published' },
-              },
-              {
-                and: [
-                  { property: publicationStatusName, select: { equals: 'Published' } },
-                  {
-                    property: schema.publishPacketReady!,
-                    checkbox: { equals: true },
-                  },
-                ],
-              },
-              {
-                and: [
-                  { property: publicationStatusName, select: { equals: 'Published' } },
-                  {
-                    property: schema.mediaUrls!,
-                    rich_text: { contains: '.mov' },
-                  },
-                ],
-              },
-            ],
-          }
-        : includePublishedCandidates
-          ? undefined
-          : unpublishedFilter;
+  const actionableCandidateFilter = buildReadyPostCandidatesQueryFilter(
+    schema.publishPacketReady,
+    schema.publishPacketReady
+      ? properties[schema.publishPacketReady]?.type
+      : undefined,
+    schema.mediaUrls,
+    schema.mediaUrls ? properties[schema.mediaUrls]?.type : undefined,
+  );
+  // The Admin panel's post picker needs dispatchable packets and MOV staging
+  // trials—not every unfinished Rednote idea in the production database.
+  // Manual receipt verification is loaded from the local job store separately.
+  const filter = (
+    actionableCandidateFilter
+      ? includePublishedCandidates
+        ? actionableCandidateFilter
+        : unpublishedFilter
+          ? { and: [unpublishedFilter, actionableCandidateFilter] }
+          : actionableCandidateFilter
+      : includePublishedCandidates
+        ? undefined
+        : unpublishedFilter
+  ) as DatabaseFilter | undefined;
   // Combine the publication-status filter with the platform filter.
   // The Notion SDK's generated union is narrower for nested compound filters
   // than the API accepts, so preserve the runtime shape with an explicit cast.
