@@ -537,33 +537,23 @@ export async function queryReadyCandidatePages(
       : (filter ?? platformFilter)
   ) as DatabaseFilter | undefined;
 
-  // Paginate until all results are fetched. A safety cap prevents runaway
-  // queries if the database grows very large.
-  const PAGE_CAP = 500;
-  const allResults: PageObjectResponse[] = [];
-  let cursor: string | undefined;
-  do {
-    const response: QueryDatabaseResponse = await client.databases.query({
-      database_id: databaseId,
-      page_size: 100,
-      sorts: [{ timestamp: 'last_edited_time', direction: 'descending' }],
-      ...(combinedFilter ? { filter: combinedFilter } : {}),
-      ...(cursor ? { start_cursor: cursor } : {}),
+  // Keep the Admin response bounded. Notion databases can contain many
+  // historical packet-ready records; loading them all makes the Admin route
+  // slow and used to turn a large backlog into a 503. The query is sorted by
+  // last edited time, so the first page contains the newest actionable records.
+  const response: QueryDatabaseResponse = await client.databases.query({
+    database_id: databaseId,
+    page_size: 100,
+    sorts: [{ timestamp: 'last_edited_time', direction: 'descending' }],
+    ...(combinedFilter ? { filter: combinedFilter } : {}),
+  });
+  if (response.has_more) {
+    console.warn('Admin candidate list truncated at 100 Notion records', {
+      databaseId,
+      includePublishedCandidates,
     });
-    const page = response.results.filter(isFullPage);
-    allResults.push(...page);
-    cursor = response.has_more && response.next_cursor
-      ? response.next_cursor
-      : undefined;
-  } while (cursor && allResults.length < PAGE_CAP);
-  if (allResults.length >= PAGE_CAP) {
-    throw new NotionPostsError(
-      `More than ${PAGE_CAP} active Posts records were found; reduce or archive the database before retrying`,
-      'READY_POSTS_LIMIT_EXCEEDED',
-      503,
-    );
   }
-  return allResults;
+  return response.results.filter(isFullPage);
 }
 
 async function notionBoundary<T>(
