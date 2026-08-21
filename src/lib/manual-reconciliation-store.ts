@@ -751,6 +751,7 @@ export async function completeManualReconciliation(
              note_id = $3,
              share_url = $4,
              published_at = $5::timestamptz,
+             stable_link_captured_at = CURRENT_TIMESTAMP,
              reconciled_at = CURRENT_TIMESTAMP,
              updated_at = CURRENT_TIMESTAMP
          WHERE id = $1::uuid
