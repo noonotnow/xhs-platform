@@ -10,6 +10,7 @@ import type {
   ManualReconciliationSummary,
   OperatorSuccessAttestationEvidence,
   PublishBatch,
+  PublishBatchItemState,
   RednotePublishJobRecovery,
   RednotePublishJobRecoveryEvidence,
 } from '@/types/local-publish-job';
@@ -100,6 +101,41 @@ type CopyStatus = {
   ok: boolean;
   message: string;
 };
+
+function shanghaiTime(publishAt: string): string {
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).format(new Date(publishAt)) + ' (Shanghai)';
+  } catch {
+    return '';
+  }
+}
+
+function batchItemStateLabel(state: PublishBatchItemState): string {
+  switch (state) {
+    case 'approved': return 'Pending';
+    case 'queued': return 'Queued';
+    case 'claimed': return 'Claiming';
+    case 'staged': return 'Staged';
+    case 'scheduled': return '✓ Scheduled';
+    case 'submitted': return 'Submitted';
+    case 'operator_attested': return 'Operator attested';
+    case 'verification_pending': return 'Verifying';
+    case 'verified': return '✓ Verified';
+    case 'reconciled': return '✓ Reconciled';
+    case 'failed': return '⚠ Failed';
+    case 'invalidated': return 'Invalidated';
+    case 'needs_approval': return 'Needs approval';
+    default: return state;
+  }
+}
 
 function scheduleStatusClass(status: EditorialScheduleStatus) {
   return {
@@ -395,6 +431,8 @@ export default function ReadyPostsPanel() {
   );
   const pendingBatch = batches.find((batch) =>
     batch.kind === 'bootstrap' && batch.status === 'pending_approval');
+  const approvedBatch = batches.find((batch) =>
+    batch.kind === 'bootstrap' && batch.status === 'approved');
   const supersededBatches = batches
     .filter((batch) => batch.kind === 'bootstrap' && batch.status === 'superseded')
     .slice(0, 3);
@@ -1328,7 +1366,7 @@ export default function ReadyPostsPanel() {
                   <span>
                     {item.dispatchMode === 'post_now'
                       ? `Post now — ${Math.ceil(item.lateBySeconds / 3600)}h late`
-                      : new Date(item.snapshot.publishAt!).toLocaleString()}
+                      : `${new Date(item.snapshot.publishAt!).toLocaleString()} · ${shanghaiTime(item.snapshot.publishAt!)}`}
                     {' · '}{item.snapshot.mediaType}
                   </span>
                   <small>{item.snapshot.caption}</small>
@@ -1393,6 +1431,75 @@ export default function ReadyPostsPanel() {
             </p>
           </div>
         ))}
+        {approvedBatch && (
+          <section className={styles.batchLedger} aria-labelledby="batch-ledger-heading">
+            <div className={styles.headingRow}>
+              <h3 id="batch-ledger-heading">Active scheduled batch</h3>
+              <span>
+                {approvedBatch.items.length} item{approvedBatch.items.length === 1 ? '' : 's'} ·
+                manifest <code>{approvedBatch.manifestHash.slice(0, 12)}…</code>
+              </span>
+            </div>
+            <p className={styles.muted}>
+              Approved{' '}
+              {approvedBatch.approvedAt
+                ? new Date(approvedBatch.approvedAt).toLocaleString()
+                : ''}
+              {approvedBatch.approvedBy ? ` by ${approvedBatch.approvedBy}` : ''}.
+              Items showing ✓ Scheduled or later are safe — never dispatch them again.
+            </p>
+            <ol className={styles.batchItems}>
+              {approvedBatch.items.map((item) => {
+                const state = item.state;
+                const safeStates: PublishBatchItemState[] = [
+                  'scheduled', 'submitted', 'operator_attested',
+                  'verification_pending', 'verified', 'reconciled',
+                ];
+                const isSafe = safeStates.includes(state);
+                const isFailed = state === 'failed';
+                return (
+                  <li key={item.id} className={styles.batchLedgerItem}>
+                    <strong>{item.snapshot.title}</strong>
+                    <span className={`${styles.batchItemState} ${styles[`batchItemState_${state}`]}`}>
+                      {batchItemStateLabel(state)}
+                    </span>
+                    <span>
+                      {item.snapshot.publishAt
+                        ? `${new Date(item.snapshot.publishAt).toLocaleString()} · ${shanghaiTime(item.snapshot.publishAt)}`
+                        : 'No publish time'}
+                      {' · '}{item.snapshot.mediaType}
+                    </span>
+                    {isSafe && (
+                      <small className={styles.batchItemSafe}>
+                        This item is already dispatched. Do not re-run it.
+                      </small>
+                    )}
+                    {isFailed && item.recoveryEvidence && (
+                      <button
+                        className={styles.recoveryButton}
+                        type="button"
+                        disabled={Boolean(recoveryBusyJobId)}
+                        onClick={() => void recoverApprovedJob(
+                          item.recoveryEvidence!,
+                          item.snapshot.title,
+                        )}
+                      >
+                        {recoveryBusyJobId === item.recoveryEvidence.jobId
+                          ? 'Requeueing exact job…'
+                          : 'Confirm exact-job recovery'}
+                      </button>
+                    )}
+                    {isFailed && !item.recoveryEvidence && (
+                      <small className={styles.batchItemFailedReview}>
+                        ⚠ Failed — check job {item.localPublishJobId} for details before retrying.
+                      </small>
+                    )}
+                  </li>
+                );
+              })}
+            </ol>
+          </section>
+        )}
         {recoverableBatches.map((batch) => (
           <div key={`recovery-${batch.id}`} className={styles.recoveryBatch}>
             <strong>Eligible pre-dispatch recovery</strong>

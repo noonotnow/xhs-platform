@@ -1374,3 +1374,84 @@
     text-align: left;
   }
 }
+
+/* ── Active approved batch ledger ── */
+
+.batchLedger {
+  margin-top: 12px;
+  border: 1px solid #d1fae5;
+  border-radius: 8px;
+  padding: 16px;
+  background: #f0fdf4;
+}
+
+.batchLedgerItem {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 0;
+  border-bottom: 1px solid #d1fae5;
+}
+
+.batchLedgerItem:last-child {
+  border-bottom: none;
+}
+
+.batchItemState {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  width: fit-content;
+}
+
+/* Pending / not yet claimed */
+.batchItemState_approved,
+.batchItemState_queued,
+.batchItemState_needs_approval {
+  background: #e5e7eb;
+  color: #374151;
+}
+
+/* In progress */
+.batchItemState_claimed,
+.batchItemState_staged {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+/* Safe — scheduled or further */
+.batchItemState_scheduled,
+.batchItemState_submitted,
+.batchItemState_operator_attested,
+.batchItemState_verification_pending,
+.batchItemState_verified,
+.batchItemState_reconciled {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+/* Failed */
+.batchItemState_failed {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+/* Invalidated */
+.batchItemState_invalidated {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.batchItemSafe {
+  font-size: 0.75rem;
+  color: #065f46;
+  font-style: italic;
+}
+
+.batchItemFailedReview {
+  font-size: 0.75rem;
+  color: #991b1b;
+}
