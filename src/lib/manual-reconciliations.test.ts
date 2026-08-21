@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   reconcileDisposition: vi.fn(),
   retryDisposition: vi.fn(),
   markAwaitingReceipt: vi.fn(),
+  syncPlanProvenance: vi.fn(),
 }));
 
 vi.mock('@/lib/manual-reconciliation-store', async (importOriginal) => {
@@ -43,6 +44,9 @@ vi.mock('@/lib/notion-posts', async (importOriginal) => {
 });
 vi.mock('@/lib/manual-post-handling-store', () => ({
   loadManualPostHandlingByPage: mocks.loadHandling,
+}));
+vi.mock('@/lib/plan-reconciliation-sync', () => ({
+  syncReconciledPlanProvenance: mocks.syncPlanProvenance,
 }));
 vi.mock('@/lib/external-post-reconciliations', () => ({
   reconcileVerifiedExternalPost: mocks.reconcile,
@@ -237,7 +241,37 @@ describe('manual reconciliation orchestration', () => {
       .toBeGreaterThan(mocks.reconcile.mock.invocationCallOrder[0]);
   });
 
-  it('routes targeted requests through verification-only job disposition', async () => {
+  it('syncs PLAN provenance after the operator receipt is durably reconciled', async () => {
+      mocks.assertSnapshot.mockResolvedValue(request);
+      mocks.reconcile.mockResolvedValue({
+        id: '55555555-5555-4555-8555-555555555555',
+        status: 'succeeded',
+      });
+      mocks.complete.mockResolvedValue({ ...request, status: 'reconciled' });
+      mocks.loadHandling.mockResolvedValue({
+        mode: 'scheduled',
+        recordedBy: 'plan',
+        receiptStatus: 'reconciled',
+      });
+      mocks.syncPlanProvenance.mockResolvedValue({
+        status: 'synced',
+        enrichment: { enriched: true },
+      });
+
+      await expect(submitManualReconciliationResult(
+        request.id,
+        request.claimToken,
+        { status: 'verified', snapshot },
+      )).resolves.toMatchObject({
+        status: 'reconciled',
+        planProvenanceSync: { status: 'synced', enrichment: { enriched: true } },
+      });
+      expect(mocks.syncPlanProvenance).toHaveBeenCalledWith(request.notionPageId);
+      expect(mocks.syncPlanProvenance.mock.invocationCallOrder[0])
+        .toBeGreaterThan(mocks.complete.mock.invocationCallOrder[0]);
+    });
+
+      it('routes targeted requests through verification-only job disposition', async () => {
     const targeted = {
       ...request,
       kind: 'targeted_local_job' as const,
