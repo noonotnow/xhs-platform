@@ -576,10 +576,13 @@ export async function queryReadyCandidatePages(
           ? undefined
           : unpublishedFilter;
   // Combine the publication-status filter with the platform filter.
-  const combinedFilter: DatabaseFilter | undefined =
+  // The Notion SDK's generated union is narrower for nested compound filters
+  // than the API accepts, so preserve the runtime shape with an explicit cast.
+  const combinedFilter = (
     filter && platformFilter
       ? { and: [platformFilter, filter] }
-      : (filter ?? platformFilter);
+      : (filter ?? platformFilter)
+  ) as DatabaseFilter | undefined;
 
   // Paginate until all results are fetched. A safety cap prevents runaway
   // queries if the database grows very large.
