@@ -50,6 +50,7 @@ function marker(overrides: Record<string, unknown> = {}) {
     recorded_at: '2026-08-06T16:05:00.000Z',
     updated_at: '2026-08-06T16:05:00.000Z',
     reconciled_at: null,
+    stable_link_captured_at: null,
     ...overrides,
   };
 }
@@ -94,7 +95,8 @@ describe('PLAN operator-scheduled store', () => {
       return result();
     });
 
-    await expect(insertPlanOperatorScheduledState(input, key)).resolves.toMatchObject({
+    const created = await insertPlanOperatorScheduledState(input, key);
+    expect(created).toMatchObject({
       created: true,
       execution: {
         notionPageId: input.notionPageId,
@@ -102,6 +104,7 @@ describe('PLAN operator-scheduled store', () => {
         scheduledAt: input.expectedScheduledAt,
       },
     });
+    expect(created.execution).not.toHaveProperty('stableLinkCapturedAt');
     const statements = mocks.query.mock.calls.map(([text]) => String(text));
     expect(statements).toEqual(expect.arrayContaining([
       expect.stringContaining('UPDATE local_publish_jobs'),
@@ -140,9 +143,21 @@ describe('PLAN operator-scheduled store', () => {
 
   it('accepts exact replay and rejects a mismatched replay with a named 409', async () => {
     mocks.sql.mockResolvedValueOnce(result([marker()]));
-    await expect(loadPlanOperatorScheduledReplay(input, key)).resolves.toMatchObject({
+    const pending = await loadPlanOperatorScheduledReplay(input, key);
+    expect(pending).toMatchObject({
       notionPageId: input.notionPageId,
       scheduledAt: input.expectedScheduledAt,
+    });
+    expect(pending).not.toHaveProperty('stableLinkCapturedAt');
+
+    mocks.sql.mockResolvedValueOnce(result([marker({
+      receipt_status: 'reconciled',
+      reconciled_at: '2026-08-07T14:32:00.000Z',
+      stable_link_captured_at: '2026-08-07T14:33:00.000Z',
+    })]));
+    await expect(loadPlanOperatorScheduledReplay(input, key)).resolves.toMatchObject({
+      state: 'reconciled',
+      stableLinkCapturedAt: '2026-08-07T14:33:00.000Z',
     });
 
     mocks.sql.mockResolvedValueOnce(result([marker({
