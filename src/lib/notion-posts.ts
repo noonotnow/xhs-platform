@@ -565,20 +565,33 @@ export async function queryReadyCandidatePages(
         : includePublishedCandidates
           ? undefined
           : unpublishedFilter;
-  const response: QueryDatabaseResponse = await client.databases.query({
-    database_id: databaseId,
-    page_size: 100,
-    sorts: [{ timestamp: 'last_edited_time', direction: 'descending' }],
-    ...(filter ? { filter } : {}),
-  });
-  if (response.has_more) {
+  // Paginate until all results are fetched. A safety cap prevents runaway
+  // queries if the database grows very large.
+  const PAGE_CAP = 500;
+  const allResults: PageObjectResponse[] = [];
+  let cursor: string | undefined;
+  do {
+    const response: QueryDatabaseResponse = await client.databases.query({
+      database_id: databaseId,
+      page_size: 100,
+      sorts: [{ timestamp: 'last_edited_time', direction: 'descending' }],
+      ...(filter ? { filter } : {}),
+      ...(cursor ? { start_cursor: cursor } : {}),
+    });
+    const page = response.results.filter(isFullPage);
+    allResults.push(...page);
+    cursor = response.has_more && response.next_cursor
+      ? response.next_cursor
+      : undefined;
+  } while (cursor && allResults.length < PAGE_CAP);
+  if (allResults.length >= PAGE_CAP) {
     throw new NotionPostsError(
-      'More than 100 active Posts records were found; reduce or archive the database before retrying',
+      `More than ${PAGE_CAP} active Posts records were found; reduce or archive the database before retrying`,
       'READY_POSTS_LIMIT_EXCEEDED',
       503,
     );
   }
-  return response.results.filter(isFullPage);
+  return allResults;
 }
 
 async function notionBoundary<T>(
