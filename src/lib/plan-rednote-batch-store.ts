@@ -358,3 +358,73 @@ export async function approvePlanRednoteBatchItem(
     status: 200,
   };
 }
+
+
+/**
+ * Notify PLAN that a batch item has been published.
+ *
+ * Call this from the batch-item publish result handler once the XHS worker
+ * confirms a successful publish with a stable Note ID and URL. The function
+ * reads PLAN_RECEIPT_CALLBACK_URL and PLAN_INTEGRATION_TOKEN from the
+ * environment; if either is missing, it logs a warning and returns without
+ * throwing so that the publish result is never blocked by a PLAN callback failure.
+ *
+ * The caller must supply a stable, unique idempotencyKey (e.g. the local_publish_job_id)
+ * so that PLAN can safely replay the callback if it is retried.
+ */
+export async function notifyPlanOfPublish(params: {
+  notionPageId: string;
+  notionVersion: string;
+  noteId: string;
+  stableUrl: string;
+  publishedAt: string;
+  batchId: string;
+  itemId: string;
+  idempotencyKey: string;
+}): Promise<{ ok: boolean; status?: number; error?: string }> {
+  const callbackUrl = process.env.PLAN_RECEIPT_CALLBACK_URL?.trim();
+  const token = process.env.PLAN_INTEGRATION_TOKEN?.trim();
+  if (!callbackUrl || !token) {
+    console.warn(
+      '[plan-rednote-batch] PLAN_RECEIPT_CALLBACK_URL or PLAN_INTEGRATION_TOKEN not set — skipping PLAN receipt notification',
+    );
+    return { ok: false, error: 'PLAN_RECEIPT_CALLBACK_URL or PLAN_INTEGRATION_TOKEN not configured' };
+  }
+
+  const body = JSON.stringify({
+    notionPageId: params.notionPageId,
+    notionVersion: params.notionVersion,
+    noteId: params.noteId,
+    stableUrl: params.stableUrl,
+    publishedAt: params.publishedAt,
+    provenance: {
+      source: 'xhs-platform',
+      batchId: params.batchId,
+      itemId: params.itemId,
+    },
+  });
+
+  try {
+    const response = await fetch(callbackUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+        'Idempotency-Key': params.idempotencyKey,
+      },
+      body,
+    });
+    if (!response.ok && response.status !== 200) {
+      const text = await response.text().catch(() => '');
+      console.error(
+        `[plan-rednote-batch] PLAN receipt callback returned ${response.status}: ${text.slice(0, 200)}`,
+      );
+      return { ok: false, status: response.status, error: text.slice(0, 200) };
+    }
+    return { ok: true, status: response.status };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[plan-rednote-batch] PLAN receipt callback failed:', message);
+    return { ok: false, error: message };
+  }
+}
