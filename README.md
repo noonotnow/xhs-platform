@@ -73,6 +73,7 @@ in Vercel:
 | `NOTION_API_KEY` | Server-only Notion integration token with read/write access to the canonical Posts DB |
 | `NOTION_POSTS_DB_ID` | Canonical Posts database ID shared with the production CREATE workflow |
 | `PLAN_INTEGRATION_TOKEN` | At least 32 random characters shared only with PLAN for page-level operator-scheduled execution state |
+| `PLAN_RECONCILIATION_CALLBACK_URL` | HTTPS PLAN `PATCH /api/posts/operator-scheduled` callback invoked after a PLAN operator receipt becomes reconciled |
 | `LOCAL_PUBLISH_WORKER_TOKEN` | At least 32 random characters shared only with the trusted Mac-local browser worker |
 | `LOCAL_PUBLISH_JOB_LEASE_SECONDS` | Optional worker claim lease; defaults to 7200 seconds and is clamped to 60–86400 |
 | `LOCAL_PUBLISH_VERIFICATION_BACKOFF_SECONDS` | Optional four-value retry schedule; defaults to `900,3600,21600,86400` seconds (15m, 1h, 6h, 24h) |
