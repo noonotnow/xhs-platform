@@ -486,6 +486,16 @@ export async function queryReadyCandidatePages(
   databaseId = getDatabaseId(),
   includePublishedCandidates = false,
 ) {
+  const platformName = schema.platform;
+  const platformType = platformName ? properties[platformName]?.type : undefined;
+  // Scope to Rednote posts only — this is the XHS admin panel.
+  const platformFilter: DatabaseFilter | undefined =
+    platformName && platformType === 'select'
+      ? { property: platformName, select: { equals: 'Rednote' } }
+      : platformName && platformType === 'multi_select'
+        ? { property: platformName, multi_select: { contains: 'Rednote' } }
+        : undefined;
+
   const publicationStatusName = schema.publicationStatus ?? schema.status;
   const publicationStatusType = publicationStatusName
     ? properties[publicationStatusName]?.type
@@ -565,6 +575,12 @@ export async function queryReadyCandidatePages(
         : includePublishedCandidates
           ? undefined
           : unpublishedFilter;
+  // Combine the publication-status filter with the platform filter.
+  const combinedFilter: DatabaseFilter | undefined =
+    filter && platformFilter
+      ? { and: [platformFilter, filter] }
+      : (filter ?? platformFilter);
+
   // Paginate until all results are fetched. A safety cap prevents runaway
   // queries if the database grows very large.
   const PAGE_CAP = 500;
@@ -575,7 +591,7 @@ export async function queryReadyCandidatePages(
       database_id: databaseId,
       page_size: 100,
       sorts: [{ timestamp: 'last_edited_time', direction: 'descending' }],
-      ...(filter ? { filter } : {}),
+      ...(combinedFilter ? { filter: combinedFilter } : {}),
       ...(cursor ? { start_cursor: cursor } : {}),
     });
     const page = response.results.filter(isFullPage);
