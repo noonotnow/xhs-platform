@@ -4,6 +4,57 @@ import { sql } from '@/lib/db';
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const NOTION_PAGE_ID_PATTERN = /^[0-9a-f-]{32,36}$/i;
 
+let tablesEnsured = false;
+
+/**
+ * Creates the plan_rednote_batch_manifests and plan_rednote_batch_manifest_items
+ * tables if they do not yet exist. Safe to call concurrently or repeatedly.
+ */
+async function ensureTables() {
+  if (tablesEnsured) return;
+  await sql`
+    CREATE TABLE IF NOT EXISTS plan_rednote_batch_manifests (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      batch_id TEXT NOT NULL UNIQUE,
+      manifest_id TEXT NOT NULL UNIQUE,
+      idempotency_key TEXT NOT NULL UNIQUE
+        CHECK (char_length(idempotency_key) BETWEEN 1 AND 256),
+      handoff_mode TEXT NOT NULL DEFAULT 'queue',
+      publish_policy TEXT NOT NULL DEFAULT 'explicit-approval-only',
+      manifest_json JSONB NOT NULL,
+      state TEXT NOT NULL DEFAULT 'queued'
+        CHECK (state IN ('queued', 'partially_approved', 'fully_approved')),
+      created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS plan_rednote_batch_manifest_items (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      manifest_pk UUID NOT NULL REFERENCES plan_rednote_batch_manifests(id) ON DELETE CASCADE,
+      batch_id TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      notion_page_id TEXT NOT NULL,
+      notion_version TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'queued'
+        CHECK (state IN ('queued', 'approved', 'rejected')),
+      rejection_reason TEXT
+        CHECK (rejection_reason IS NULL OR char_length(rejection_reason) <= 500),
+      approval_idempotency_key TEXT
+        CHECK (approval_idempotency_key IS NULL OR char_length(approval_idempotency_key) BETWEEN 1 AND 256),
+      created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (batch_id, item_id),
+      UNIQUE (batch_id, notion_page_id)
+    )
+  `;
+  await sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS plan_rednote_batch_manifest_items_approval_key_idx
+      ON plan_rednote_batch_manifest_items (approval_idempotency_key)
+      WHERE approval_idempotency_key IS NOT NULL
+  `;
+  tablesEnsured = true;
+}
+
 export interface PlanRednoteBatchHandoffItem {
   itemId: string;
   notionPageId: string;
@@ -89,7 +140,13 @@ function validateManifest(body: unknown): PlanRednoteBatchManifest {
   return m as unknown as PlanRednoteBatchManifest;
 }
 
-type ItemRow = { item_id: string; notion_page_id: string; notion_version: string; state: string; rejection_reason: string | null };
+type ItemRow = {
+  item_id: string;
+  notion_page_id: string;
+  notion_version: string;
+  state: string;
+  rejection_reason: string | null;
+};
 
 function toReceiptItem(row: ItemRow): PlanRednoteBatchQueueReceipt['items'][number] {
   return {
@@ -105,9 +162,10 @@ export async function queuePlanRednoteBatch(
   body: unknown,
   idempotencyKey: string,
 ): Promise<{ receipt: PlanRednoteBatchQueueReceipt; status: number }> {
+  await ensureTables();
   const manifest = validateManifest(body);
 
-  // Idempotency: check if this exact key was already processed
+  // Idempotency: replay if this exact key was already processed
   const existingByKey = await sql<{ batch_id: string; manifest_id: string }>`
     SELECT batch_id, manifest_id FROM plan_rednote_batch_manifests
     WHERE idempotency_key = ${idempotencyKey}
@@ -126,12 +184,17 @@ export async function queuePlanRednoteBatch(
       FROM plan_rednote_batch_manifest_items WHERE batch_id = ${manifest.batchId}
     `;
     return {
-      receipt: { batchId: manifest.batchId, manifestId: manifest.manifestId, state: 'replayed', items: items.rows.map(toReceiptItem) },
+      receipt: {
+        batchId: manifest.batchId,
+        manifestId: manifest.manifestId,
+        state: 'replayed',
+        items: items.rows.map(toReceiptItem),
+      },
       status: 200,
     };
   }
 
-  // Check for a conflicting batchId / manifestId (different idempotency key)
+  // Reject if batchId or manifestId already used with a different key
   const conflict = await sql<{ id: string }>`
     SELECT id FROM plan_rednote_batch_manifests
     WHERE batch_id = ${manifest.batchId} OR manifest_id = ${manifest.manifestId}
@@ -144,7 +207,7 @@ export async function queuePlanRednoteBatch(
     );
   }
 
-  // Detect active per-page conflicts (a post can only be in one non-rejected batch at a time)
+  // Detect active per-page conflicts (a post can only be in one active batch)
   const pageIds = manifest.items.map((i) => i.notionPageId);
   const activeConflicts = await sql<{ notion_page_id: string }>`
     SELECT notion_page_id FROM plan_rednote_batch_manifest_items
@@ -163,7 +226,7 @@ export async function queuePlanRednoteBatch(
   `;
   const manifestPk = inserted.rows[0].id;
 
-  // Insert each item; items with a conflicting page ID are immediately rejected
+  // Insert each item; those with a conflicting page ID are immediately rejected
   const receiptItems: PlanRednoteBatchQueueReceipt['items'] = [];
   for (const item of manifest.items) {
     const rejected = conflictingPageIds.has(item.notionPageId);
@@ -188,7 +251,12 @@ export async function queuePlanRednoteBatch(
   }
 
   return {
-    receipt: { batchId: manifest.batchId, manifestId: manifest.manifestId, state: 'queued', items: receiptItems },
+    receipt: {
+      batchId: manifest.batchId,
+      manifestId: manifest.manifestId,
+      state: 'queued',
+      items: receiptItems,
+    },
     status: 201,
   };
 }
@@ -200,6 +268,7 @@ export async function approvePlanRednoteBatchItem(
   expectedNotionVersion: string,
   idempotencyKey: string,
 ): Promise<{ approval: PlanRednoteBatchApprovalReceipt; status: number }> {
+  await ensureTables();
   if (!UUID_PATTERN.test(batchId)) {
     throw new LocalPublishJobError('batchId must be a valid UUID', 'VALIDATION_ERROR', 400);
   }
@@ -222,7 +291,16 @@ export async function approvePlanRednoteBatchItem(
         409,
       );
     }
-    return { approval: { batchId, itemId, notionPageId: r.notion_page_id, notionVersion: r.notion_version, state: 'replayed' }, status: 200 };
+    return {
+      approval: {
+        batchId,
+        itemId,
+        notionPageId: r.notion_page_id,
+        notionVersion: r.notion_version,
+        state: 'replayed',
+      },
+      status: 200,
+    };
   }
 
   // Look up the item
@@ -270,7 +348,13 @@ export async function approvePlanRednoteBatchItem(
   `;
 
   return {
-    approval: { batchId, itemId, notionPageId: row.notion_page_id, notionVersion: row.notion_version, state: 'approved' },
+    approval: {
+      batchId,
+      itemId,
+      notionPageId: row.notion_page_id,
+      notionVersion: row.notion_version,
+      state: 'approved',
+    },
     status: 200,
   };
 }
