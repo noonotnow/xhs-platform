@@ -197,7 +197,24 @@ BEGIN
     RAISE EXCEPTION 'rednote publish attempt receipt lookup time cannot move backwards';
   END IF;
 
-  IF NOT OLD.active AND NEW.active THEN
+  IF OLD.approved_at IS NOT NULL
+     AND NEW.approved_at IS DISTINCT FROM OLD.approved_at THEN
+    RAISE EXCEPTION 'rednote publish attempt approval is immutable once recorded';
+  END IF;
+
+  IF NOT OLD.active
+     AND NEW.active
+     AND NOT (
+       OLD.approved_at IS NULL
+       AND NEW.approved_at IS NOT NULL
+       AND OLD.executor_type = 'worker'
+       AND OLD.terminal_outcome IS NULL
+       AND NEW.terminal_outcome IS NULL
+       AND OLD.superseded_by_attempt_id IS NULL
+       AND NEW.superseded_by_attempt_id IS NULL
+       AND OLD.dispatch_authorized_at IS NULL
+       AND NEW.dispatch_authorized_at IS NULL
+     ) THEN
     RAISE EXCEPTION 'rednote publish attempt cannot be reactivated';
   END IF;
 

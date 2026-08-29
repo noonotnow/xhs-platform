@@ -149,6 +149,50 @@ describe('rednote publishing attempt migration', () => {
     }
   });
 
+  it('permits only the first pending-to-approved activation', async () => {
+    const db = await migratedDatabase();
+    const attemptId = '88888888-8888-4888-8888-888888888888';
+    try {
+      await db.exec(workerAttempt(attemptId, 'page-first-approval', false));
+      await db.exec(`
+        UPDATE rednote_publish_attempts
+        SET approved_at = CURRENT_TIMESTAMP,
+            active = TRUE
+        WHERE id = '${attemptId}';
+      `);
+      const approved = await db.query<{
+        active: boolean;
+        approved_at: string | null;
+      }>(`
+        SELECT active, approved_at
+        FROM rednote_publish_attempts
+        WHERE id = '${attemptId}'
+      `);
+      expect(approved.rows[0]).toMatchObject({
+        active: true,
+        approved_at: expect.any(String),
+      });
+
+      await db.exec(`
+        UPDATE rednote_publish_attempts
+        SET active = FALSE
+        WHERE id = '${attemptId}';
+      `);
+      await expect(db.exec(`
+        UPDATE rednote_publish_attempts
+        SET active = TRUE
+        WHERE id = '${attemptId}';
+      `)).rejects.toThrow(/cannot be reactivated/);
+      await expect(db.exec(`
+        UPDATE rednote_publish_attempts
+        SET approved_at = NULL
+        WHERE id = '${attemptId}';
+      `)).rejects.toThrow(/approval is immutable/);
+    } finally {
+      await db.close();
+    }
+  });
+
   it('captures an accepted receipt while keeping requested intent separate from platform reality', async () => {
     const db = await migratedDatabase();
     try {
