@@ -1,5 +1,8 @@
 CREATE TABLE IF NOT EXISTS rednote_publish_attempts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id TEXT NOT NULL DEFAULT 'legacy-local-publish'
+    CHECK (char_length(workspace_id) BETWEEN 1 AND 128),
+  idempotency_key UUID NOT NULL DEFAULT gen_random_uuid(),
   contract_revision TEXT NOT NULL
     CHECK (contract_revision = 'rednote-publishing/v1'),
   source_notion_page_id TEXT NOT NULL
@@ -26,7 +29,9 @@ CREATE TABLE IF NOT EXISTS rednote_publish_attempts (
     CHECK (terminal_outcome IN ('accepted', 'known_failed', 'outcome_unknown')),
   terminal_at TIMESTAMP WITH TIME ZONE,
   receipt_lookup_state TEXT NOT NULL DEFAULT 'pending'
-    CHECK (receipt_lookup_state IN ('pending', 'found', 'not_found', 'not_required')),
+    CHECK (receipt_lookup_state IN (
+      'pending', 'identity_pending', 'found', 'not_found', 'not_required'
+    )),
   receipt_lookup_updated_at TIMESTAMP WITH TIME ZONE
     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   active BOOLEAN NOT NULL DEFAULT FALSE,
@@ -36,6 +41,10 @@ CREATE TABLE IF NOT EXISTS rednote_publish_attempts (
     REFERENCES rednote_publish_attempts(id) ON DELETE RESTRICT,
   diagnostics JSONB NOT NULL DEFAULT '{}'::jsonb
     CHECK (jsonb_typeof(diagnostics) = 'object'),
+  approved_at TIMESTAMP WITH TIME ZONE,
+  claim_token UUID,
+  claim_expires_at TIMESTAMP WITH TIME ZONE,
+  dispatch_authorized_at TIMESTAMP WITH TIME ZONE,
   CONSTRAINT rednote_publish_attempts_terminal_time_check CHECK (
     (terminal_outcome IS NULL AND terminal_at IS NULL)
     OR (terminal_outcome IS NOT NULL AND terminal_at IS NOT NULL)
@@ -59,7 +68,8 @@ CREATE TABLE IF NOT EXISTS rednote_publish_attempts (
     NOT active
     OR (
       executor_type = 'worker'
-      AND terminal_outcome IS DISTINCT FROM 'known_failed'
+       AND terminal_outcome IS DISTINCT FROM 'known_failed'
+       AND terminal_outcome IS DISTINCT FROM 'outcome_unknown'
       AND receipt_lookup_state NOT IN ('found', 'not_required')
       AND superseded_by_attempt_id IS NULL
     )
@@ -75,11 +85,14 @@ CREATE TABLE IF NOT EXISTS rednote_publish_attempts (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS rednote_publish_attempts_active_post_idx
-  ON rednote_publish_attempts (source_notion_page_id)
+  ON rednote_publish_attempts (workspace_id, source_notion_page_id)
   WHERE active;
 
+CREATE UNIQUE INDEX IF NOT EXISTS rednote_publish_attempts_workspace_idempotency_idx
+  ON rednote_publish_attempts (workspace_id, idempotency_key);
+
 CREATE INDEX IF NOT EXISTS rednote_publish_attempts_local_job_idx
-  ON rednote_publish_attempts (source_local_publish_job_id)
+  ON rednote_publish_attempts (workspace_id, source_local_publish_job_id)
   WHERE source_local_publish_job_id IS NOT NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS rednote_publish_attempts_supersedes_idx
@@ -132,6 +145,8 @@ CREATE OR REPLACE FUNCTION guard_rednote_publish_attempt_update()
 RETURNS trigger AS $$
 BEGIN
   IF NEW.id IS DISTINCT FROM OLD.id
+     OR NEW.workspace_id IS DISTINCT FROM OLD.workspace_id
+     OR NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key
      OR NEW.contract_revision IS DISTINCT FROM OLD.contract_revision
      OR NEW.source_notion_page_id IS DISTINCT FROM OLD.source_notion_page_id
      OR NEW.source_local_publish_job_id IS DISTINCT FROM OLD.source_local_publish_job_id
@@ -166,8 +181,12 @@ BEGIN
 
   IF NEW.receipt_lookup_state IS DISTINCT FROM OLD.receipt_lookup_state
      AND NOT (
-       (OLD.receipt_lookup_state = 'pending'
-        AND NEW.receipt_lookup_state IN ('not_found', 'found', 'not_required'))
+        (OLD.receipt_lookup_state = 'pending'
+         AND NEW.receipt_lookup_state IN (
+           'identity_pending', 'not_found', 'found', 'not_required'
+         ))
+        OR (OLD.receipt_lookup_state = 'identity_pending'
+            AND NEW.receipt_lookup_state IN ('not_found', 'found', 'not_required'))
        OR (OLD.receipt_lookup_state = 'not_found'
            AND NEW.receipt_lookup_state IN ('found', 'not_required'))
      ) THEN

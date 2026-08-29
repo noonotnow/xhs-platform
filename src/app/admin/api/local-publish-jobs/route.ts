@@ -6,7 +6,8 @@ import {
   normalizeLocalPublishJobError,
   queueLocalPublishJob,
 } from '@/lib/local-publish-jobs';
-import { listOperatorSuccessAttestationEvidence } from '@/lib/operator-success-attestation-store';
+import { parseWorkspaceId } from '@/lib/workspace-id';
+import { readRednotePublishingOperational } from '@/lib/rednote-publishing-attempt-store';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -37,12 +38,10 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const [jobs, successAttestationCandidates] = await Promise.all([
-      getLocalPublishJobSummaries(),
-      listOperatorSuccessAttestationEvidence(),
-    ]);
+    const workspaceId = parseWorkspaceId(request.headers.get('x-workspace-id'));
+    const operational = await readRednotePublishingOperational(workspaceId);
     return NextResponse.json(
-      { jobs, successAttestationCandidates },
+      operational,
       { headers: NO_STORE_HEADERS },
     );
   } catch (error) {
@@ -60,6 +59,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
+    const workspaceId = parseWorkspaceId(request.headers.get('x-workspace-id'));
     const idempotencyKey = parseIdempotencyKey(request.headers.get('idempotency-key'));
     let body: unknown;
     try {
@@ -71,9 +71,9 @@ export async function POST(request: NextRequest) {
         400,
       );
     }
-    const result = await queueLocalPublishJob(body, idempotencyKey);
+    const result = await queueLocalPublishJob(body, idempotencyKey, workspaceId);
     return NextResponse.json(
-      { job: result.job },
+      { job: result.job, attempt: result.attempt },
       { status: result.created ? 201 : 200, headers: NO_STORE_HEADERS },
     );
   } catch (error) {

@@ -3,7 +3,6 @@ import { claimManualReconciliations } from '@/lib/manual-reconciliations';
 import { normalizeLocalPublishJobError } from '@/lib/local-publish-jobs';
 import { requireLocalPublishWorker } from '@/lib/local-publish-worker-auth';
 import { parseWorkspaceId } from '@/lib/workspace-id';
-import { LocalPublishJobError } from '@/lib/local-publish-job-input';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -19,12 +18,11 @@ export async function GET(request: NextRequest) {
   try {
     requireLocalPublishWorker(request.headers.get('authorization'));
     const workspaceId = parseWorkspaceId(request.headers.get('x-workspace-id'));
-    const rawLimit = Number(new URL(request.url).searchParams.get('limit') ?? 1);
-    if (!Number.isSafeInteger(rawLimit) || rawLimit < 1 || rawLimit > 10) {
-      throw new LocalPublishJobError('limit must be between 1 and 10', 'VALIDATION_ERROR', 400);
+    const [reconciliation] = await claimManualReconciliations(1, workspaceId);
+    if (!reconciliation) {
+      return new NextResponse(null, { status: 204, headers: NO_STORE_HEADERS });
     }
-    const items = await claimManualReconciliations(rawLimit, workspaceId);
-    return NextResponse.json({ items }, { headers: NO_STORE_HEADERS });
+    return NextResponse.json(reconciliation, { headers: NO_STORE_HEADERS });
   } catch (error) {
     const known = normalizeLocalPublishJobError(error);
     return NextResponse.json(

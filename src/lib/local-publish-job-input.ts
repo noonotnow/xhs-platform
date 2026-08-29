@@ -13,6 +13,7 @@ import type {
   LocalPublishMediaType,
   LocalPublishSnapshot,
 } from '@/types/local-publish-job';
+import { createHash } from 'crypto';
 
 const MAX_TITLE_LENGTH = 100;
 const MAX_CAPTION_LENGTH = 5_000;
@@ -105,6 +106,7 @@ export interface QueueLocalPublishInput {
     type: LocalPublishMediaType;
     index: number;
   };
+  mode?: 'schedule' | 'publish';
 }
 
 export function queueCopy(
@@ -133,6 +135,9 @@ export function parseQueueLocalPublishInput(value: unknown): QueueLocalPublishIn
   }
   const notionPageId = cleanText(body.notionPageId, 'notionPageId', 64);
   const lastEditedTime = cleanText(body.lastEditedTime, 'lastEditedTime', 64);
+  if (body.mode !== undefined && body.mode !== 'schedule' && body.mode !== 'publish') {
+    throw new LocalPublishJobError('mode must be schedule or publish', 'VALIDATION_ERROR', 400);
+  }
   return {
     notionPageId,
     lastEditedTime,
@@ -142,6 +147,7 @@ export function parseQueueLocalPublishInput(value: unknown): QueueLocalPublishIn
     caption: cleanText(body.caption, 'caption', MAX_CAPTION_LENGTH),
     tags: normalizeLocalPublishTags(body.tags),
     media: mediaChoice(body.media),
+    ...(body.mode ? { mode: body.mode as 'schedule' | 'publish' } : {}),
   };
 }
 
@@ -220,18 +226,22 @@ export function buildLocalPublishSnapshot(
     mediaUrl,
     ...(compatibilityTrial ? { compatibilityTrial: 'unverified_mov' as const } : {}),
     ...(thumbnailUrl ? { thumbnailUrl } : {}),
-    ...(post.publishAt ? { publishAt: post.publishAt } : {}),
+    ...(post.publishAt && input.mode !== 'publish' ? { publishAt: post.publishAt } : {}),
     notionLastEditedTime: post.lastEditedTime,
   };
 }
 
 export function parseIdempotencyKey(value: string | null) {
-  if (!value || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+  if (!value || value.length < 16 || value.length > 200 || !/^[A-Za-z0-9][A-Za-z0-9._~-]*$/.test(value)) {
     throw new LocalPublishJobError(
-      'A valid Idempotency-Key UUID header is required',
+      'A safe opaque 16-200 character Idempotency-Key header is required',
       'INVALID_IDEMPOTENCY_KEY',
       400,
     );
   }
-  return value.toLowerCase();
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    return value.toLowerCase();
+  }
+  const digest = createHash('sha256').update(value).digest('hex');
+  return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
 }

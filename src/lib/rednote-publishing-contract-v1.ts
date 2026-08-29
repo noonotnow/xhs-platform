@@ -78,6 +78,7 @@ export type RednoteTransactionRequester =
 
 export const REDNOTE_RECEIPT_LOOKUP_STATES = [
   'pending',
+  'identity_pending',
   'found',
   'not_found',
   'not_required',

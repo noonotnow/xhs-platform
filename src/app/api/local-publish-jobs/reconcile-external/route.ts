@@ -22,6 +22,9 @@ const NO_STORE_HEADERS = {
 export async function POST(request: NextRequest) {
   try {
     requireLocalPublishWorker(request.headers.get('authorization'));
+    if (!request.headers.get('x-workspace-id')) {
+      throw new LocalPublishJobError('X-Workspace-Id is required', 'VALIDATION_ERROR', 400);
+    }
     const idempotencyKey = parseIdempotencyKey(
       request.headers.get('idempotency-key'),
     );

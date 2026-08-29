@@ -26,6 +26,7 @@ import type {
 
 interface LocalPublishJobRow extends QueryResultRow {
   id: string;
+  workspace_id: string;
   notion_page_id: string;
   snapshot: LocalPublishSnapshot & { scheduledDate?: string };
   status: LocalPublishJobStatus | 'ambiguous' | 'succeeded';
@@ -55,6 +56,7 @@ interface LocalPublishJobRow extends QueryResultRow {
 
 export interface StoredLocalPublishJob {
   id: string;
+  workspaceId: string;
   notionPageId: string;
   snapshot: LocalPublishSnapshot;
   status: LocalPublishJobStatus;
@@ -112,6 +114,7 @@ export function normalizeStoredLocalPublishSnapshot(
 function mapRow(row: LocalPublishJobRow): StoredLocalPublishJob {
   return {
     id: row.id,
+    workspaceId: row.workspace_id,
     notionPageId: row.notion_page_id,
     snapshot: normalizeStoredLocalPublishSnapshot(row.snapshot),
     status: canonicalStatus(row.status),
@@ -188,36 +191,44 @@ function sameSnapshot(left: LocalPublishSnapshot, right: LocalPublishSnapshot) {
 export async function insertLocalPublishJob(
   snapshot: LocalPublishSnapshot,
   idempotencyKey: string,
+  workspaceId = 'legacy-local-publish',
 ) {
   const inserted = await sql<LocalPublishJobRow>`
     WITH page_lock AS (
-      SELECT pg_advisory_xact_lock(hashtextextended(${snapshot.notionPageId}, 0))
+      SELECT pg_advisory_xact_lock(
+        hashtextextended(${workspaceId} || E'\x1f' || ${snapshot.notionPageId}, 0)
+      )
     )
     INSERT INTO local_publish_jobs (
       notion_page_id,
       snapshot,
-      idempotency_key
+      idempotency_key,
+      workspace_id
     )
     SELECT
       ${snapshot.notionPageId},
       ${JSON.stringify(snapshot)}::jsonb,
-      ${idempotencyKey}::uuid
+      ${idempotencyKey}::uuid,
+      ${workspaceId}
     FROM page_lock
     WHERE NOT EXISTS (
       SELECT 1
       FROM plan_operator_scheduled_posts
-      WHERE notion_page_id = ${snapshot.notionPageId}
+      WHERE workspace_id = ${workspaceId}
+        AND notion_page_id = ${snapshot.notionPageId}
     )
       AND NOT EXISTS (
       SELECT 1
       FROM manual_reconciliation_requests
-      WHERE notion_page_id = ${snapshot.notionPageId}
+      WHERE workspace_id = ${workspaceId}
+        AND notion_page_id = ${snapshot.notionPageId}
         AND status IN ('queued', 'verifying')
     )
       AND NOT EXISTS (
         SELECT 1
         FROM local_publish_jobs existing
-        WHERE existing.notion_page_id = ${snapshot.notionPageId}
+        WHERE existing.workspace_id = ${workspaceId}
+          AND existing.notion_page_id = ${snapshot.notionPageId}
           AND (
             existing.status NOT IN ('reconciled', 'succeeded', 'failed')
             OR existing.dispatch_authorized_at IS NOT NULL
@@ -236,7 +247,8 @@ export async function insertLocalPublishJob(
   const existingKey = await sql<LocalPublishJobRow>`
     SELECT *
     FROM local_publish_jobs
-    WHERE idempotency_key = ${idempotencyKey}::uuid
+    WHERE workspace_id = ${workspaceId}
+      AND idempotency_key = ${idempotencyKey}::uuid
     LIMIT 1
   `;
   if (existingKey.rows[0]) {
@@ -254,7 +266,8 @@ export async function insertLocalPublishJob(
   const operatorScheduled = await sql`
     SELECT id
     FROM plan_operator_scheduled_posts
-    WHERE notion_page_id = ${snapshot.notionPageId}
+    WHERE workspace_id = ${workspaceId}
+      AND notion_page_id = ${snapshot.notionPageId}
     LIMIT 1
   `;
   if (operatorScheduled.rows[0]) {
@@ -268,7 +281,8 @@ export async function insertLocalPublishJob(
   const active = await sql<LocalPublishJobRow>`
     SELECT *
     FROM local_publish_jobs
-    WHERE notion_page_id = ${snapshot.notionPageId}
+    WHERE workspace_id = ${workspaceId}
+      AND notion_page_id = ${snapshot.notionPageId}
       AND (
         status NOT IN ('reconciled', 'succeeded', 'failed')
         OR dispatch_authorized_at IS NOT NULL
@@ -289,7 +303,8 @@ export async function insertLocalPublishJob(
   const activeReconciliation = await sql`
     SELECT id
     FROM manual_reconciliation_requests
-    WHERE notion_page_id = ${snapshot.notionPageId}
+    WHERE workspace_id = ${workspaceId}
+      AND notion_page_id = ${snapshot.notionPageId}
       AND status IN ('queued', 'verifying')
     LIMIT 1
   `;
@@ -307,20 +322,22 @@ export async function insertLocalPublishJob(
   );
 }
 
-export async function findLocalPublishJobByIdempotencyKey(idempotencyKey: string) {
+export async function findLocalPublishJobByIdempotencyKey(idempotencyKey: string, workspaceId = 'legacy-local-publish') {
   const result = await sql<LocalPublishJobRow>`
     SELECT *
     FROM local_publish_jobs
-    WHERE idempotency_key = ${idempotencyKey}::uuid
+    WHERE workspace_id = ${workspaceId}
+      AND idempotency_key = ${idempotencyKey}::uuid
     LIMIT 1
   `;
   return result.rows[0] ? mapRow(result.rows[0]) : null;
 }
 
-export async function listLocalPublishJobs() {
+export async function listLocalPublishJobs(workspaceId = 'legacy-local-publish') {
   const result = await sql<LocalPublishJobRow>`
     SELECT *
     FROM local_publish_jobs
+    WHERE workspace_id = ${workspaceId}
     ORDER BY created_at DESC
     LIMIT 100
   `;
@@ -335,12 +352,16 @@ export async function listLocalPublishJobs() {
   }));
 }
 
-export async function listPublishOwningLocalJobs(notionPageIds: string[]) {
+export async function listPublishOwningLocalJobs(
+  notionPageIds: string[],
+  workspaceId = 'legacy-local-publish',
+) {
   if (notionPageIds.length === 0) return [];
   const result = await sql<LocalPublishJobRow>`
     SELECT *
     FROM local_publish_jobs
-    WHERE notion_page_id = ANY(${notionPageIds}::text[])
+    WHERE workspace_id = ${workspaceId}
+      AND notion_page_id = ANY(${notionPageIds}::text[])
     ORDER BY created_at DESC
   `;
   return result.rows
@@ -359,12 +380,14 @@ export async function claimNextStoredLocalPublishJob(
   leaseSeconds: number,
   lane: LocalPublishWorkLane = 'all',
   expectedJobId?: string,
+  workspaceId = 'legacy-local-publish',
 ): Promise<ClaimedLocalPublishJob | null> {
   const result = await sql<LocalPublishJobRow>`
     WITH candidate AS (
       SELECT id, status
       FROM local_publish_jobs
-      WHERE (
+      WHERE workspace_id = ${workspaceId}
+        AND (
         (
           ${lane} IN ('all', 'dispatch')
           AND status = 'queued'
@@ -432,12 +455,14 @@ export async function claimNextStoredLocalPublishJob(
           FROM plan_operator_scheduled_posts AS operator_scheduled
           WHERE operator_scheduled.notion_page_id =
             local_publish_jobs.notion_page_id
+            AND operator_scheduled.workspace_id = local_publish_jobs.workspace_id
         )
         AND NOT EXISTS (
           SELECT 1
           FROM manual_reconciliation_requests AS disposition
           WHERE disposition.request_kind = 'targeted_local_job'
             AND disposition.source_local_job_id = local_publish_jobs.id
+            AND disposition.workspace_id = local_publish_jobs.workspace_id
         )
       ORDER BY COALESCE(next_verification_at, claim_expires_at, created_at), created_at
       FOR UPDATE SKIP LOCKED
@@ -463,6 +488,7 @@ export async function claimNextStoredLocalPublishJob(
         updated_at = CURRENT_TIMESTAMP
     FROM candidate
     WHERE job.id = candidate.id
+      AND job.workspace_id = ${workspaceId}
       AND job.external_disposition_request_id IS NULL
     RETURNING job.*
   `;
@@ -692,11 +718,12 @@ async function claimedResponse(row: LocalPublishJobRow): Promise<ClaimedLocalPub
   return { ...base, status: job.status as 'claimed' | 'staged' };
 }
 
-export async function authorizeStoredLocalPublishJob(id: string, claimToken: string) {
+export async function authorizeStoredLocalPublishJob(id: string, claimToken: string, workspaceId = 'legacy-local-publish') {
   const result = await sql<LocalPublishJobRow>`
     SELECT *
     FROM local_publish_jobs
     WHERE id = ${id}::uuid
+      AND workspace_id = ${workspaceId}
       AND claim_token = ${claimToken}::uuid
       AND claim_expires_at > CURRENT_TIMESTAMP
       AND external_disposition_request_id IS NULL
@@ -704,6 +731,7 @@ export async function authorizeStoredLocalPublishJob(id: string, claimToken: str
         SELECT 1
         FROM plan_operator_scheduled_posts AS manual_handling
         WHERE manual_handling.notion_page_id = local_publish_jobs.notion_page_id
+          AND manual_handling.workspace_id = local_publish_jobs.workspace_id
       )
       AND status IN (
         'claimed', 'staged', 'submitted', 'scheduled',
@@ -712,7 +740,7 @@ export async function authorizeStoredLocalPublishJob(id: string, claimToken: str
     LIMIT 1
   `;
   if (result.rows[0]) return claimedResponse(result.rows[0]);
-  const job = await loadResultJob(id);
+  const job = await loadResultJob(id, workspaceId);
   if (job.status === 'operator_attested') {
     throw new LocalPublishJobError(
       'The exact local attempt was operator-attested; release it and do not dispatch again',
@@ -727,12 +755,38 @@ export async function authorizeStoredLocalPublishJob(id: string, claimToken: str
   );
 }
 
-export async function consumeStoredDispatchAuthorization(id: string, claimToken: string) {
+export async function heartbeatStoredLocalPublishJob(
+  id: string,
+  claimToken: string,
+  workspaceId: string,
+  leaseSeconds: number,
+) {
+  const result = await sql<LocalPublishJobRow>`
+    UPDATE local_publish_jobs
+    SET claim_expires_at = CURRENT_TIMESTAMP + (${leaseSeconds} * INTERVAL '1 second'),
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ${id}::uuid
+      AND workspace_id = ${workspaceId}
+      AND claim_token = ${claimToken}::uuid
+      AND claim_expires_at > CURRENT_TIMESTAMP
+      AND status IN ('claimed', 'staged')
+      AND external_disposition_request_id IS NULL
+    RETURNING *
+  `;
+  if (!result.rows[0]) {
+    await loadResultJob(id, workspaceId);
+    throw new LocalPublishJobError('The local publish claim is stale, expired, or revoked', 'STALE_CLAIM', 409);
+  }
+  return jobSummary(mapRow(result.rows[0]));
+}
+
+export async function consumeStoredDispatchAuthorization(id: string, claimToken: string, workspaceId = 'legacy-local-publish') {
   const result = await sql<LocalPublishJobRow>`
     UPDATE local_publish_jobs
     SET dispatch_authorized_at = COALESCE(dispatch_authorized_at, CURRENT_TIMESTAMP),
         updated_at = CURRENT_TIMESTAMP
     WHERE id = ${id}::uuid
+      AND workspace_id = ${workspaceId}
       AND claim_token = ${claimToken}::uuid
       AND status = 'staged'
       AND claim_expires_at > CURRENT_TIMESTAMP
@@ -741,11 +795,12 @@ export async function consumeStoredDispatchAuthorization(id: string, claimToken:
         SELECT 1
         FROM plan_operator_scheduled_posts AS manual_handling
         WHERE manual_handling.notion_page_id = local_publish_jobs.notion_page_id
+          AND manual_handling.workspace_id = local_publish_jobs.workspace_id
       )
     RETURNING *
   `;
   if (result.rows[0]) return claimedResponse(result.rows[0]);
-  await loadResultJob(id);
+  await loadResultJob(id, workspaceId);
   throw new LocalPublishJobError(
     'The staged dispatch authorization is stale, expired, or revoked',
     'STALE_CLAIM',
@@ -753,16 +808,18 @@ export async function consumeStoredDispatchAuthorization(id: string, claimToken:
   );
 }
 
-async function loadResultJob(id: string) {
+async function loadResultJob(id: string, workspaceId: string) {
   const result = await sql<LocalPublishJobRow>`
     SELECT job.*,
            EXISTS (
              SELECT 1
              FROM plan_operator_scheduled_posts AS manual_handling
              WHERE manual_handling.notion_page_id = job.notion_page_id
+                AND manual_handling.workspace_id = job.workspace_id
            ) AS manual_handling_exists
     FROM local_publish_jobs AS job
     WHERE job.id = ${id}::uuid
+      AND job.workspace_id = ${workspaceId}
     LIMIT 1
   `;
   const row = result.rows[0];
@@ -809,13 +866,14 @@ function assertUnexpiredClaim(job: StoredLocalPublishJob) {
   }
 }
 
-export async function stageStoredLocalPublishJob(id: string, claimToken: string) {
+export async function stageStoredLocalPublishJob(id: string, claimToken: string, workspaceId = 'legacy-local-publish') {
   const result = await sql<LocalPublishJobRow>`
     UPDATE local_publish_jobs
     SET status = 'staged',
         staged_at = COALESCE(staged_at, CURRENT_TIMESTAMP),
         updated_at = CURRENT_TIMESTAMP
     WHERE id = ${id}::uuid
+      AND workspace_id = ${workspaceId}
       AND status = 'claimed'
       AND claim_token = ${claimToken}::uuid
       AND claim_expires_at > CURRENT_TIMESTAMP
@@ -824,18 +882,20 @@ export async function stageStoredLocalPublishJob(id: string, claimToken: string)
         SELECT 1
         FROM plan_operator_scheduled_posts AS manual_handling
         WHERE manual_handling.notion_page_id = local_publish_jobs.notion_page_id
+          AND manual_handling.workspace_id = local_publish_jobs.workspace_id
       )
       AND NOT EXISTS (
         SELECT 1
         FROM manual_reconciliation_requests AS disposition
         WHERE disposition.request_kind = 'targeted_local_job'
           AND disposition.source_local_job_id = local_publish_jobs.id
+          AND disposition.workspace_id = local_publish_jobs.workspace_id
       )
     RETURNING *
   `;
   if (result.rows[0]) return mapRow(result.rows[0]);
 
-  const job = await loadResultJob(id);
+  const job = await loadResultJob(id, workspaceId);
   assertMatchingClaim(job, claimToken);
   if (job.status === 'staged') return job;
   if (job.status === 'claimed') assertUnexpiredClaim(job);
@@ -853,6 +913,7 @@ export async function recordStoredLocalPublishDispatch(
   noteId: string,
   shareUrl: string,
   initialVerificationDelaySeconds: number,
+  workspaceId = 'legacy-local-publish',
 ) {
   const result = await sql<LocalPublishJobRow>`
     UPDATE local_publish_jobs
@@ -881,6 +942,7 @@ export async function recordStoredLocalPublishDispatch(
         error_message = NULL,
         updated_at = CURRENT_TIMESTAMP
     WHERE id = ${id}::uuid
+      AND workspace_id = ${workspaceId}
       AND status IN ('claimed', 'staged')
       AND claim_token = ${claimToken}::uuid
       AND claim_expires_at > CURRENT_TIMESTAMP
@@ -889,12 +951,14 @@ export async function recordStoredLocalPublishDispatch(
         SELECT 1
         FROM plan_operator_scheduled_posts AS manual_handling
         WHERE manual_handling.notion_page_id = local_publish_jobs.notion_page_id
+          AND manual_handling.workspace_id = local_publish_jobs.workspace_id
       )
       AND NOT EXISTS (
         SELECT 1
         FROM manual_reconciliation_requests AS disposition
         WHERE disposition.request_kind = 'targeted_local_job'
           AND disposition.source_local_job_id = local_publish_jobs.id
+          AND disposition.workspace_id = local_publish_jobs.workspace_id
       )
       AND (
         (
@@ -910,7 +974,7 @@ export async function recordStoredLocalPublishDispatch(
   `;
   if (result.rows[0]) return mapRow(result.rows[0]);
 
-  const job = await loadResultJob(id);
+  const job = await loadResultJob(id, workspaceId);
   assertMatchingClaim(job, claimToken);
   if (
     ['submitted', 'scheduled', 'verification_pending', 'verified', 'reconciled']
@@ -938,6 +1002,7 @@ export async function deferStoredLocalPublishVerification(
   code: string,
   message: string,
   backoffSeconds: readonly [number, number, number, number],
+  workspaceId = 'legacy-local-publish',
 ) {
   const result = await sql<LocalPublishJobRow>`
     UPDATE local_publish_jobs
@@ -955,6 +1020,7 @@ export async function deferStoredLocalPublishVerification(
         claim_expires_at = CURRENT_TIMESTAMP,
         updated_at = CURRENT_TIMESTAMP
     WHERE id = ${id}::uuid
+      AND workspace_id = ${workspaceId}
       AND claim_token = ${claimToken}::uuid
       AND claim_expires_at > CURRENT_TIMESTAMP
       AND note_id = ${noteId}
@@ -964,12 +1030,14 @@ export async function deferStoredLocalPublishVerification(
         SELECT 1
         FROM plan_operator_scheduled_posts AS manual_handling
         WHERE manual_handling.notion_page_id = local_publish_jobs.notion_page_id
+          AND manual_handling.workspace_id = local_publish_jobs.workspace_id
       )
       AND NOT EXISTS (
         SELECT 1
         FROM manual_reconciliation_requests AS disposition
         WHERE disposition.request_kind = 'targeted_local_job'
           AND disposition.source_local_job_id = local_publish_jobs.id
+          AND disposition.workspace_id = local_publish_jobs.workspace_id
       )
       AND (
         status IN ('submitted', 'scheduled')
@@ -982,7 +1050,7 @@ export async function deferStoredLocalPublishVerification(
   `;
   if (result.rows[0]) return mapRow(result.rows[0]);
 
-  const job = await loadResultJob(id);
+  const job = await loadResultJob(id, workspaceId);
   assertMatchingClaim(job, claimToken);
   if (
     job.status === 'verification_pending' &&
@@ -1018,6 +1086,7 @@ export async function deferStoredOperatorAttestedVerification(
   code: string,
   message: string,
   verificationBackoffSeconds: readonly [number, number, number, number],
+  workspaceId = 'legacy-local-publish',
 ) {
   if (code === ATTESTATION_RELEASE_CONSUMED_CODE) {
     if (message !== ATTESTATION_RELEASE_CONSUMED_MESSAGE) {
@@ -1028,7 +1097,7 @@ export async function deferStoredOperatorAttestedVerification(
       );
     }
     await acknowledgeOperatorSuccessAttestationRelease(id, claimToken);
-    return loadResultJob(id);
+    return loadResultJob(id, workspaceId);
   }
   const result = await sql<LocalPublishJobRow>`
     UPDATE local_publish_jobs
@@ -1045,6 +1114,7 @@ export async function deferStoredOperatorAttestedVerification(
         error_message = ${message},
         updated_at = CURRENT_TIMESTAMP
     WHERE id = ${id}::uuid
+      AND workspace_id = ${workspaceId}
       AND status = 'operator_attested'
       AND claim_token = ${claimToken}::uuid
       AND claim_expires_at > CURRENT_TIMESTAMP
@@ -1058,7 +1128,7 @@ export async function deferStoredOperatorAttestedVerification(
     RETURNING *
   `;
   if (result.rows[0]) return mapRow(result.rows[0]);
-  const job = await loadResultJob(id);
+  const job = await loadResultJob(id, workspaceId);
   if (job.status === 'operator_attested') {
     if (job.claimToken !== claimToken) {
       throw new LocalPublishJobError(
@@ -1088,6 +1158,7 @@ export async function failStoredLocalPublishJob(
   claimToken: string,
   code: string,
   message: string,
+  workspaceId = 'legacy-local-publish',
 ) {
   const result = await sql<LocalPublishJobRow>`
     WITH failed AS (
@@ -1100,6 +1171,7 @@ export async function failStoredLocalPublishJob(
           completed_at = CURRENT_TIMESTAMP,
           updated_at = CURRENT_TIMESTAMP
       WHERE id = ${id}::uuid
+        AND workspace_id = ${workspaceId}
         AND status IN ('claimed', 'staged')
         AND claim_token = ${claimToken}::uuid
         AND claim_expires_at > CURRENT_TIMESTAMP
@@ -1108,12 +1180,14 @@ export async function failStoredLocalPublishJob(
           SELECT 1
           FROM plan_operator_scheduled_posts AS manual_handling
           WHERE manual_handling.notion_page_id = local_publish_jobs.notion_page_id
+            AND manual_handling.workspace_id = local_publish_jobs.workspace_id
         )
         AND NOT EXISTS (
           SELECT 1
           FROM manual_reconciliation_requests AS disposition
           WHERE disposition.request_kind = 'targeted_local_job'
             AND disposition.source_local_job_id = local_publish_jobs.id
+            AND disposition.workspace_id = local_publish_jobs.workspace_id
         )
       RETURNING *
     ),
@@ -1129,7 +1203,7 @@ export async function failStoredLocalPublishJob(
   `;
   if (result.rows[0]) return mapRow(result.rows[0]);
 
-  const job = await loadResultJob(id);
+  const job = await loadResultJob(id, workspaceId);
   if (job.status === 'failed' && job.errorCode === code && job.errorMessage === message) {
     return job;
   }
@@ -1149,6 +1223,7 @@ export async function prepareStoredLocalPublishVerification(
   claimToken: string,
   noteId: string,
   shareUrl: string,
+  workspaceId = 'legacy-local-publish',
 ) {
   const result = await sql<LocalPublishJobRow>`
     UPDATE local_publish_jobs
@@ -1161,6 +1236,7 @@ export async function prepareStoredLocalPublishVerification(
         error_message = NULL,
         updated_at = CURRENT_TIMESTAMP
     WHERE id = ${id}::uuid
+      AND workspace_id = ${workspaceId}
       AND status IN (
         'claimed',
         'staged',
@@ -1176,12 +1252,14 @@ export async function prepareStoredLocalPublishVerification(
         SELECT 1
         FROM plan_operator_scheduled_posts AS manual_handling
         WHERE manual_handling.notion_page_id = local_publish_jobs.notion_page_id
+          AND manual_handling.workspace_id = local_publish_jobs.workspace_id
       )
       AND NOT EXISTS (
         SELECT 1
         FROM manual_reconciliation_requests AS disposition
         WHERE disposition.request_kind = 'targeted_local_job'
           AND disposition.source_local_job_id = local_publish_jobs.id
+          AND disposition.workspace_id = local_publish_jobs.workspace_id
       )
       AND (
         (
@@ -1208,7 +1286,7 @@ export async function prepareStoredLocalPublishVerification(
   `;
   if (result.rows[0]) return mapRow(result.rows[0]);
 
-  const job = await loadResultJob(id);
+  const job = await loadResultJob(id, workspaceId);
   if (job.status === 'operator_attested' && job.claimToken === claimToken) {
     assertUnexpiredClaim(job);
     throw new LocalPublishJobError(
@@ -1259,6 +1337,7 @@ export async function completeStoredLocalPublishReconciliation(
   claimToken: string,
   noteId: string,
   shareUrl: string,
+  workspaceId = 'legacy-local-publish',
 ) {
   const result = await sql<LocalPublishJobRow>`
     UPDATE local_publish_jobs
@@ -1267,6 +1346,7 @@ export async function completeStoredLocalPublishReconciliation(
         completed_at = CURRENT_TIMESTAMP,
         updated_at = CURRENT_TIMESTAMP
     WHERE id = ${id}::uuid
+      AND workspace_id = ${workspaceId}
       AND status = 'verified'
       AND claim_token = ${claimToken}::uuid
       AND claim_expires_at > CURRENT_TIMESTAMP
@@ -1277,18 +1357,20 @@ export async function completeStoredLocalPublishReconciliation(
         SELECT 1
         FROM plan_operator_scheduled_posts AS manual_handling
         WHERE manual_handling.notion_page_id = local_publish_jobs.notion_page_id
+          AND manual_handling.workspace_id = local_publish_jobs.workspace_id
       )
       AND NOT EXISTS (
         SELECT 1
         FROM manual_reconciliation_requests AS disposition
         WHERE disposition.request_kind = 'targeted_local_job'
           AND disposition.source_local_job_id = local_publish_jobs.id
+          AND disposition.workspace_id = local_publish_jobs.workspace_id
       )
     RETURNING *
   `;
   if (result.rows[0]) return mapRow(result.rows[0]);
 
-  const job = await loadResultJob(id);
+  const job = await loadResultJob(id, workspaceId);
   assertMatchingClaim(job, claimToken);
   if (job.status === 'reconciled' && job.noteId === noteId && job.shareUrl === shareUrl) {
     return job;

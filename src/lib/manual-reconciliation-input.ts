@@ -52,7 +52,9 @@ function safeMessage(value: unknown) {
   if (
     /https?:\/\//i.test(message) ||
     /\b(?:authorization|bearer|cookie|set-cookie|password|secret)\b/i.test(message) ||
-    /\btoken\s*=/i.test(message)
+    /\btoken\s*=/i.test(message) ||
+    /\b(?:stack trace|traceback|exception|response body|request id)\b/i.test(message) ||
+    /<html[\s>]/i.test(message)
   ) {
     throw new LocalPublishJobError(
       'message must not contain URLs or credential-like data',

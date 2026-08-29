@@ -23,6 +23,7 @@ import {
   recordStoredLocalPublishDispatch,
   stageStoredLocalPublishJob,
   type StoredLocalPublishJob,
+  heartbeatStoredLocalPublishJob,
 } from '@/lib/local-publish-job-store';
 import {
   isRednoteNoteId,
@@ -35,6 +36,20 @@ import {
   manifestHash,
 } from '@/lib/rednote-publish-batches';
 import { invalidateStoredBatchItem } from '@/lib/rednote-publish-batch-store';
+import {
+  createRednotePublishAttempt,
+  frozenPayloadDigest,
+  bindLinkedAttemptClaim,
+  authorizeLinkedAttempt,
+  recordLinkedAttemptOutcome,
+  heartbeatLinkedAttempt,
+  getLinkedRednotePublishAttempt,
+} from '@/lib/rednote-publishing-attempt-store';
+import {
+  REDNOTE_PUBLISHING_CONTRACT_REVISION,
+  type FrozenRednoteAttemptPayload,
+} from '@/lib/rednote-publishing-contract-v1';
+import { createHash } from 'crypto';
 
 const DEFAULT_LEASE_SECONDS = 2 * 60 * 60;
 const MIN_LEASE_SECONDS = 60;
@@ -237,10 +252,17 @@ export function parseLocalPublishWorkerResult(value: unknown): LocalPublishWorke
 export async function queueLocalPublishJob(
   rawInput: unknown,
   idempotencyKey: string,
-  dependencies: QueueDependencies = queueDependencies,
+  workspaceOrDependencies: string | QueueDependencies,
+  suppliedDependencies?: QueueDependencies,
 ) {
+  const workspaceId = typeof workspaceOrDependencies === 'string'
+    ? workspaceOrDependencies
+    : 'legacy-local-publish';
+  const dependencies = typeof workspaceOrDependencies === 'string'
+    ? suppliedDependencies ?? queueDependencies
+    : workspaceOrDependencies;
   const input: QueueLocalPublishInput = parseQueueLocalPublishInput(rawInput);
-  const existing = await dependencies.findByIdempotencyKey(idempotencyKey);
+  const existing = await dependencies.findByIdempotencyKey(idempotencyKey, workspaceId);
   if (existing) {
     const rawCopy = queueCopy(input, false);
     const legacyCopy = queueCopy(input, true);
@@ -267,12 +289,57 @@ export async function queueLocalPublishJob(
         409,
       );
     }
-    return { job: jobSummary(existing), created: false };
+    if (typeof workspaceOrDependencies !== 'string') {
+      return { job: jobSummary(existing), created: false };
+    }
+    return {
+      job: jobSummary(existing),
+      attempt: await getLinkedRednotePublishAttempt(workspaceId, existing.id),
+      created: false,
+    };
   }
   const post = await dependencies.getPost(input.notionPageId);
   const snapshot = buildLocalPublishSnapshot(post, input);
-  const result = await dependencies.insert(snapshot, idempotencyKey);
-  return { job: jobSummary(result.job), created: result.created };
+  const result = await dependencies.insert(snapshot, idempotencyKey, workspaceId);
+  if (typeof workspaceOrDependencies !== 'string') {
+    return { job: jobSummary(result.job), created: result.created };
+  }
+  const requestedAt = new Date().toISOString();
+  const browserPayload = {
+    sourcePostId: snapshot.notionPageId,
+    title: snapshot.title,
+    caption: snapshot.caption,
+    tags: snapshot.tags,
+    scheduledDate: snapshot.publishAt ?? null,
+    targetPublishAt: snapshot.publishAt ?? requestedAt,
+    timingMode: snapshot.publishAt ? 'scheduled' as const : 'post_now' as const,
+    visibility: 'public' as const,
+    publishMode: snapshot.mediaType,
+    mediaAssets: [{
+      assetId: `${snapshot.mediaType}-${snapshot.mediaIndex}`,
+      deliveryUrl: snapshot.mediaUrl,
+      sha256: createHash('sha256').update(snapshot.mediaUrl).digest('hex'),
+      mediaType: snapshot.mediaType,
+      role: 'content' as const,
+    }],
+  };
+  const payload = {
+    contractRevision: REDNOTE_PUBLISHING_CONTRACT_REVISION,
+    sourceNotionPageId: snapshot.notionPageId,
+    sourceLocalPublishJobId: result.job.id,
+    payloadRevision: snapshot.notionLastEditedTime,
+    payloadDigest: '',
+    requestedAt,
+    executor: { type: 'worker' as const, kind: 'playwright' as const, id: 'local-publish-worker' },
+    browserPayload,
+  } as unknown as FrozenRednoteAttemptPayload;
+  payload.payloadDigest = frozenPayloadDigest(payload);
+  const attempt = await createRednotePublishAttempt({
+    workspaceId,
+    idempotencyKey,
+    payload,
+  });
+  return { job: jobSummary(result.job), attempt: attempt.attempt, created: result.created };
 }
 
 function leaseSeconds() {
@@ -317,18 +384,22 @@ export function validateExpectedVerificationJobId(
 export async function claimNextLocalPublishJob(
   lane: LocalPublishWorkLane = 'all',
   expectedJobId?: string,
+  workspaceId = 'legacy-local-publish',
 ) {
   if (expectedJobId !== undefined) {
     validateExpectedVerificationJobId(lane, expectedJobId);
   }
   for (let attempt = 0; attempt < 10; attempt += 1) {
-    const job = await claimNextStoredLocalPublishJob(leaseSeconds(), lane, expectedJobId);
+    const job = await claimNextStoredLocalPublishJob(leaseSeconds(), lane, expectedJobId, workspaceId);
     if (!job && expectedJobId) {
       throw new LocalPublishJobError(
         'The expected verification job is not currently claimable',
         'EXPECTED_JOB_NOT_CLAIMABLE',
         409,
       );
+    }
+    if (job?.claimToken && job.claimExpiresAt && lane !== 'verification') {
+      await bindLinkedAttemptClaim(workspaceId, job.id, job.claimToken, job.claimExpiresAt);
     }
     if (!job || !job.batchAuthorization) return job;
     if (
@@ -381,8 +452,8 @@ async function batchSourceMatches(job: Awaited<ReturnType<typeof authorizeStored
   }
 }
 
-export async function authorizeLocalPublishJob(id: string, claimToken: string) {
-  const job = await authorizeStoredLocalPublishJob(id, claimToken);
+export async function authorizeLocalPublishJob(id: string, claimToken: string, workspaceId: string) {
+  const job = await authorizeStoredLocalPublishJob(id, claimToken, workspaceId);
   if (
     job.batchAuthorization &&
     (job.status === 'claimed' || job.status === 'staged') &&
@@ -400,25 +471,41 @@ export async function authorizeLocalPublishJob(id: string, claimToken: string) {
     );
   }
   if (job.status === 'staged') {
-    return consumeStoredDispatchAuthorization(job.id, job.claimToken);
+    await authorizeLinkedAttempt(workspaceId, job.id, job.claimToken);
+    return consumeStoredDispatchAuthorization(job.id, job.claimToken, workspaceId);
   }
   return job;
 }
 
-export async function getLocalPublishJobSummaries() {
-  return (await listLocalPublishJobs()).map(jobSummary);
+export async function heartbeatLocalPublishJob(id: string, claimToken: string, workspaceId: string) {
+  const job = await heartbeatStoredLocalPublishJob(id, claimToken, workspaceId, leaseSeconds());
+  if (job.claimExpiresAt) {
+    await heartbeatLinkedAttempt(workspaceId, id, claimToken, job.claimExpiresAt);
+  }
+  return job;
+}
+
+export async function getLocalPublishJobSummaries(workspaceId: string) {
+  return (await listLocalPublishJobs(workspaceId)).map(jobSummary);
 }
 
 export async function submitLocalPublishJobResult(
   id: string,
   claimToken: string,
   rawResult: unknown,
-  dependencies: ResultDependencies = resultDependencies,
+  workspaceOrDependencies: string | ResultDependencies,
+  suppliedDependencies?: ResultDependencies,
 ) {
+  const workspaceId = typeof workspaceOrDependencies === 'string'
+    ? workspaceOrDependencies
+    : 'legacy-local-publish';
+  const dependencies = typeof workspaceOrDependencies === 'string'
+    ? suppliedDependencies ?? resultDependencies
+    : workspaceOrDependencies;
+  const durableAttempt = typeof workspaceOrDependencies === 'string';
   const result = parseLocalPublishWorkerResult(rawResult);
-  let publishedAt: string | undefined;
   if (result.status === 'staged') {
-    return jobSummary(await dependencies.stage(id, claimToken));
+    return jobSummary(await dependencies.stage(id, claimToken, workspaceId));
   }
   if (result.status === 'submitted' || result.status === 'scheduled') {
     const dispatched = await dependencies.recordDispatch(
@@ -428,9 +515,9 @@ export async function submitLocalPublishJobResult(
       result.noteId,
       result.shareUrl,
       verificationBackoffSeconds()[0],
+      workspaceId,
     );
-    if (dispatched.status !== 'submitted') return jobSummary(dispatched);
-    publishedAt = dispatched.dispatchedAt;
+    return jobSummary(dispatched);
   }
   if (result.status === 'verification_pending') {
     return jobSummary(await dependencies.deferVerification(
@@ -441,9 +528,16 @@ export async function submitLocalPublishJobResult(
       result.code,
       result.message,
       verificationBackoffSeconds(),
+      workspaceId,
     ));
   }
   if (result.status === 'attested_verification_pending') {
+    if (durableAttempt) await recordLinkedAttemptOutcome({
+      workspaceId,
+      localJobId: id,
+      claimToken,
+      outcome: 'accepted',
+    });
     return jobSummary(await (
       dependencies.deferAttestedVerification ?? deferStoredOperatorAttestedVerification
     )(
@@ -452,14 +546,22 @@ export async function submitLocalPublishJobResult(
       result.code,
       result.message,
       verificationBackoffSeconds(),
+      workspaceId,
     ));
   }
   if (result.status === 'failed') {
+    if (durableAttempt) await recordLinkedAttemptOutcome({
+      workspaceId,
+      localJobId: id,
+      claimToken,
+      outcome: 'known_failed',
+    });
     return jobSummary(await dependencies.fail(
       id,
       claimToken,
       result.code,
       result.message,
+      workspaceId,
     ));
   }
 
@@ -467,11 +569,25 @@ export async function submitLocalPublishJobResult(
     LocalPublishWorkerResult,
     { status: 'submitted' | 'verified' }
   >;
+  const receiptTime = new Date().toISOString();
+  if (durableAttempt) await recordLinkedAttemptOutcome({
+    workspaceId,
+    localJobId: id,
+    claimToken,
+    outcome: 'accepted',
+    receipt: {
+      rednoteNoteId: publicationResult.noteId,
+      rednoteUrl: publicationResult.shareUrl,
+      platformPublishTime: receiptTime,
+      provenance: { kind: 'verified_local_worker_result' },
+    },
+  });
   const prepared = await dependencies.prepareVerification(
     id,
     claimToken,
     publicationResult.noteId,
     publicationResult.shareUrl,
+    workspaceId,
   );
   if (prepared.status === 'reconciled') return jobSummary(prepared);
 
@@ -480,7 +596,7 @@ export async function submitLocalPublishJobResult(
       status: 'success',
       noteId: publicationResult.noteId,
       shareUrl: publicationResult.shareUrl,
-    }, publishedAt ?? prepared.verifiedAt);
+    }, prepared.verifiedAt);
   } catch (error) {
     console.error('Verified local publish result could not be backfilled to Notion', {
       jobId: id,
@@ -498,6 +614,7 @@ export async function submitLocalPublishJobResult(
     claimToken,
     publicationResult.noteId,
     publicationResult.shareUrl,
+    workspaceId,
   ));
 }
 

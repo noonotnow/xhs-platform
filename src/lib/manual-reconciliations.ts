@@ -16,13 +16,13 @@ import {
   listManualReconciliations,
   loadManualReconciliation,
   manualReconciliationSummary,
+  recordManualVerifiedSnapshot,
   retryManualReconciliation,
 } from '@/lib/manual-reconciliation-store';
 import { reconcileVerifiedExternalPost } from '@/lib/external-post-reconciliations';
 import {
   getReadyXhsPost,
   getXhsPostForManualHandling,
-  markXhsPostAwaitingReceipt,
 } from '@/lib/notion-posts';
 import { normalizeLocalPublishJobError } from '@/lib/local-publish-jobs';
 import { loadManualPostHandlingByPage } from '@/lib/manual-post-handling-store';
@@ -39,6 +39,7 @@ const DEFAULT_BACKOFF_SECONDS = [15 * 60, 60 * 60, 6 * 60 * 60, 24 * 60 * 60] as
 function expectedSnapshot(
   post: Awaited<ReturnType<typeof getXhsPostForManualHandling>>,
   manualHandled: boolean,
+  notionVersion?: string,
 ) {
   const matchFields: Array<'title' | 'caption' | 'mediaType'> = [];
   if (post.headline.trim()) matchFields.push('title');
@@ -53,6 +54,7 @@ function expectedSnapshot(
     title: post.headline.trim(),
     caption: post.caption,
     mediaType: post.hasVideo ? 'video' as const : 'image' as const,
+    ...(notionVersion ? { notionVersion } : {}),
     ...(manualHandled ? { matchFields: [] } : {}),
   };
 }
@@ -92,9 +94,10 @@ export function manualReconciliationBackoffSeconds() {
 export async function createManualReconciliation(
   rawInput: unknown,
   idempotencyKey: string,
+  workspaceId = 'legacy-local-publish',
 ) {
   const input = parseCreateManualReconciliationInput(rawInput);
-  const existing = await findManualReconciliationByIdempotencyKey(idempotencyKey);
+  const existing = await findManualReconciliationByIdempotencyKey(idempotencyKey, workspaceId);
   if (existing) {
     if (
       existing.kind !== 'notion_only' ||
@@ -108,7 +111,6 @@ export async function createManualReconciliation(
         409,
       );
     }
-    await markXhsPostAwaitingReceipt(input.notionPageId);
     return {
       reconciliation: manualReconciliationSummary(existing),
       created: false,
@@ -133,31 +135,36 @@ export async function createManualReconciliation(
   }
   const result = await insertManualReconciliation({
     ...input,
-    expected: expectedSnapshot(post, Boolean(handling)),
+    expected: expectedSnapshot(
+      post,
+      Boolean(handling),
+      handling?.notionVersion ?? post.lastEditedTime,
+    ),
     idempotencyKey,
+    workspaceId,
   });
-  await markXhsPostAwaitingReceipt(input.notionPageId);
   return {
     reconciliation: manualReconciliationSummary(result.request),
     created: result.created,
   };
 }
 
-export async function getManualReconciliationSummaries() {
-  return (await listManualReconciliations()).map(manualReconciliationSummary);
+export async function getManualReconciliationSummaries(workspaceId = 'legacy-local-publish') {
+  return (await listManualReconciliations(workspaceId)).map(manualReconciliationSummary);
 }
 
 export async function retryFailedManualReconciliation(
   id: string,
   rawInput: unknown,
+  workspaceId = 'legacy-local-publish',
 ) {
   parseManualReconciliationRetry(rawInput);
-  const existing = await loadManualReconciliation(id);
+  const existing = await loadManualReconciliation(id, workspaceId);
   if (existing.status === 'reconciled') {
     return manualReconciliationSummary(existing);
   }
   if (existing.kind === 'targeted_local_job') {
-    return retryFailedExternalJobDisposition(id);
+    return retryFailedExternalJobDisposition(id, workspaceId);
   }
   const handling = await loadManualPostHandlingByPage(existing.notionPageId);
   const post = handling
@@ -177,12 +184,23 @@ export async function retryFailedManualReconciliation(
     assertManualReconciliationCandidate(post);
   }
   return manualReconciliationSummary(
-    await retryManualReconciliation(id, expectedSnapshot(post, Boolean(handling))),
+    await retryManualReconciliation(
+      id,
+      expectedSnapshot(
+        post,
+        Boolean(handling),
+        handling?.notionVersion ?? post.lastEditedTime,
+      ),
+      workspaceId,
+    ),
   );
 }
 
-export async function claimManualReconciliations(limit: number) {
-  return claimDueManualReconciliations(limit, leaseSeconds());
+export async function claimManualReconciliations(
+  limit: number,
+  workspaceId = 'legacy-local-publish',
+) {
+  return claimDueManualReconciliations(limit, leaseSeconds(), workspaceId);
 }
 
 async function reconciliationSummaryWithPlanSync(
@@ -226,6 +244,7 @@ async function reconciliationSummaryWithPlanSync(
   id: string,
   claimToken: string,
   rawResult: unknown,
+  workspaceId = 'legacy-local-publish',
 ) {
   const result = parseManualReconciliationWorkerResult(rawResult);
   if (result.status === 'verification_pending') {
@@ -235,6 +254,7 @@ async function reconciliationSummaryWithPlanSync(
       result.code,
       result.message,
       manualReconciliationBackoffSeconds(),
+      workspaceId,
     ));
   }
   if (result.status === 'failed') {
@@ -243,13 +263,15 @@ async function reconciliationSummaryWithPlanSync(
       claimToken,
       result.code,
       result.message,
+      workspaceId,
     ));
   }
 
-  const request = await assertManualVerifiedSnapshot(
+  const request = await recordManualVerifiedSnapshot(
     id,
     claimToken,
     result.snapshot,
+    workspaceId,
   );
   if (request.kind === 'targeted_local_job') {
     try {
@@ -257,12 +279,13 @@ async function reconciliationSummaryWithPlanSync(
         id,
         claimToken,
         result.snapshot,
+        workspaceId,
       );
-      return manualReconciliationSummary(await loadManualReconciliation(id));
+      return manualReconciliationSummary(await loadManualReconciliation(id, workspaceId));
     } catch (error) {
       const known = normalizeLocalPublishJobError(error);
       if (known.code === 'RECONCILIATION_IN_PROGRESS') {
-        return manualReconciliationSummary(await loadManualReconciliation(id));
+        return manualReconciliationSummary(await loadManualReconciliation(id, workspaceId));
       }
       const terminal = known.status >= 400 && known.status < 500;
       const stored = terminal
@@ -271,6 +294,7 @@ async function reconciliationSummaryWithPlanSync(
             claimToken,
             known.code,
             known.message,
+            workspaceId,
           )
         : await deferManualReconciliation(
             id,
@@ -278,6 +302,7 @@ async function reconciliationSummaryWithPlanSync(
             known.code,
             'Verified post found, but canonical Notion backfill is incomplete',
             manualReconciliationBackoffSeconds(),
+            workspaceId,
           );
       return manualReconciliationSummary(stored);
     }
@@ -290,17 +315,19 @@ async function reconciliationSummaryWithPlanSync(
       idempotencyKey: request.id,
       targetNotionPageId: request.notionPageId,
       source: 'manual',
+      workspaceId,
       ...(request.expected.notionVersion ? { manualHandling: {} } : {}),
     });
     return reconciliationSummaryWithPlanSync(await completeManualReconciliation(
       id,
       claimToken,
       receipt.id,
+      workspaceId,
     ));
   } catch (error) {
     const known = normalizeLocalPublishJobError(error);
     if (known.code === 'RECONCILIATION_IN_PROGRESS') {
-      return manualReconciliationSummary(await loadManualReconciliation(id));
+      return manualReconciliationSummary(await loadManualReconciliation(id, workspaceId));
     }
     const terminal = known.status >= 400 && known.status < 500;
     const stored = terminal
@@ -309,6 +336,7 @@ async function reconciliationSummaryWithPlanSync(
           claimToken,
           known.code,
           known.message,
+          workspaceId,
         )
       : await deferManualReconciliation(
           id,
@@ -316,6 +344,7 @@ async function reconciliationSummaryWithPlanSync(
           known.code,
           'Verified post found, but canonical Notion backfill is incomplete',
           manualReconciliationBackoffSeconds(),
+          workspaceId,
         );
     return manualReconciliationSummary(stored);
   }

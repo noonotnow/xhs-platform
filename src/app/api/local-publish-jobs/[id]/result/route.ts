@@ -8,6 +8,7 @@ import {
   parseClaimToken,
   requireLocalPublishWorker,
 } from '@/lib/local-publish-worker-auth';
+import { parseWorkspaceId } from '@/lib/workspace-id';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -33,6 +34,7 @@ export async function POST(
 ) {
   try {
     requireLocalPublishWorker(request.headers.get('authorization'));
+    const workspaceId = parseWorkspaceId(request.headers.get('x-workspace-id'));
     const claimToken = parseClaimToken(
       request.headers.get('x-local-publish-claim-token'),
     );
@@ -50,6 +52,7 @@ export async function POST(
       parseJobId(params.id),
       claimToken,
       body,
+      workspaceId,
     );
     return NextResponse.json({ job }, { headers: NO_STORE_HEADERS });
   } catch (error) {

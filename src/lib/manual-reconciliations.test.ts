@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   getManualPost: vi.fn(),
   loadHandling: vi.fn(),
   assertSnapshot: vi.fn(),
+  recordSnapshot: vi.fn(),
   reconcile: vi.fn(),
   complete: vi.fn(),
   defer: vi.fn(),
@@ -27,6 +28,7 @@ vi.mock('@/lib/manual-reconciliation-store', async (importOriginal) => {
     findManualReconciliationByIdempotencyKey: mocks.find,
     insertManualReconciliation: mocks.insert,
     assertManualVerifiedSnapshot: mocks.assertSnapshot,
+    recordManualVerifiedSnapshot: mocks.recordSnapshot,
     completeManualReconciliation: mocks.complete,
     deferManualReconciliation: mocks.defer,
     failManualReconciliation: mocks.fail,
@@ -93,6 +95,7 @@ describe('manual reconciliation orchestration', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.loadHandling.mockResolvedValue(null);
+    mocks.recordSnapshot.mockResolvedValue(request);
   });
 
   it('freezes expected metadata from Notion instead of the client', async () => {
@@ -120,6 +123,7 @@ describe('manual reconciliation orchestration', () => {
       shareUrl: request.shareUrl,
       expected: request.expected,
       idempotencyKey: request.idempotencyKey,
+      workspaceId: 'legacy-local-publish',
     });
   });
 
@@ -216,7 +220,7 @@ describe('manual reconciliation orchestration', () => {
   });
 
   it('targets the exact canonical row and completes only after the external receipt', async () => {
-    mocks.assertSnapshot.mockResolvedValue(request);
+    mocks.recordSnapshot.mockResolvedValue(request);
     mocks.reconcile.mockResolvedValue({
       id: '55555555-5555-4555-8555-555555555555',
       status: 'succeeded',
@@ -236,13 +240,14 @@ describe('manual reconciliation orchestration', () => {
       idempotencyKey: request.id,
       targetNotionPageId: request.notionPageId,
       source: 'manual',
+      workspaceId: 'legacy-local-publish',
     });
     expect(mocks.complete.mock.invocationCallOrder[0])
       .toBeGreaterThan(mocks.reconcile.mock.invocationCallOrder[0]);
   });
 
   it('syncs PLAN provenance after the operator receipt is durably reconciled', async () => {
-      mocks.assertSnapshot.mockResolvedValue(request);
+      mocks.recordSnapshot.mockResolvedValue(request);
       mocks.reconcile.mockResolvedValue({
         id: '55555555-5555-4555-8555-555555555555',
         status: 'succeeded',
@@ -277,7 +282,7 @@ describe('manual reconciliation orchestration', () => {
       kind: 'targeted_local_job' as const,
       sourceLocalJobId: '66666666-6666-4666-8666-666666666666',
     };
-    mocks.assertSnapshot.mockResolvedValue(targeted);
+    mocks.recordSnapshot.mockResolvedValue(targeted);
     mocks.reconcileDisposition.mockResolvedValue({
       id: targeted.id,
       localJobId: targeted.sourceLocalJobId,
@@ -301,6 +306,7 @@ describe('manual reconciliation orchestration', () => {
       targeted.id,
       targeted.claimToken,
       snapshot,
+      'legacy-local-publish',
     );
     expect(mocks.reconcile).not.toHaveBeenCalled();
     expect(mocks.complete).not.toHaveBeenCalled();
@@ -312,7 +318,7 @@ describe('manual reconciliation orchestration', () => {
       kind: 'targeted_local_job' as const,
       sourceLocalJobId: '66666666-6666-4666-8666-666666666666',
     };
-    mocks.assertSnapshot.mockResolvedValue(targeted);
+    mocks.recordSnapshot.mockResolvedValue(targeted);
     mocks.reconcileDisposition.mockRejectedValue(new LocalPublishJobError(
       'This verified post is already being reconciled',
       'RECONCILIATION_IN_PROGRESS',

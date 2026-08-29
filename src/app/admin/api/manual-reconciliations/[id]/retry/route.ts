@@ -4,6 +4,7 @@ import { parseManualReconciliationId } from '@/lib/manual-reconciliation-route';
 import { retryFailedManualReconciliation } from '@/lib/manual-reconciliations';
 import { normalizeLocalPublishJobError } from '@/lib/local-publish-jobs';
 import { requireXhsOperator } from '@/lib/xhs-operator-auth';
+import { parseWorkspaceId } from '@/lib/workspace-id';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -28,6 +29,7 @@ export async function POST(
     return unauthorized;
   }
   try {
+    const workspaceId = parseWorkspaceId(request.headers.get('x-workspace-id'));
     let body: unknown;
     try {
       body = await request.json();
@@ -41,6 +43,7 @@ export async function POST(
     const reconciliation = await retryFailedManualReconciliation(
       parseManualReconciliationId(params.id),
       body,
+      workspaceId,
     );
     return NextResponse.json(
       { reconciliation },

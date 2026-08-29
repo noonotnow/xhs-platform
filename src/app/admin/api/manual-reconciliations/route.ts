@@ -6,6 +6,7 @@ import {
 } from '@/lib/manual-reconciliations';
 import { normalizeLocalPublishJobError } from '@/lib/local-publish-jobs';
 import { requireXhsOperator } from '@/lib/xhs-operator-auth';
+import { parseWorkspaceId } from '@/lib/workspace-id';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -40,8 +41,9 @@ export async function GET(request: NextRequest) {
   const unauthorized = await authorize(request);
   if (unauthorized) return unauthorized;
   try {
+    const workspaceId = parseWorkspaceId(request.headers.get('x-workspace-id'));
     return NextResponse.json(
-      { reconciliations: await getManualReconciliationSummaries() },
+      { reconciliations: await getManualReconciliationSummaries(workspaceId) },
       { headers: NO_STORE_HEADERS },
     );
   } catch (error) {
@@ -53,6 +55,7 @@ export async function POST(request: NextRequest) {
   const unauthorized = await authorize(request);
   if (unauthorized) return unauthorized;
   try {
+    const workspaceId = parseWorkspaceId(request.headers.get('x-workspace-id'));
     const idempotencyKey = parseIdempotencyKey(
       request.headers.get('idempotency-key'),
     );
@@ -66,7 +69,7 @@ export async function POST(request: NextRequest) {
         400,
       );
     }
-    const result = await createManualReconciliation(body, idempotencyKey);
+    const result = await createManualReconciliation(body, idempotencyKey, workspaceId);
     return NextResponse.json(
       { reconciliation: result.reconciliation },
       { status: result.created ? 201 : 200, headers: NO_STORE_HEADERS },

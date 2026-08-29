@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from 'util';
 import type { QueryResultRow } from 'pg';
 import { getPool, sql } from '@/lib/db';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
+import { normalizeRednoteShareUrl } from '@/lib/rednote-publication';
 import type {
   ClaimedManualReconciliation,
   ExternalPostSnapshot,
@@ -13,6 +14,7 @@ import type {
 
 interface ManualReconciliationRow extends QueryResultRow {
   id: string;
+  workspace_id: string;
   notion_page_id: string;
   source_local_job_id: string | null;
   requested_note_id: string;
@@ -33,10 +35,13 @@ interface ManualReconciliationRow extends QueryResultRow {
   created_at: Date | string;
   updated_at: Date | string;
   completed_at: Date | string | null;
+  verified_snapshot: ExternalPostSnapshot | null;
+  verified_at: Date | string | null;
 }
 
 export interface StoredManualReconciliation {
   id: string;
+  workspaceId: string;
   notionPageId: string;
   sourceLocalJobId?: string;
   noteId: string;
@@ -57,6 +62,8 @@ export interface StoredManualReconciliation {
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
+  verifiedSnapshot?: ExternalPostSnapshot;
+  verifiedAt?: string;
 }
 
 function timestamp(value: Date | string) {
@@ -70,6 +77,7 @@ function optionalTimestamp(value: Date | string | null) {
 function mapRow(row: ManualReconciliationRow): StoredManualReconciliation {
   return {
     id: row.id,
+    workspaceId: row.workspace_id,
     notionPageId: row.notion_page_id,
     ...(row.source_local_job_id ? { sourceLocalJobId: row.source_local_job_id } : {}),
     noteId: row.requested_note_id,
@@ -97,6 +105,10 @@ function mapRow(row: ManualReconciliationRow): StoredManualReconciliation {
     updatedAt: timestamp(row.updated_at),
     ...(optionalTimestamp(row.completed_at)
       ? { completedAt: optionalTimestamp(row.completed_at) }
+      : {}),
+    ...(row.verified_snapshot ? { verifiedSnapshot: row.verified_snapshot } : {}),
+    ...(optionalTimestamp(row.verified_at)
+      ? { verifiedAt: optionalTimestamp(row.verified_at) }
       : {}),
   };
 }
@@ -127,21 +139,24 @@ export function manualReconciliationSummary(
 
 export async function findManualReconciliationByIdempotencyKey(
   idempotencyKey: string,
+  workspaceId = 'legacy-local-publish',
 ) {
   const result = await sql<ManualReconciliationRow>`
     SELECT *
     FROM manual_reconciliation_requests
-    WHERE idempotency_key = ${idempotencyKey}::uuid
+    WHERE workspace_id = ${workspaceId}
+      AND idempotency_key = ${idempotencyKey}::uuid
     LIMIT 1
   `;
   return result.rows[0] ? mapRow(result.rows[0]) : null;
 }
 
-export async function loadManualReconciliation(id: string) {
+export async function loadManualReconciliation(id: string, workspaceId = 'legacy-local-publish') {
   const result = await sql<ManualReconciliationRow>`
     SELECT *
     FROM manual_reconciliation_requests
     WHERE id = ${id}::uuid
+      AND workspace_id = ${workspaceId}
     LIMIT 1
   `;
   if (!result.rows[0]) {
@@ -160,13 +175,15 @@ export async function insertManualReconciliation(input: {
   shareUrl: string;
   expected: ManualReconciliationExpectedSnapshot;
   idempotencyKey: string;
+  workspaceId?: string;
 }) {
+  const workspaceId = input.workspaceId ?? 'legacy-local-publish';
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
     await client.query(
-      'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
-      [input.notionPageId],
+      'SELECT pg_advisory_xact_lock(hashtextextended($1 || E\'\\x1f\' || $2, 0))',
+      [workspaceId, input.notionPageId],
     );
     const jobs = await client.query<{
       id: string;
@@ -189,10 +206,10 @@ export async function insertManualReconciliation(input: {
               verified_at, reconciled_at, success_attestation_id,
               external_disposition_request_id
        FROM local_publish_jobs
-       WHERE notion_page_id = $1
+       WHERE notion_page_id = $1 AND workspace_id = $2
        ORDER BY created_at DESC
        FOR UPDATE`,
-      [input.notionPageId],
+      [input.notionPageId, workspaceId],
     );
     const active = jobs.rows.filter((job) =>
       !['reconciled', 'succeeded', 'failed'].includes(job.status));
@@ -240,8 +257,8 @@ export async function insertManualReconciliation(input: {
     const inserted = await client.query<ManualReconciliationRow>(
       `INSERT INTO manual_reconciliation_requests (
          notion_page_id, source_local_job_id, requested_note_id,
-         requested_share_url, expected_snapshot, idempotency_key
-       ) VALUES ($1, $2::uuid, $3, $4, $5::jsonb, $6::uuid)
+          requested_share_url, expected_snapshot, idempotency_key, workspace_id
+        ) VALUES ($1, $2::uuid, $3, $4, $5::jsonb, $6::uuid, $7)
        ON CONFLICT DO NOTHING
        RETURNING *`,
       [
@@ -251,6 +268,7 @@ export async function insertManualReconciliation(input: {
         input.shareUrl,
         JSON.stringify(input.expected),
         input.idempotencyKey,
+        workspaceId,
       ],
     );
     if (inserted.rows[0]) {
@@ -277,6 +295,7 @@ export async function insertManualReconciliation(input: {
               completed_at = CURRENT_TIMESTAMP,
               updated_at = CURRENT_TIMESTAMP
            WHERE id = $1::uuid
+             AND workspace_id = $2
              AND (
                (
                  status = 'queued'
@@ -298,7 +317,7 @@ export async function insertManualReconciliation(input: {
              AND success_attestation_id IS NULL
              AND external_disposition_request_id IS NULL
            RETURNING id`,
-          [source.id],
+          [source.id, workspaceId],
         );
         if (stopped.rowCount !== 1) {
           throw new LocalPublishJobError(
@@ -329,6 +348,7 @@ export async function insertManualReconciliation(input: {
 
   const existingKey = await findManualReconciliationByIdempotencyKey(
     input.idempotencyKey,
+    workspaceId,
   );
   if (existingKey) {
     const matches =
@@ -349,7 +369,8 @@ export async function insertManualReconciliation(input: {
   const conflict = await sql<{ kind: 'local' | 'manual' | 'same' }>`
     SELECT 'local'::text AS kind
     FROM local_publish_jobs
-    WHERE notion_page_id = ${input.notionPageId}
+    WHERE workspace_id = ${workspaceId}
+      AND notion_page_id = ${input.notionPageId}
       AND status NOT IN ('reconciled', 'succeeded', 'failed')
     UNION ALL
     SELECT
@@ -358,7 +379,8 @@ export async function insertManualReconciliation(input: {
         ELSE 'manual'::text
       END AS kind
     FROM manual_reconciliation_requests
-    WHERE notion_page_id = ${input.notionPageId}
+    WHERE workspace_id = ${workspaceId}
+      AND notion_page_id = ${input.notionPageId}
       AND (
         status IN ('queued', 'verifying')
         OR requested_note_id = ${input.noteId}
@@ -395,10 +417,11 @@ export async function insertManualReconciliation(input: {
   );
 }
 
-export async function listManualReconciliations() {
+export async function listManualReconciliations(workspaceId = 'legacy-local-publish') {
   const result = await sql<ManualReconciliationRow>`
     SELECT *
     FROM manual_reconciliation_requests
+    WHERE workspace_id = ${workspaceId}
     ORDER BY created_at DESC
     LIMIT 100
   `;
@@ -408,6 +431,7 @@ export async function listManualReconciliations() {
 export async function claimDueManualReconciliations(
   limit: number,
   leaseSeconds: number,
+  workspaceId = 'legacy-local-publish',
 ): Promise<ClaimedManualReconciliation[]> {
   const result = await sql<ManualReconciliationRow>`
     WITH exhausted AS (
@@ -418,6 +442,7 @@ export async function claimDueManualReconciliations(
           completed_at = CURRENT_TIMESTAMP,
           updated_at = CURRENT_TIMESTAMP
       WHERE status = 'verifying'
+        AND workspace_id = ${workspaceId}
         AND claim_expires_at <= CURRENT_TIMESTAMP
         AND claim_attempts >= 12
       RETURNING id
@@ -425,14 +450,15 @@ export async function claimDueManualReconciliations(
     candidates AS (
       SELECT id
       FROM manual_reconciliation_requests
-      WHERE (
+      WHERE workspace_id = ${workspaceId}
+        AND ((
         status = 'queued'
         AND next_attempt_at <= CURRENT_TIMESTAMP
       )
         OR (
           status = 'verifying'
           AND claim_expires_at <= CURRENT_TIMESTAMP
-        )
+        ))
         AND id NOT IN (SELECT id FROM exhausted)
       ORDER BY next_attempt_at, created_at
       FOR UPDATE SKIP LOCKED
@@ -447,6 +473,7 @@ export async function claimDueManualReconciliations(
         updated_at = CURRENT_TIMESTAMP
     FROM candidates
     WHERE request.id = candidates.id
+      AND request.workspace_id = ${workspaceId}
     RETURNING request.*
   `;
   return result.rows.map((row) => {
@@ -468,6 +495,7 @@ export async function claimDueManualReconciliations(
       noteId: request.noteId,
       shareUrl: request.shareUrl,
       expected: request.expected,
+      ...(request.verifiedSnapshot ? { verifiedSnapshot: request.verifiedSnapshot } : {}),
       verificationAttempts: request.verificationAttempts,
       claimToken: request.claimToken,
       claimExpiresAt: request.claimExpiresAt,
@@ -496,8 +524,9 @@ export async function assertManualVerifiedSnapshot(
   id: string,
   claimToken: string,
   snapshot: ExternalPostSnapshot,
+  workspaceId = 'legacy-local-publish',
 ) {
-  const request = await loadManualReconciliation(id);
+  const request = await loadManualReconciliation(id, workspaceId);
   if (request.status === 'reconciled') return request;
   assertCurrentClaim(request, claimToken);
   if (request.status !== 'verifying') {
@@ -515,6 +544,7 @@ export async function assertManualVerifiedSnapshot(
   const mismatch =
     snapshot.noteId !== request.noteId
     || snapshot.shareUrl !== request.shareUrl
+    || normalizeRednoteShareUrl(snapshot.noteId, snapshot.shareUrl) !== snapshot.shareUrl
     || matchFields.some((field) => snapshot[field] !== request.expected[field]);
   if (mismatch) {
     throw new LocalPublishJobError(
@@ -526,12 +556,54 @@ export async function assertManualVerifiedSnapshot(
   return request;
 }
 
+export async function recordManualVerifiedSnapshot(
+  id: string,
+  claimToken: string,
+  snapshot: ExternalPostSnapshot,
+  workspaceId = 'legacy-local-publish',
+) {
+  const request = await assertManualVerifiedSnapshot(id, claimToken, snapshot, workspaceId);
+  if (request.status === 'reconciled' || request.verifiedSnapshot) {
+    if (request.verifiedSnapshot && !isDeepStrictEqual(request.verifiedSnapshot, snapshot)) {
+      throw new LocalPublishJobError(
+        'A different verified snapshot is already recorded for this request',
+        'RECONCILIATION_CONFLICT',
+        409,
+      );
+    }
+    return request;
+  }
+  const result = await sql<ManualReconciliationRow>`
+    UPDATE manual_reconciliation_requests
+    SET verified_snapshot = ${JSON.stringify(snapshot)}::jsonb,
+        verified_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ${id}::uuid
+      AND workspace_id = ${workspaceId}
+      AND status = 'verifying'
+      AND claim_token = ${claimToken}::uuid
+      AND claim_expires_at > CURRENT_TIMESTAMP
+      AND verified_snapshot IS NULL
+    RETURNING *
+  `;
+  if (result.rows[0]) return mapRow(result.rows[0]);
+  const current = await loadManualReconciliation(id, workspaceId);
+  if (current.verifiedSnapshot && isDeepStrictEqual(current.verifiedSnapshot, snapshot)) return current;
+  assertCurrentClaim(current, claimToken);
+  throw new LocalPublishJobError(
+    'The verified reconciliation receipt could not be recorded',
+    'INVALID_RECONCILIATION_TRANSITION',
+    409,
+  );
+}
+
 export async function deferManualReconciliation(
   id: string,
   claimToken: string,
   code: string,
   message: string,
   backoffSeconds: readonly [number, number, number, number],
+  workspaceId = 'legacy-local-publish',
 ) {
   const result = await sql<ManualReconciliationRow>`
     UPDATE manual_reconciliation_requests
@@ -560,13 +632,14 @@ export async function deferManualReconciliation(
         END,
         updated_at = CURRENT_TIMESTAMP
     WHERE id = ${id}::uuid
+      AND workspace_id = ${workspaceId}
       AND status = 'verifying'
       AND claim_token = ${claimToken}::uuid
       AND claim_expires_at > CURRENT_TIMESTAMP
     RETURNING *
   `;
   if (result.rows[0]) return mapRow(result.rows[0]);
-  const request = await loadManualReconciliation(id);
+  const request = await loadManualReconciliation(id, workspaceId);
   if (
     request.claimToken === claimToken &&
     request.errorCode === code &&
@@ -588,6 +661,7 @@ export async function failManualReconciliation(
   claimToken: string,
   code: string,
   message: string,
+  workspaceId = 'legacy-local-publish',
 ) {
   const result = await sql<ManualReconciliationRow>`
     UPDATE manual_reconciliation_requests
@@ -598,13 +672,14 @@ export async function failManualReconciliation(
         completed_at = CURRENT_TIMESTAMP,
         updated_at = CURRENT_TIMESTAMP
     WHERE id = ${id}::uuid
+      AND workspace_id = ${workspaceId}
       AND status = 'verifying'
       AND claim_token = ${claimToken}::uuid
       AND claim_expires_at > CURRENT_TIMESTAMP
     RETURNING *
   `;
   if (result.rows[0]) return mapRow(result.rows[0]);
-  const request = await loadManualReconciliation(id);
+  const request = await loadManualReconciliation(id, workspaceId);
   if (
     request.claimToken === claimToken &&
     request.status === 'failed' &&
@@ -625,6 +700,7 @@ export async function completeManualReconciliation(
   id: string,
   claimToken: string,
   externalReconciliationId: string,
+  workspaceId = 'legacy-local-publish',
 ) {
   const client = await getPool().connect();
   try {
@@ -633,8 +709,9 @@ export async function completeManualReconciliation(
       `SELECT *
        FROM manual_reconciliation_requests
        WHERE id = $1::uuid
+         AND workspace_id = $2
        FOR UPDATE`,
-      [id],
+      [id, workspaceId],
     );
     if (!requestResult.rows[0]) {
       throw new LocalPublishJobError(
@@ -659,6 +736,13 @@ export async function completeManualReconciliation(
         409,
       );
     }
+    if (!request.verifiedSnapshot) {
+      throw new LocalPublishJobError(
+        'A durable verified snapshot is required before canonical backfill',
+        'VERIFICATION_REQUIRED',
+        409,
+      );
+    }
 
     const external = await client.query<{
       note_id: string;
@@ -669,9 +753,10 @@ export async function completeManualReconciliation(
       `SELECT note_id, share_url, completed_at, notion_page_id
        FROM external_post_reconciliations
        WHERE id = $1::uuid
+         AND workspace_id = $2
          AND status = 'succeeded'
        FOR UPDATE`,
-      [externalReconciliationId],
+      [externalReconciliationId, workspaceId],
     );
     const receipt = external.rows[0];
     if (
@@ -679,6 +764,8 @@ export async function completeManualReconciliation(
       || receipt.note_id !== request.noteId
       || receipt.share_url !== request.shareUrl
       || receipt.notion_page_id !== request.notionPageId
+      || request.verifiedSnapshot.noteId !== receipt.note_id
+      || request.verifiedSnapshot.shareUrl !== receipt.share_url
     ) {
       throw new LocalPublishJobError(
         'The exact verified publication receipt does not match this request',
@@ -690,9 +777,10 @@ export async function completeManualReconciliation(
     const handling = await client.query<{ id: string; receipt_status: string }>(
       `SELECT id, receipt_status
        FROM plan_operator_scheduled_posts
-       WHERE notion_page_id = $1
+        WHERE workspace_id = $1
+          AND notion_page_id = $2
        FOR UPDATE`,
-      [request.notionPageId],
+      [workspaceId, request.notionPageId],
     );
     if (handling.rows[0]?.receipt_status === 'reconciled') {
       throw new LocalPublishJobError(
@@ -710,9 +798,10 @@ export async function completeManualReconciliation(
          share_url,
          source,
          manual_handling_id,
-         updated_at
-       ) VALUES ($1, 'published', $2, $3, 'manual', $4::uuid, CURRENT_TIMESTAMP)
-       ON CONFLICT (notion_page_id) DO UPDATE
+          updated_at,
+          workspace_id
+        ) VALUES ($1, 'published', $2, $3, 'manual', $4::uuid, CURRENT_TIMESTAMP, $5)
+        ON CONFLICT (workspace_id, notion_page_id) DO UPDATE
        SET status = 'published',
            note_id = EXCLUDED.note_id,
            share_url = EXCLUDED.share_url,
@@ -723,6 +812,7 @@ export async function completeManualReconciliation(
          xhs_publish_receipts.note_id IS NULL
          OR xhs_publish_receipts.note_id = EXCLUDED.note_id
        )
+          AND xhs_publish_receipts.workspace_id = EXCLUDED.workspace_id
          AND (
            xhs_publish_receipts.share_url IS NULL
            OR xhs_publish_receipts.share_url = EXCLUDED.share_url
@@ -733,6 +823,7 @@ export async function completeManualReconciliation(
         request.noteId,
         request.shareUrl,
         handling.rows[0]?.id ?? null,
+        workspaceId,
       ],
     );
     if (publishedReceipt.rowCount !== 1) {
@@ -755,6 +846,7 @@ export async function completeManualReconciliation(
              reconciled_at = CURRENT_TIMESTAMP,
              updated_at = CURRENT_TIMESTAMP
          WHERE id = $1::uuid
+            AND workspace_id = $6
            AND receipt_status = 'pending'`,
         [
           handling.rows[0].id,
@@ -762,6 +854,7 @@ export async function completeManualReconciliation(
           request.noteId,
           request.shareUrl,
           timestamp(receipt.completed_at),
+          workspaceId,
         ],
       );
       if (reconciledHandling.rowCount !== 1) {
@@ -783,8 +876,9 @@ export async function completeManualReconciliation(
            completed_at = CURRENT_TIMESTAMP,
            updated_at = CURRENT_TIMESTAMP
        WHERE id = $1::uuid
+         AND workspace_id = $3
        RETURNING *`,
-      [request.id, externalReconciliationId],
+      [request.id, externalReconciliationId, workspaceId],
     );
     await client.query('COMMIT');
     return mapRow(completed.rows[0]);
@@ -799,15 +893,19 @@ export async function completeManualReconciliation(
 export async function retryManualReconciliation(
   id: string,
   expected: ManualReconciliationExpectedSnapshot,
+  workspaceId = 'legacy-local-publish',
 ) {
   const result = await sql<ManualReconciliationRow>`
     WITH target AS (
-      SELECT notion_page_id
+      SELECT workspace_id, notion_page_id
       FROM manual_reconciliation_requests
       WHERE id = ${id}::uuid
+        AND workspace_id = ${workspaceId}
     ),
     page_lock AS (
-      SELECT pg_advisory_xact_lock(hashtextextended(target.notion_page_id, 0))
+      SELECT pg_advisory_xact_lock(
+        hashtextextended(target.workspace_id || E'\x1f' || target.notion_page_id, 0)
+      )
       FROM target
     )
     UPDATE manual_reconciliation_requests AS request
@@ -824,24 +922,27 @@ export async function retryManualReconciliation(
         updated_at = CURRENT_TIMESTAMP
     FROM page_lock
     WHERE request.id = ${id}::uuid
+      AND request.workspace_id = ${workspaceId}
       AND request.status = 'failed'
       AND NOT EXISTS (
         SELECT 1
         FROM local_publish_jobs
-        WHERE notion_page_id = request.notion_page_id
+        WHERE workspace_id = ${workspaceId}
+          AND notion_page_id = request.notion_page_id
           AND status NOT IN ('reconciled', 'succeeded', 'failed')
       )
       AND NOT EXISTS (
         SELECT 1
         FROM manual_reconciliation_requests AS active
         WHERE active.notion_page_id = request.notion_page_id
+          AND active.workspace_id = ${workspaceId}
           AND active.status IN ('queued', 'verifying')
           AND active.id != request.id
       )
     RETURNING request.*
   `;
   if (result.rows[0]) return mapRow(result.rows[0]);
-  const request = await loadManualReconciliation(id);
+  const request = await loadManualReconciliation(id, workspaceId);
   if (request.status === 'reconciled') return request;
   if (request.status !== 'failed') {
     throw new LocalPublishJobError(
@@ -853,7 +954,8 @@ export async function retryManualReconciliation(
   const activeReconciliation = await sql`
     SELECT id
     FROM manual_reconciliation_requests
-    WHERE notion_page_id = ${request.notionPageId}
+    WHERE workspace_id = ${workspaceId}
+      AND notion_page_id = ${request.notionPageId}
       AND status IN ('queued', 'verifying')
       AND id != ${request.id}::uuid
     LIMIT 1

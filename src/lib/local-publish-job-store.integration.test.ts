@@ -227,11 +227,14 @@ describe('local publish job PostgreSQL execution', () => {
          updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
       CREATE TABLE manual_reconciliation_requests (
+        workspace_id text NOT NULL DEFAULT 'legacy-local-publish',
         request_kind text NOT NULL,
         source_local_job_id uuid
       );
       CREATE TABLE plan_operator_scheduled_posts (
-        notion_page_id text PRIMARY KEY,
+        workspace_id text NOT NULL DEFAULT 'legacy-local-publish',
+        notion_page_id text NOT NULL,
+        PRIMARY KEY (workspace_id, notion_page_id),
         reconciled_at timestamptz
       );
       CREATE TABLE local_publish_job_success_attestations (

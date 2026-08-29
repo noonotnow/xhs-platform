@@ -7,6 +7,7 @@ import {
   parseClaimToken,
   requireLocalPublishWorker,
 } from '@/lib/local-publish-worker-auth';
+import { parseWorkspaceId } from '@/lib/workspace-id';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -25,6 +26,7 @@ export async function POST(
 ) {
   try {
     requireLocalPublishWorker(request.headers.get('authorization'));
+    const workspaceId = parseWorkspaceId(request.headers.get('x-workspace-id'));
     const claimToken = parseClaimToken(
       request.headers.get('x-manual-reconciliation-claim-token'),
     );
@@ -42,11 +44,9 @@ export async function POST(
       parseManualReconciliationId(params.id),
       claimToken,
       body,
+      workspaceId,
     );
-    return NextResponse.json(
-      { reconciliation },
-      { headers: NO_STORE_HEADERS },
-    );
+    return NextResponse.json({ reconciliation }, { headers: NO_STORE_HEADERS });
   } catch (error) {
     const known = normalizeLocalPublishJobError(error);
     return NextResponse.json(

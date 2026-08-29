@@ -301,6 +301,7 @@ export interface ClaimedManualReconciliation {
   noteId: string;
   shareUrl: string;
   expected: ManualReconciliationExpectedSnapshot;
+  verifiedSnapshot?: ExternalPostSnapshot;
   verificationAttempts: number;
   claimToken: string;
   claimExpiresAt: string;

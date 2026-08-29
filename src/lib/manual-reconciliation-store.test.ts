@@ -29,6 +29,7 @@ const expected = {
 function row(status: 'queued' | 'verifying' | 'reconciled' | 'failed') {
   return {
     id: '11111111-1111-4111-8111-111111111111',
+    workspace_id: 'legacy-local-publish',
     notion_page_id: '22222222-2222-4222-8222-222222222222',
     source_local_job_id: '33333333-3333-4333-8333-333333333333',
     requested_note_id: 'note_123',
@@ -52,6 +53,14 @@ function row(status: 'queued' | 'verifying' | 'reconciled' | 'failed') {
     created_at: '2026-08-03T11:00:00.000Z',
     updated_at: '2026-08-03T12:00:00.000Z',
     completed_at: null,
+    verified_snapshot: status === 'verifying'
+      ? {
+          noteId: 'note_123',
+          shareUrl: 'https://www.rednote.com/explore/note_123',
+          ...expected,
+        }
+      : null,
+    verified_at: status === 'verifying' ? '2026-08-03T12:04:00.000Z' : null,
   };
 }
 
@@ -209,6 +218,7 @@ describe('manual reconciliation persistence', () => {
     expect(query).toContain('claim_token = gen_random_uuid()');
     expect(query).toContain('claim_attempts >= 12');
     expect(query).toContain('RECONCILIATION_WORKER_UNAVAILABLE');
+    expect(query).toContain('workspace_id');
   });
 
   it('completes the durable operator-scheduled marker after verified reconciliation', async () => {
