@@ -146,6 +146,11 @@ describe('local publish atomic claim storage', () => {
     const query = (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
 
     expect(query).toContain("status = 'queued'");
+    expect(query).toContain('FROM rednote_publish_attempts AS dispatch_attempt');
+    expect(query).toContain('dispatch_attempt.source_local_publish_job_id = local_publish_jobs.id');
+    expect(query).toContain('dispatch_attempt.approved_at IS NOT NULL');
+    expect(query).toContain('dispatch_attempt.active');
+    expect(query).toContain('dispatch_attempt.dispatch_authorized_at IS NULL');
     expect(query).not.toContain("status = 'claimed' AND claim_expires_at <= CURRENT_TIMESTAMP");
     expect(query).not.toContain("status = 'staged'\n              AND dispatch_authorized_at IS NULL");
     expect(query).toContain('external_disposition_request_id IS NULL');

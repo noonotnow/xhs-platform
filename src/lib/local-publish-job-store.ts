@@ -391,6 +391,22 @@ export async function claimNextStoredLocalPublishJob(
         (
           ${lane} IN ('all', 'dispatch')
           AND status = 'queued'
+          AND EXISTS (
+            SELECT 1
+            FROM rednote_publish_attempts AS dispatch_attempt
+            WHERE dispatch_attempt.workspace_id = local_publish_jobs.workspace_id
+              AND dispatch_attempt.source_local_publish_job_id = local_publish_jobs.id
+              AND dispatch_attempt.executor_type = 'worker'
+              AND dispatch_attempt.active
+              AND dispatch_attempt.approved_at IS NOT NULL
+              AND dispatch_attempt.terminal_outcome IS NULL
+              AND dispatch_attempt.dispatch_authorized_at IS NULL
+              AND dispatch_attempt.superseded_by_attempt_id IS NULL
+              AND (
+                dispatch_attempt.claim_expires_at IS NULL
+                OR dispatch_attempt.claim_expires_at <= CURRENT_TIMESTAMP
+              )
+          )
         )
           OR (
             ${lane} IN ('all', 'verification')
