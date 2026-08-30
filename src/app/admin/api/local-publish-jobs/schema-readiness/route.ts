@@ -117,6 +117,7 @@ export async function POST(request: NextRequest) {
       {
         error: 'RedNote publishing migrations could not be applied.',
         code: 'MIGRATION_FAILED',
+        detail: error instanceof Error ? error.message : 'Unknown migration error',
       },
       { status: 503, headers: NO_STORE_HEADERS },
     );

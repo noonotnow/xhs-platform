@@ -145,19 +145,26 @@ export async function applyExpectedRednoteSchemaMigrations(
       throw new RednoteSchemaStateChangedError(expectedMissing, actualMissing);
     }
 
-    for (const migration of expectedMissing) {
-      const sql = await readFile(
-        path.join(process.cwd(), 'migrations', migrationFiles[migration]),
-        'utf8',
-      );
-      await client.query(sql);
-    }
+    await client.query('BEGIN');
+    try {
+      for (const migration of expectedMissing) {
+        const sql = await readFile(
+          path.join(process.cwd(), 'migrations', migrationFiles[migration]),
+          'utf8',
+        );
+        await client.query(sql);
+      }
 
-    const after = await readRednoteSchemaReadiness(client);
-    if (missingRednoteSchemaMigrations(after).length > 0) {
-      throw new Error('Schema verification failed after migrations were applied');
+      const after = await readRednoteSchemaReadiness(client);
+      if (missingRednoteSchemaMigrations(after).length > 0) {
+        throw new Error('Schema verification failed after migrations were applied');
+      }
+      await client.query('COMMIT');
+      return { before, after, applied: expectedMissing };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
     }
-    return { before, after, applied: expectedMissing };
   } finally {
     await client.query(
       "SELECT pg_advisory_unlock(hashtext('xhs-rednote-publishing-migrations'))",
