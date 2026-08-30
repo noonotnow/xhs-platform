@@ -107,6 +107,7 @@ export interface QueueLocalPublishInput {
     index: number;
   };
   mode?: 'schedule' | 'publish';
+  consent?: 'ready_x3';
 }
 
 export function queueCopy(
@@ -138,6 +139,9 @@ export function parseQueueLocalPublishInput(value: unknown): QueueLocalPublishIn
   if (body.mode !== undefined && body.mode !== 'schedule' && body.mode !== 'publish') {
     throw new LocalPublishJobError('mode must be schedule or publish', 'VALIDATION_ERROR', 400);
   }
+  if (body.consent !== undefined && body.consent !== 'ready_x3') {
+    throw new LocalPublishJobError('consent must be ready_x3 when supplied', 'VALIDATION_ERROR', 400);
+  }
   return {
     notionPageId,
     lastEditedTime,
@@ -148,6 +152,7 @@ export function parseQueueLocalPublishInput(value: unknown): QueueLocalPublishIn
     tags: normalizeLocalPublishTags(body.tags),
     media: mediaChoice(body.media),
     ...(body.mode ? { mode: body.mode as 'schedule' | 'publish' } : {}),
+    ...(body.consent ? { consent: 'ready_x3' as const } : {}),
   };
 }
 
