@@ -29,7 +29,7 @@ interface WorkerHeartbeatRow extends QueryResultRow {
   lease_expires_at: Date | string;
 }
 
-function invalid(message: string) {
+function invalid(message: string): never {
   throw new LocalPublishJobError(message, 'VALIDATION_ERROR', 400);
 }
 
