@@ -22,6 +22,8 @@ CREATE INDEX IF NOT EXISTS local_publish_jobs_workspace_claim_idx
   ON local_publish_jobs (workspace_id, status, next_verification_at, created_at);
 
 ALTER TABLE rednote_publish_attempts
+  DROP CONSTRAINT IF EXISTS rednote_publish_attempts_local_job_workspace_fk;
+ALTER TABLE rednote_publish_attempts
   ADD CONSTRAINT rednote_publish_attempts_local_job_workspace_fk
   FOREIGN KEY (workspace_id, source_local_publish_job_id)
   REFERENCES local_publish_jobs (workspace_id, id)
