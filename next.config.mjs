@@ -8,8 +8,10 @@ const nextConfig = {
       },
     ],
   },
-  outputFileTracingIncludes: {
-    '/admin/api/local-publish-jobs/schema-readiness': ['./migrations/*.sql'],
+  experimental: {
+    outputFileTracingIncludes: {
+      '/admin/api/local-publish-jobs/schema-readiness': ['./migrations/*.sql'],
+    },
   },
   async rewrites() {
     return {

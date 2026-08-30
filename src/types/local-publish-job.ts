@@ -26,6 +26,7 @@ export interface LocalPublishSnapshot {
   compatibilityTrial?: LocalPublishCompatibilityTrial;
   thumbnailUrl?: string;
   publishAt?: string;
+  automationConsent?: 'ready_x3';
   notionLastEditedTime: string;
 }
 
@@ -69,12 +70,35 @@ export interface BatchAuthorization {
   lateAction: 'schedule' | 'post_now';
 }
 
+/** A one-shot, immutable consent for a Ready ×3 worker dispatch. */
+export interface ReadyX3Authorization {
+  kind: 'ready_x3';
+  packetRevision: string;
+  packetDigest: string;
+  media: {
+    url: string;
+    type: LocalPublishMediaType;
+    identity: string;
+  };
+  platform: 'RedNote';
+  publishAt: string;
+  authorizedAt: string;
+  lateFallback: {
+    action: 'schedule' | 'post_now';
+    maxLateMinutes: 30;
+  };
+}
+
 interface ClaimedLocalPublishJobBase
-  extends Omit<LocalPublishSnapshot, 'mediaIndex' | 'notionLastEditedTime'> {
+  extends Omit<LocalPublishSnapshot, 'notionLastEditedTime'> {
   id: string;
   claimToken: string;
   claimExpiresAt: string;
+  /** Revision of the exact Notion packet frozen into this claim. */
+  notionLastEditedTime: string;
   batchAuthorization?: BatchAuthorization;
+  readyX3Authorization?: ReadyX3Authorization;
+  dispatchAuthorizedAt?: string;
 }
 
 export type PublishBatchKind = 'weekly' | 'catch_up' | 'bootstrap';
