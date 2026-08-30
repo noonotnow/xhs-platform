@@ -39,7 +39,7 @@ WHERE status = 'reconciled';
 
 DROP INDEX IF EXISTS local_publish_jobs_active_page_idx;
 
-CREATE UNIQUE INDEX local_publish_jobs_active_page_idx
+CREATE UNIQUE INDEX IF NOT EXISTS local_publish_jobs_active_page_idx
   ON local_publish_jobs (notion_page_id)
   WHERE status NOT IN ('reconciled', 'failed');
 

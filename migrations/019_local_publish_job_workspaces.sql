@@ -65,6 +65,8 @@ ALTER TABLE xhs_publish_receipts
   CHECK (char_length(workspace_id) BETWEEN 1 AND 128);
 ALTER TABLE xhs_publish_receipts
   DROP CONSTRAINT IF EXISTS xhs_publish_receipts_notion_page_id_key;
+ALTER TABLE xhs_publish_receipts
+  DROP CONSTRAINT IF EXISTS xhs_publish_receipts_pkey;
 DROP INDEX IF EXISTS xhs_publish_receipts_notion_page_id_key;
 CREATE UNIQUE INDEX IF NOT EXISTS xhs_publish_receipts_workspace_page_idx
   ON xhs_publish_receipts (workspace_id, notion_page_id);

@@ -1,13 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getPool } from '@/lib/db';
 import {
+  applyExpectedRednoteBaselineMigrations,
   applyExpectedRednoteSchemaMigrations,
   missingRednoteSchemaMigrations,
   parseExpectedMissing,
+  parseExpectedMissingPrerequisites,
   readRednoteSchemaPrerequisites,
   readRednoteSchemaReadiness,
+  RednoteBaselineStateChangedError,
   RednoteSchemaPrerequisitesMissingError,
   RednoteSchemaStateChangedError,
+  XhsReceiptSchemaIncompatibleError,
 } from '@/lib/rednote-publishing-schema';
 import { requireXhsOperator } from '@/lib/xhs-operator-auth';
 
@@ -71,11 +75,80 @@ export async function POST(request: NextRequest) {
   } catch {
     body = null;
   }
-  if (
-    !body
-    || typeof body !== 'object'
-    || (body as { confirm?: unknown }).confirm !== 'APPLY_REDNOTE_PUBLISHING_MIGRATIONS'
-  ) {
+  if (!body || typeof body !== 'object') {
+    return NextResponse.json(
+      {
+        error: 'Explicit migration confirmation is required.',
+        code: 'MIGRATION_CONFIRMATION_REQUIRED',
+      },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
+  }
+  const confirm = (body as { confirm?: unknown }).confirm;
+
+  if (confirm === 'APPLY_LOCAL_PUBLISHING_BASELINE') {
+    let expectedMissing;
+    try {
+      expectedMissing = parseExpectedMissingPrerequisites(
+        (body as { expectedMissingPrerequisites?: unknown })
+          .expectedMissingPrerequisites,
+      );
+    } catch (error) {
+      return NextResponse.json(
+        {
+          error: error instanceof Error ? error.message : 'Invalid expected table set.',
+          code: 'INVALID_EXPECTED_PREREQUISITES',
+        },
+        { status: 400, headers: NO_STORE_HEADERS },
+      );
+    }
+
+    const client = await getPool().connect();
+    try {
+      const result = await applyExpectedRednoteBaselineMigrations(
+        client,
+        expectedMissing,
+      );
+      return NextResponse.json(
+        { ready: true, prerequisites: result.after, applied: result.applied },
+        { headers: NO_STORE_HEADERS },
+      );
+    } catch (error) {
+      if (error instanceof RednoteBaselineStateChangedError) {
+        return NextResponse.json(
+          {
+            error: error.message,
+            code: 'BASELINE_STATE_CHANGED',
+            expectedMissing: error.expectedMissing,
+            actualMissing: error.actualMissing,
+          },
+          { status: 409, headers: NO_STORE_HEADERS },
+        );
+      }
+      if (error instanceof XhsReceiptSchemaIncompatibleError) {
+        return NextResponse.json(
+          {
+            error: error.message,
+            code: 'RECEIPT_SCHEMA_INCOMPATIBLE',
+          },
+          { status: 409, headers: NO_STORE_HEADERS },
+        );
+      }
+      console.error('Local publishing baseline migrations failed', error);
+      return NextResponse.json(
+        {
+          error: 'Local publishing baseline migrations could not be applied.',
+          code: 'BASELINE_MIGRATION_FAILED',
+          detail: error instanceof Error ? error.message : 'Unknown migration error',
+        },
+        { status: 503, headers: NO_STORE_HEADERS },
+      );
+    } finally {
+      client.release();
+    }
+  }
+
+  if (confirm !== 'APPLY_REDNOTE_PUBLISHING_MIGRATIONS') {
     return NextResponse.json(
       {
         error: 'Explicit migration confirmation is required.',

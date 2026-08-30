@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  REDNOTE_BASELINE_TABLES,
   missingRednoteSchemaMigrations,
   parseExpectedMissing,
+  parseExpectedMissingPrerequisites,
+  RednoteBaselineStateChangedError,
   RednoteSchemaPrerequisitesMissingError,
   RednoteSchemaStateChangedError,
 } from './rednote-publishing-schema';
@@ -47,6 +50,28 @@ describe('RedNote publishing schema migration gate', () => {
     expect(error.missingPrerequisites).toEqual([
       'local_publish_jobs',
       'xhs_publish_receipts',
+    ]);
+  });
+
+  it('normalizes the reviewed baseline table set into canonical order', () => {
+    expect(parseExpectedMissingPrerequisites([
+      'plan_operator_scheduled_posts',
+      'local_publish_jobs',
+    ])).toEqual([
+      'local_publish_jobs',
+      'plan_operator_scheduled_posts',
+    ]);
+    expect(REDNOTE_BASELINE_TABLES).not.toContain('xhs_publish_receipts');
+  });
+
+  it('retains baseline drift evidence for a safe 409 response', () => {
+    const error = new RednoteBaselineStateChangedError(
+      ['local_publish_jobs'],
+      ['local_publish_jobs', 'rednote_publish_batches'],
+    );
+    expect(error.actualMissing).toEqual([
+      'local_publish_jobs',
+      'rednote_publish_batches',
     ]);
   });
 });

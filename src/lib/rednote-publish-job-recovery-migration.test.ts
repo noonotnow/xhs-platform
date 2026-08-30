@@ -9,10 +9,10 @@ describe('generation-aware recovery migration', () => {
       'utf8',
     );
     expect(migration).toContain(
-      'DROP CONSTRAINT rednote_publish_job_recoveries_local_publish_job_id_key',
+      'DROP CONSTRAINT IF EXISTS rednote_publish_job_recoveries_local_publish_job_id_key',
     );
     expect(migration).toContain(
-      'DROP CONSTRAINT rednote_publish_job_recoveries_batch_item_id_key',
+      'DROP CONSTRAINT IF EXISTS rednote_publish_job_recoveries_batch_item_id_key',
     );
     expect(migration).toContain('UNIQUE (local_publish_job_id, prior_claim_attempts)');
     expect(migration).toContain('UNIQUE (batch_item_id, prior_claim_attempts)');
