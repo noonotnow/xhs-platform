@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireXhsOperator } from '@/lib/xhs-operator-auth';
 import { parseIdempotencyKey, LocalPublishJobError } from '@/lib/local-publish-job-input';
 import {
-  getLocalPublishJobSummaries,
   normalizeLocalPublishJobError,
   queueLocalPublishJob,
 } from '@/lib/local-publish-jobs';
