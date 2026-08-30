@@ -2,10 +2,12 @@ import { NextResponse } from 'next/server';
 import { validateCloudflareAccessRequest } from '@/lib/cloudflare-access';
 import { timingSafeEqual } from 'crypto';
 
-function validOperatorBearer(header: string | null) {
+function validOperatorToken(headers: Headers) {
   const configured = process.env.XHS_PLATFORM_OPERATOR_TOKEN?.trim()
     || process.env.XHS_PLATFORM_API_TOKEN?.trim();
-  const supplied = header?.match(/^Bearer\s+(.+)$/i)?.[1];
+  const dedicated = headers.get('x-xhs-operator-token')?.trim();
+  const bearer = headers.get('authorization')?.match(/^Bearer\s+(.+)$/i)?.[1];
+  const supplied = dedicated || bearer;
   if (!configured || !supplied) return false;
   const left = Buffer.from(configured);
   const right = Buffer.from(supplied);
@@ -15,7 +17,7 @@ function validOperatorBearer(header: string | null) {
 export async function requireXhsOperator(
   request: Pick<Request, 'headers'>,
 ): Promise<NextResponse | null> {
-  if (validOperatorBearer(request.headers.get('authorization'))) return null;
+  if (validOperatorToken(request.headers)) return null;
   try {
     await validateCloudflareAccessRequest(request);
     return null;
