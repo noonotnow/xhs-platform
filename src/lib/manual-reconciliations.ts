@@ -278,7 +278,6 @@ async function reconciliationSummaryWithPlanSync(
         id,
         claimToken,
         result.snapshot,
-        workspaceId,
       );
       return manualReconciliationSummary(await loadManualReconciliation(id, workspaceId));
     } catch (error) {
