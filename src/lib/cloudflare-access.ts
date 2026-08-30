@@ -17,8 +17,11 @@ export async function validateCloudflareAccessRequest(
     cachedJwks = createRemoteJWKSet(new URL(`${origin}/cdn-cgi/access/certs`));
     cachedIssuer = normalizedIssuer;
   }
-  await jwtVerify(token, cachedJwks, {
+  const { payload } = await jwtVerify(token, cachedJwks, {
     issuer: [issuer, normalizedIssuer],
     audience,
   });
+  const email = typeof payload.email === 'string' ? payload.email.trim() : '';
+  if (!email) throw new Error('Cloudflare Access identity email is missing');
+  return { email };
 }
