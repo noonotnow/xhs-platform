@@ -6,7 +6,6 @@ import {
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
 import { syncReconciledPlanProvenance } from '@/lib/plan-reconciliation-sync';
 import {
-  assertManualVerifiedSnapshot,
   claimDueManualReconciliations,
   completeManualReconciliation,
   deferManualReconciliation,
