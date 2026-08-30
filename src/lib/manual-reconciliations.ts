@@ -313,7 +313,6 @@ async function reconciliationSummaryWithPlanSync(
       idempotencyKey: request.id,
       targetNotionPageId: request.notionPageId,
       source: 'manual',
-      workspaceId,
       ...(request.expected.notionVersion ? { manualHandling: {} } : {}),
     });
     return reconciliationSummaryWithPlanSync(await completeManualReconciliation(
