@@ -4,7 +4,9 @@ import {
   applyExpectedRednoteSchemaMigrations,
   missingRednoteSchemaMigrations,
   parseExpectedMissing,
+  readRednoteSchemaPrerequisites,
   readRednoteSchemaReadiness,
+  RednoteSchemaPrerequisitesMissingError,
   RednoteSchemaStateChangedError,
 } from '@/lib/rednote-publishing-schema';
 import { requireXhsOperator } from '@/lib/xhs-operator-auth';
@@ -35,10 +37,15 @@ export async function GET(request: NextRequest) {
   if (unauthorized) return unauthorized;
 
   try {
-    const migrations = await readRednoteSchemaReadiness(getPool());
+    const [migrations, prerequisites] = await Promise.all([
+      readRednoteSchemaReadiness(getPool()),
+      readRednoteSchemaPrerequisites(getPool()),
+    ]);
     return NextResponse.json(
       {
-        ready: missingRednoteSchemaMigrations(migrations).length === 0,
+        ready: missingRednoteSchemaMigrations(migrations).length === 0
+          && Object.values(prerequisites).every(Boolean),
+        prerequisites,
         migrations,
       },
       { headers: NO_STORE_HEADERS },
@@ -101,6 +108,16 @@ export async function POST(request: NextRequest) {
       { headers: NO_STORE_HEADERS },
     );
   } catch (error) {
+    if (error instanceof RednoteSchemaPrerequisitesMissingError) {
+      return NextResponse.json(
+        {
+          error: error.message,
+          code: 'SCHEMA_PREREQUISITES_MISSING',
+          missingPrerequisites: error.missingPrerequisites,
+        },
+        { status: 409, headers: NO_STORE_HEADERS },
+      );
+    }
     if (error instanceof RednoteSchemaStateChangedError) {
       return NextResponse.json(
         {

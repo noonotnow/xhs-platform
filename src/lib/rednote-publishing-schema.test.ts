@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   missingRednoteSchemaMigrations,
   parseExpectedMissing,
+  RednoteSchemaPrerequisitesMissingError,
   RednoteSchemaStateChangedError,
 } from './rednote-publishing-schema';
 
@@ -36,5 +37,16 @@ describe('RedNote publishing schema migration gate', () => {
     );
     expect(error.expectedMissing).toEqual(['018', '019']);
     expect(error.actualMissing).toEqual(['019']);
+  });
+
+  it('retains missing prerequisite names for a safe 409 response', () => {
+    const error = new RednoteSchemaPrerequisitesMissingError([
+      'local_publish_jobs',
+      'xhs_publish_receipts',
+    ]);
+    expect(error.missingPrerequisites).toEqual([
+      'local_publish_jobs',
+      'xhs_publish_receipts',
+    ]);
   });
 });

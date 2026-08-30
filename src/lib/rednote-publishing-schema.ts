@@ -5,6 +5,14 @@ import type { PoolClient, QueryResultRow } from 'pg';
 export const REDNOTE_SCHEMA_MIGRATIONS = ['018', '019', '020', '021'] as const;
 export type RednoteSchemaMigration = (typeof REDNOTE_SCHEMA_MIGRATIONS)[number];
 export type RednoteSchemaReadiness = Record<RednoteSchemaMigration, boolean>;
+export const REDNOTE_SCHEMA_PREREQUISITES = [
+  'local_publish_jobs',
+  'manual_reconciliation_requests',
+  'plan_operator_scheduled_posts',
+  'external_post_reconciliations',
+  'xhs_publish_receipts',
+] as const;
+export type RednoteSchemaPrerequisite = (typeof REDNOTE_SCHEMA_PREREQUISITES)[number];
 
 const migrationFiles: Record<RednoteSchemaMigration, string> = {
   '018': '018_rednote_publishing_attempts.sql',
@@ -97,6 +105,12 @@ export class RednoteSchemaStateChangedError extends Error {
   }
 }
 
+export class RednoteSchemaPrerequisitesMissingError extends Error {
+  constructor(readonly missingPrerequisites: RednoteSchemaPrerequisite[]) {
+    super('The prerequisite local-publishing schema is missing; no migrations were applied.');
+  }
+}
+
 export function parseExpectedMissing(value: unknown): RednoteSchemaMigration[] {
   if (!Array.isArray(value)) throw new Error('expectedMissing must be an array');
   const unique = new Set<RednoteSchemaMigration>();
@@ -128,6 +142,22 @@ export function missingRednoteSchemaMigrations(readiness: RednoteSchemaReadiness
   return REDNOTE_SCHEMA_MIGRATIONS.filter((migration) => !readiness[migration]);
 }
 
+export async function readRednoteSchemaPrerequisites(
+  queryable: Pick<PoolClient, 'query'>,
+): Promise<Record<RednoteSchemaPrerequisite, boolean>> {
+  const result = await queryable.query<{ table_name: string } & QueryResultRow>(
+    `SELECT table_name
+     FROM information_schema.tables
+     WHERE table_schema = 'public'
+       AND table_name = ANY($1::text[])`,
+    [REDNOTE_SCHEMA_PREREQUISITES],
+  );
+  const present = new Set(result.rows.map((row) => row.table_name));
+  return Object.fromEntries(
+    REDNOTE_SCHEMA_PREREQUISITES.map((table) => [table, present.has(table)]),
+  ) as Record<RednoteSchemaPrerequisite, boolean>;
+}
+
 export async function applyExpectedRednoteSchemaMigrations(
   client: PoolClient,
   expectedMissing: RednoteSchemaMigration[],
@@ -136,6 +166,13 @@ export async function applyExpectedRednoteSchemaMigrations(
     "SELECT pg_advisory_lock(hashtext('xhs-rednote-publishing-migrations'))",
   );
   try {
+    const prerequisites = await readRednoteSchemaPrerequisites(client);
+    const missingPrerequisites = REDNOTE_SCHEMA_PREREQUISITES.filter(
+      (table) => !prerequisites[table],
+    );
+    if (missingPrerequisites.length > 0) {
+      throw new RednoteSchemaPrerequisitesMissingError(missingPrerequisites);
+    }
     const before = await readRednoteSchemaReadiness(client);
     const actualMissing = missingRednoteSchemaMigrations(before);
     if (
