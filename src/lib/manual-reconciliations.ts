@@ -163,7 +163,7 @@ export async function retryFailedManualReconciliation(
     return manualReconciliationSummary(existing);
   }
   if (existing.kind === 'targeted_local_job') {
-    return retryFailedExternalJobDisposition(id, workspaceId);
+    return retryFailedExternalJobDisposition(id);
   }
   const handling = await loadManualPostHandlingByPage(existing.notionPageId);
   const post = handling
