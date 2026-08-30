@@ -643,14 +643,19 @@ async function claimedResponse(row: LocalPublishJobRow): Promise<ClaimedLocalPub
       : normalizeLocalPublishTags(job.snapshot.tags),
     platform: job.snapshot.platform,
     mediaType: job.snapshot.mediaType,
+    mediaIndex: job.snapshot.mediaIndex,
     mediaUrl: job.snapshot.mediaUrl,
     ...(job.snapshot.compatibilityTrial
       ? { compatibilityTrial: job.snapshot.compatibilityTrial }
       : {}),
     ...(job.snapshot.thumbnailUrl ? { thumbnailUrl: job.snapshot.thumbnailUrl } : {}),
     ...(job.snapshot.publishAt ? { publishAt: job.snapshot.publishAt } : {}),
+    notionLastEditedTime: job.snapshot.notionLastEditedTime,
     claimToken: row.claim_token,
     claimExpiresAt: timestamp(row.claim_expires_at),
+    ...(job.dispatchAuthorizedAt
+      ? { dispatchAuthorizedAt: job.dispatchAuthorizedAt }
+      : {}),
     ...(job.batchAuthorization ? { batchAuthorization: job.batchAuthorization } : {}),
   };
   if (job.status === 'operator_attested') {
