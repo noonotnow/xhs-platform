@@ -31,12 +31,19 @@ export async function GET(request: NextRequest) {
     return unauthorized;
   }
 
-  const jobId =
+  const rawJobId =
     request.headers.get('x-local-publish-job-id')
     ?? request.nextUrl.searchParams.get('jobId');
+  const jobId = rawJobId?.trim() ?? null;
   if (!jobId || !UUID_PATTERN.test(jobId)) {
     return NextResponse.json(
-      { error: 'One exact jobId UUID is required.', code: 'VALIDATION_ERROR' },
+      {
+        error: 'One exact jobId UUID is required.',
+        code: 'VALIDATION_ERROR',
+        deploymentCommit: process.env.VERCEL_GIT_COMMIT_SHA ?? null,
+        receivedJobId: jobId,
+        receivedLength: jobId?.length ?? null,
+      },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
