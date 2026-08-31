@@ -4,6 +4,7 @@ import {
   diagnoseReadyX3StaleBrowserFrameRecovery,
   requeueReadyX3InvalidClaimFailure,
   requeueReadyX3NotLoggedInFailure,
+  requeueReadyX3ScheduleReadbackMismatch,
   requeueReadyX3StaleBrowserFrameFailure,
   requeueReadyX3PrestageClaim,
 } from '@/lib/rednote-publishing-attempt-store';
@@ -32,6 +33,7 @@ export async function POST(request: NextRequest) {
       body.confirm !== 'REQUEUE_EXACT_READY_X3_INVALID_CLAIM_FAILURE' &&
       body.confirm !== 'REQUEUE_EXACT_READY_X3_NOT_LOGGED_IN_FAILURE' &&
       body.confirm !== 'REQUEUE_EXACT_READY_X3_STALE_BROWSER_FRAME_FAILURE' &&
+      body.confirm !== 'REQUEUE_EXACT_READY_X3_SCHEDULE_READBACK_MISMATCH' &&
       body.confirm !== 'DIAGNOSE_EXACT_READY_X3_STALE_BROWSER_FRAME_RECOVERY'
     ) {
       throw new LocalPublishJobError(
@@ -54,6 +56,8 @@ export async function POST(request: NextRequest) {
         ? await requeueReadyX3InvalidClaimFailure(recoveryInput)
         : body.confirm === 'REQUEUE_EXACT_READY_X3_NOT_LOGGED_IN_FAILURE'
           ? await requeueReadyX3NotLoggedInFailure(recoveryInput)
+          : body.confirm === 'REQUEUE_EXACT_READY_X3_SCHEDULE_READBACK_MISMATCH'
+            ? await requeueReadyX3ScheduleReadbackMismatch(recoveryInput)
           : body.confirm === 'REQUEUE_EXACT_READY_X3_STALE_BROWSER_FRAME_FAILURE'
             ? await requeueReadyX3StaleBrowserFrameFailure(recoveryInput)
           : await requeueReadyX3PrestageClaim(recoveryInput);

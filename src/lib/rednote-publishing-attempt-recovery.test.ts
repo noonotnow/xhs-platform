@@ -17,6 +17,7 @@ vi.mock('@/lib/db', () => ({
 import {
   requeueReadyX3InvalidClaimFailure,
   requeueReadyX3NotLoggedInFailure,
+  requeueReadyX3ScheduleReadbackMismatch,
   requeueReadyX3StaleBrowserFrameFailure,
 } from '@/lib/rednote-publishing-attempt-store';
 
@@ -127,6 +128,24 @@ describe('Ready x3 pre-provider failure recovery', () => {
     );
     expect(String(eligibleCall?.[0])).toContain(
       '($7::text IS NULL OR job.error_message LIKE $7)',
+    );
+  });
+
+  it('requires the exact pre-provider schedule readback failure', async () => {
+    mockEligibleRecovery(true);
+
+    await expect(requeueReadyX3ScheduleReadbackMismatch(input)).resolves.toMatchObject({
+      requeued: true,
+      jobId: input.jobId,
+      attemptId: input.attemptId,
+      publicationMayHaveStarted: false,
+    });
+
+    const eligibleCall = mocks.query.mock.calls.find(([statement]) =>
+      String(statement).includes('UPDATE local_publish_jobs job'));
+    expect(eligibleCall?.[1]?.[5]).toBe('SCHEDULE_READBACK_MISMATCH');
+    expect(eligibleCall?.[1]?.[6]).toBe(
+      'Creator date-picker did not retain the scheduled time (got %',
     );
   });
 });

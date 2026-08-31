@@ -752,7 +752,8 @@ export async function requeueReadyX3PrestageClaim(input: {
 type RecoverableReadyX3PreproviderFailure =
   | 'INVALID_CLAIM'
   | 'NOT_LOGGED_IN'
-  | 'INTERNAL_ERROR';
+  | 'INTERNAL_ERROR'
+  | 'SCHEDULE_READBACK_MISMATCH';
 
 class ReadyX3RecoveryDiagnosticRollback extends Error {
   constructor(readonly result: {
@@ -958,6 +959,24 @@ export async function diagnoseReadyX3StaleBrowserFrameRecovery(input: {
     unsafeMessage: 'The Ready x3 stale browser frame failure is not safe to recover',
     unsafeCode: 'READY_X3_STALE_BROWSER_FRAME_RECOVERY_UNSAFE',
   }, true);
+}
+
+export async function requeueReadyX3ScheduleReadbackMismatch(input: {
+  workspaceId: string;
+  jobId: string;
+  attemptId: string;
+  sourceNotionPageId: string;
+  revision: string;
+}) {
+  return requeueReadyX3PreproviderFailure(input, {
+    errorCode: 'SCHEDULE_READBACK_MISMATCH',
+    errorMessageLike:
+      'Creator date-picker did not retain the scheduled time (got %',
+    actorId: 'ready_x3_schedule_readback_recovery',
+    evidenceKind: 'schedule_readback_mismatch_requeued_for_late_fallback',
+    unsafeMessage: 'The Ready x3 schedule readback failure is not safe to recover',
+    unsafeCode: 'READY_X3_SCHEDULE_READBACK_RECOVERY_UNSAFE',
+  });
 }
 
 export async function recordLinkedAttemptOutcome(input: {
