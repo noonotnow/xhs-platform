@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { PoolClient, QueryResultRow } from 'pg';
 
-export const REDNOTE_SCHEMA_MIGRATIONS = ['018', '019', '020', '021'] as const;
+export const REDNOTE_SCHEMA_MIGRATIONS = ['018', '019', '020', '021', '022'] as const;
 export type RednoteSchemaMigration = (typeof REDNOTE_SCHEMA_MIGRATIONS)[number];
 export type RednoteSchemaReadiness = Record<RednoteSchemaMigration, boolean>;
 export const REDNOTE_SCHEMA_PREREQUISITES = [
@@ -55,6 +55,7 @@ const migrationFiles: Record<RednoteSchemaMigration, readonly string[]> = {
   ],
   '020': ['020_ready_x3_authorization.sql'],
   '021': ['021_local_publish_worker_heartbeats.sql'],
+  '022': ['022_ready_x3_invalid_claim_recovery.sql'],
 };
 
 const READINESS_SQL = `
@@ -93,7 +94,8 @@ const READINESS_SQL = `
       ('021', 'column', 'local_publish_worker_heartbeats', 'last_poll_at'),
       ('021', 'column', 'local_publish_worker_heartbeats', 'next_poll_at'),
       ('021', 'column', 'local_publish_worker_heartbeats', 'last_heartbeat_at'),
-      ('021', 'column', 'local_publish_worker_heartbeats', 'lease_expires_at')
+      ('021', 'column', 'local_publish_worker_heartbeats', 'lease_expires_at'),
+      ('022', 'routine', NULL, 'ready_x3_invalid_claim_recovery_guard_revision')
   )
   SELECT
     migration,

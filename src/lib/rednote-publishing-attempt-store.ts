@@ -762,6 +762,9 @@ export async function requeueReadyX3InvalidClaimFailure(input: {
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
       `${input.workspaceId}:${input.sourceNotionPageId}`,
     ]);
+    await client.query(
+      `SELECT set_config('app.ready_x3_invalid_claim_recovery', 'on', true)`,
+    );
     const recovered = await client.query<{ id: string }>(
       `WITH eligible AS (
          SELECT job.id, attempt.id AS attempt_id
@@ -802,7 +805,8 @@ export async function requeueReadyX3InvalidClaimFailure(input: {
        ), reset_attempt AS (
          UPDATE rednote_publish_attempts attempt
          SET active=true, terminal_outcome=NULL, terminal_at=NULL,
-             receipt_lookup_state=NULL, receipt_lookup_updated_at=NULL,
+             receipt_lookup_state='pending',
+             receipt_lookup_updated_at=CURRENT_TIMESTAMP,
              claim_token=NULL, claim_expires_at=NULL
          FROM eligible
          WHERE attempt.id=eligible.attempt_id

@@ -26,6 +26,7 @@ const migrationFiles = [
   '019_local_publish_job_workspaces.sql',
   '020_ready_x3_authorization.sql',
   '021_local_publish_worker_heartbeats.sql',
+  '022_ready_x3_invalid_claim_recovery.sql',
 ] as const;
 
 describe('canonical local publishing migration chain', () => {
