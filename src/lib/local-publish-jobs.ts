@@ -49,6 +49,7 @@ import {
   getLinkedRednotePublishAttempt,
   invalidateLinkedReadyX3Source,
   supersedeUnclaimedReadyX3Schedule,
+  withReadyX3SourceLock,
 } from '@/lib/rednote-publishing-attempt-store';
 import {
   REDNOTE_PUBLISHING_CONTRACT_REVISION,
@@ -102,22 +103,28 @@ const resultDependencies: ResultDependencies = {
   backfill: markXhsPostPublished,
 };
 
+const READY_X3_MAX_LATE_MS = 30 * 60 * 1_000;
+
 async function createLinkedAttempt(
   snapshot: LocalPublishSnapshot,
   idempotencyKey: string,
   workspaceId: string,
   localJobId: string,
-  readyX3: boolean,
+  readyX3Action?: 'schedule' | 'post_now',
 ) {
   const requestedAt = new Date().toISOString();
+  const timingMode = readyX3Action ??
+    (snapshot.publishAt ? 'schedule' as const : 'post_now' as const);
   const browserPayload = {
     sourcePostId: snapshot.notionPageId,
     title: snapshot.title,
     caption: snapshot.caption,
     tags: snapshot.tags,
     scheduledDate: snapshot.publishAt ?? null,
-    targetPublishAt: snapshot.publishAt ?? requestedAt,
-    timingMode: snapshot.publishAt ? 'scheduled' as const : 'post_now' as const,
+    targetPublishAt: timingMode === 'post_now'
+      ? requestedAt
+      : snapshot.publishAt ?? requestedAt,
+    timingMode: timingMode === 'schedule' ? 'scheduled' as const : 'post_now' as const,
     visibility: 'public' as const,
     publishMode: snapshot.mediaType,
     mediaAssets: [{
@@ -127,6 +134,17 @@ async function createLinkedAttempt(
       mediaType: snapshot.mediaType,
       role: 'content' as const,
     }],
+    ...(snapshot.mediaType === 'video' && snapshot.thumbnailUrl
+      ? {
+          coverAsset: {
+            assetId: 'video-cover',
+            deliveryUrl: snapshot.thumbnailUrl,
+            sha256: createHash('sha256').update(snapshot.thumbnailUrl).digest('hex'),
+            mediaType: 'image' as const,
+            role: 'cover' as const,
+          },
+        }
+      : {}),
   };
   const payload = {
     contractRevision: REDNOTE_PUBLISHING_CONTRACT_REVISION,
@@ -143,8 +161,8 @@ async function createLinkedAttempt(
     workspaceId,
     idempotencyKey,
     payload,
-    approve: readyX3,
-    readyX3,
+    approve: Boolean(readyX3Action),
+    readyX3: Boolean(readyX3Action),
   });
 }
 
@@ -364,7 +382,9 @@ export async function queueLocalPublishJob(
         idempotencyKey,
         workspaceId,
         existing.id,
-        storedReadyX3Consent,
+        storedReadyX3Consent
+          ? input.mode === 'publish' ? 'post_now' : 'schedule'
+          : undefined,
       );
       return {
         job: jobSummary(existing),
@@ -380,6 +400,17 @@ export async function queueLocalPublishJob(
         409,
       );
     }
+    if (
+      hasReadyX3Consent &&
+      (existingAttempt.readyX3Authorization as ReadyX3Authorization).action !==
+        (input.mode === 'publish' ? 'post_now' : 'schedule')
+    ) {
+      throw new LocalPublishJobError(
+        'Idempotency-Key was already used with a different Ready x3 action',
+        'IDEMPOTENCY_CONFLICT',
+        409,
+      );
+    }
     return {
       job: jobSummary(existing),
       attempt: existingAttempt,
@@ -391,27 +422,56 @@ export async function queueLocalPublishJob(
   const snapshot: LocalPublishSnapshot = input.consent === 'ready_x3'
     ? { ...builtSnapshot, automationConsent: 'ready_x3' }
     : builtSnapshot;
+  const readyX3Action = input.consent === 'ready_x3'
+    ? input.mode === 'publish' ? 'post_now' as const : 'schedule' as const
+    : undefined;
   if (input.consent === 'ready_x3' && !snapshot.publishAt) {
     throw new LocalPublishJobError('Ready x3 consent requires an exact scheduled publishAt', 'READY_X3_PUBLISH_TIME_REQUIRED', 422);
   }
-  if (input.consent === 'ready_x3' && new Date(snapshot.publishAt!).getTime() <= Date.now()) {
-    throw new LocalPublishJobError('Ready x3 consent requires a future publishAt', 'READY_X3_PUBLISH_TIME_REQUIRED', 422);
+  const readyX3PublishAt = snapshot.publishAt
+    ? new Date(snapshot.publishAt).getTime()
+    : Number.NaN;
+  if (readyX3Action === 'schedule' && readyX3PublishAt <= Date.now()) {
+    throw new LocalPublishJobError('Ready x3 scheduling requires a future publishAt', 'READY_X3_PUBLISH_TIME_REQUIRED', 422);
   }
-  if (input.consent === 'ready_x3') {
-    await supersedeUnclaimedReadyX3Schedule(workspaceId, snapshot);
+  if (readyX3Action === 'post_now' && readyX3PublishAt < Date.now() - READY_X3_MAX_LATE_MS) {
+    throw new LocalPublishJobError('Ready x3 Post now cannot use a publishAt more than 30 minutes late', 'READY_X3_PUBLISH_TIME_EXPIRED', 422);
   }
-  const result = await dependencies.insert(snapshot, idempotencyKey, workspaceId);
-  if (typeof workspaceOrDependencies !== 'string') {
-    return { job: jobSummary(result.job), created: result.created };
+  if (readyX3Action && snapshot.mediaType === 'video' && !snapshot.thumbnailUrl) {
+    throw new LocalPublishJobError('Ready x3 video requires a trusted cover image before staging', 'READY_X3_COVER_REQUIRED', 422);
   }
-  const attempt = await createLinkedAttempt(
-    snapshot,
-    idempotencyKey,
-    workspaceId,
-    result.job.id,
-    input.consent === 'ready_x3',
-  );
-  return { job: jobSummary(result.job), attempt: attempt.attempt, created: result.created };
+  const persist = async () => {
+    if (input.consent === 'ready_x3') {
+      await supersedeUnclaimedReadyX3Schedule(workspaceId, snapshot, readyX3Action!);
+    }
+    const result = await dependencies.insert(snapshot, idempotencyKey, workspaceId);
+    if (typeof workspaceOrDependencies !== 'string') {
+      return { job: jobSummary(result.job), created: result.created };
+    }
+    const attempt = await createLinkedAttempt(
+      snapshot,
+      idempotencyKey,
+      workspaceId,
+      result.job.id,
+      readyX3Action,
+    );
+    return { job: jobSummary(result.job), attempt: attempt.attempt, created: result.created };
+  };
+  if (readyX3Action && typeof workspaceOrDependencies === 'string') {
+    return withReadyX3SourceLock(workspaceId, snapshot.notionPageId, async () => {
+      const raced = await dependencies.findByIdempotencyKey(idempotencyKey, workspaceId);
+      if (raced) {
+        return queueLocalPublishJob(
+          rawInput,
+          idempotencyKey,
+          workspaceOrDependencies,
+          suppliedDependencies,
+        );
+      }
+      return persist();
+    });
+  }
+  return persist();
 }
 
 function leaseSeconds() {

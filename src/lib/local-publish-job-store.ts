@@ -1005,7 +1005,17 @@ export async function recordStoredLocalPublishDispatch(
         )
         OR (
           ${status} = 'submitted'
-          AND COALESCE(snapshot->>'publishAt', snapshot->>'scheduledDate') IS NULL
+          AND (
+            COALESCE(snapshot->>'publishAt', snapshot->>'scheduledDate') IS NULL
+            OR EXISTS (
+              SELECT 1
+              FROM rednote_publish_attempts AS immediate_attempt
+              WHERE immediate_attempt.workspace_id = local_publish_jobs.workspace_id
+                AND immediate_attempt.source_local_publish_job_id = local_publish_jobs.id
+                AND immediate_attempt.authorization_kind = 'ready_x3'
+                AND immediate_attempt.frozen_payload->'browserPayload'->>'timingMode' = 'post_now'
+            )
+          )
         )
       )
     RETURNING *

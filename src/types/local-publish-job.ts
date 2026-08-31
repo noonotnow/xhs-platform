@@ -73,6 +73,7 @@ export interface BatchAuthorization {
 /** A one-shot, immutable consent for a Ready ×3 worker dispatch. */
 export interface ReadyX3Authorization {
   kind: 'ready_x3';
+  action: 'schedule' | 'post_now';
   packetRevision: string;
   packetDigest: string;
   media: {

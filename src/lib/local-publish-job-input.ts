@@ -231,7 +231,9 @@ export function buildLocalPublishSnapshot(
     mediaUrl,
     ...(compatibilityTrial ? { compatibilityTrial: 'unverified_mov' as const } : {}),
     ...(thumbnailUrl ? { thumbnailUrl } : {}),
-    ...(post.publishAt && input.mode !== 'publish' ? { publishAt: post.publishAt } : {}),
+    ...(post.publishAt && (input.mode !== 'publish' || input.consent === 'ready_x3')
+      ? { publishAt: post.publishAt }
+      : {}),
     notionLastEditedTime: post.lastEditedTime,
   };
 }

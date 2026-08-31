@@ -527,6 +527,8 @@ describe('local publish atomic claim storage', () => {
     expect(query).toContain("snapshot->>'scheduledDate'");
     expect(query).toContain("? = 'scheduled'");
     expect(query).toContain("? = 'submitted'");
+    expect(query).toContain("authorization_kind = 'ready_x3'");
+    expect(query).toContain("->>'timingMode' = 'post_now'");
     expect(query).toContain('claim_expires_at = CURRENT_TIMESTAMP');
   });
 

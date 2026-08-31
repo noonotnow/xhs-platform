@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { AsyncLocalStorage } from 'async_hooks';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { getPool } from '@/lib/db';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
@@ -41,6 +42,8 @@ interface AttemptRow extends QueryResultRow {
   late_fallback_policy?: { action: 'schedule' | 'post_now'; maxLateMinutes: 30 } | null;
 }
 
+const readyX3SourceLockContext = new AsyncLocalStorage<string>();
+
 function iso(value: Date | string | null) {
   return value ? new Date(value).toISOString() : null;
 }
@@ -77,9 +80,15 @@ function publicAttempt(row: AttemptRow) {
 function attemptReadyX3Authorization(row: AttemptRow): ReadyX3Authorization {
   const payload = row.frozen_payload;
   const media = payload.browserPayload.mediaAssets[0];
+  const action = payload.browserPayload.timingMode === 'post_now'
+    ? 'post_now' as const
+    : 'schedule' as const;
+  const timingMatches = action === 'schedule'
+    ? payload.browserPayload.scheduledDate === payload.browserPayload.targetPublishAt
+    : payload.browserPayload.targetPublishAt === payload.requestedAt;
   if (!media || !payload.browserPayload.targetPublishAt ||
-    payload.browserPayload.timingMode !== 'scheduled' ||
-    payload.browserPayload.scheduledDate !== payload.browserPayload.targetPublishAt ||
+    !payload.browserPayload.scheduledDate ||
+    !timingMatches ||
     frozenPayloadDigest(payload) !== row.payload_digest ||
     payload.payloadDigest !== row.payload_digest ||
     payload.payloadRevision !== row.payload_revision) {
@@ -87,11 +96,12 @@ function attemptReadyX3Authorization(row: AttemptRow): ReadyX3Authorization {
   }
   return {
     kind: 'ready_x3',
+    action,
     packetRevision: row.payload_revision,
     packetDigest: row.payload_digest,
     media: { url: media.deliveryUrl, type: media.mediaType, identity: rednoteMediaIdentity({ url: media.deliveryUrl, type: media.mediaType }) },
     platform: 'RedNote',
-    publishAt: new Date(payload.browserPayload.targetPublishAt).toISOString(),
+    publishAt: new Date(payload.browserPayload.scheduledDate).toISOString(),
     authorizedAt: iso(row.approved_at)!,
     lateFallback: row.late_fallback_policy ?? { action: 'post_now', maxLateMinutes: 30 },
   };
@@ -149,9 +159,12 @@ export async function createRednotePublishAttempt(input: {
 }) {
   validatePayload(input.payload);
   return transaction(async (client) => {
-    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
-      `${input.workspaceId}:${input.payload.sourceNotionPageId}`,
-    ]);
+    const sourceLockKey = `${input.workspaceId}:${input.payload.sourceNotionPageId}`;
+    if (readyX3SourceLockContext.getStore() !== sourceLockKey) {
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+        sourceLockKey,
+      ]);
+    }
     const replay = await client.query<AttemptRow>(
       'SELECT * FROM rednote_publish_attempts WHERE workspace_id=$1 AND idempotency_key=$2::uuid',
       [input.workspaceId, input.idempotencyKey],
@@ -218,62 +231,91 @@ export async function createRednotePublishAttempt(input: {
 }
 
 /**
- * Retires only an untouched Ready ×3 schedule.  This deliberately does not
- * treat a changed packet or media as a reschedule: those require new explicit
- * consent and retain the old immutable history.
+ * Retires every untouched Ready ×3 authorization for this source. Once any
+ * authorization enters worker execution, replacement fails closed because the
+ * provider side effect may already be in flight.
  */
+export async function withReadyX3SourceLock<T>(
+  workspaceId: string,
+  notionPageId: string,
+  operation: () => Promise<T>,
+) {
+  return transaction(async (client) => {
+    const sourceLockKey = `${workspaceId}:${notionPageId}`;
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+      sourceLockKey,
+    ]);
+    return readyX3SourceLockContext.run(sourceLockKey, operation);
+  });
+}
+
 export async function supersedeUnclaimedReadyX3Schedule(
   workspaceId: string,
   snapshot: LocalPublishSnapshot,
+  action: 'schedule' | 'post_now',
 ) {
-  if (!snapshot.publishAt || new Date(snapshot.publishAt).getTime() <= Date.now()) return false;
+  if (!snapshot.publishAt) return false;
   return transaction(async (client) => {
-    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
-      `${workspaceId}:${snapshot.notionPageId}`,
-    ]);
-    const old = await client.query<{ job_id: string; attempt_id: string }>(
-      `SELECT job.id AS job_id, attempt.id AS attempt_id
+    const old = await client.query<{
+      job_id: string;
+      attempt_id: string;
+      job_status: string;
+      job_claim_token: string | null;
+      job_dispatch_authorized_at: Date | string | null;
+      attempt_claim_token: string | null;
+      attempt_dispatch_authorized_at: Date | string | null;
+    }>(
+      `SELECT job.id AS job_id, attempt.id AS attempt_id,
+          job.status AS job_status, job.claim_token AS job_claim_token,
+          job.dispatch_authorized_at AS job_dispatch_authorized_at,
+          attempt.claim_token AS attempt_claim_token,
+          attempt.dispatch_authorized_at AS attempt_dispatch_authorized_at
        FROM local_publish_jobs job
        JOIN rednote_publish_attempts attempt
          ON attempt.workspace_id=job.workspace_id
         AND attempt.source_local_publish_job_id=job.id
        WHERE job.workspace_id=$1 AND job.notion_page_id=$2
-         AND job.status='queued' AND job.claim_token IS NULL
-         AND job.dispatch_authorized_at IS NULL
          AND attempt.active AND attempt.authorization_kind='ready_x3'
          AND attempt.approved_at IS NOT NULL AND attempt.terminal_outcome IS NULL
-         AND attempt.claim_token IS NULL AND attempt.dispatch_authorized_at IS NULL
          AND attempt.superseded_by_attempt_id IS NULL
-          AND ((attempt.frozen_payload->'browserPayload') - 'scheduledDate'::text - 'targetPublishAt'::text)
-             = $3::jsonb
-       ORDER BY job.created_at DESC LIMIT 1 FOR UPDATE OF job, attempt`,
-      [workspaceId, snapshot.notionPageId, JSON.stringify({
-        sourcePostId: snapshot.notionPageId, title: snapshot.title, caption: snapshot.caption,
-        tags: snapshot.tags, timingMode: 'scheduled', visibility: 'public', publishMode: snapshot.mediaType,
-        mediaAssets: [{ assetId: `${snapshot.mediaType}-${snapshot.mediaIndex}`, deliveryUrl: snapshot.mediaUrl,
-          sha256: createHash('sha256').update(snapshot.mediaUrl).digest('hex'),
-          mediaType: snapshot.mediaType, role: 'content' }],
-      })],
+       ORDER BY job.created_at
+       FOR UPDATE OF job, attempt`,
+      [workspaceId, snapshot.notionPageId],
     );
-    if (!old.rows[0]) return false;
-    await client.query(
-      `UPDATE rednote_publish_attempts SET active=false
-       WHERE id=$1::uuid AND workspace_id=$2 AND active
-         AND dispatch_authorized_at IS NULL AND claim_token IS NULL`,
-      [old.rows[0].attempt_id, workspaceId],
-    );
-    await client.query(
-      `UPDATE local_publish_jobs SET status='failed', error_code='READY_X3_SCHEDULE_SUPERSEDED',
-        error_message='Superseded by a newly authorized Ready x3 schedule before worker claim.',
-        completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
-       WHERE id=$1::uuid AND workspace_id=$2 AND status='queued' AND claim_token IS NULL`,
-      [old.rows[0].job_id, workspaceId],
-    );
-    await client.query(
-      `INSERT INTO rednote_publish_attempt_events(attempt_id,event_type,occurred_at,actor_type,actor_id)
-       VALUES($1::uuid,'superseded',CURRENT_TIMESTAMP,'operator','ready_x3_schedule_supersession')`,
-      [old.rows[0].attempt_id],
-    );
+    if (old.rows.some((row) =>
+      row.job_status !== 'queued' ||
+      row.job_claim_token !== null ||
+      row.job_dispatch_authorized_at !== null ||
+      row.attempt_claim_token !== null ||
+      row.attempt_dispatch_authorized_at !== null
+    )) {
+      throw new LocalPublishJobError(
+        `The existing Ready x3 attempt has already entered worker execution; ${action} authorization is blocked until it is resolved.`,
+        'READY_X3_ATTEMPT_IN_PROGRESS',
+        409,
+      );
+    }
+    if (old.rows.length === 0) return false;
+    for (const row of old.rows) {
+      await client.query(
+        `UPDATE rednote_publish_attempts SET active=false
+         WHERE id=$1::uuid AND workspace_id=$2 AND active
+           AND dispatch_authorized_at IS NULL AND claim_token IS NULL`,
+        [row.attempt_id, workspaceId],
+      );
+      await client.query(
+        `UPDATE local_publish_jobs SET status='failed', error_code='READY_X3_SCHEDULE_SUPERSEDED',
+          error_message='Superseded by a newly authorized Ready x3 action before worker claim.',
+          completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+         WHERE id=$1::uuid AND workspace_id=$2 AND status='queued' AND claim_token IS NULL`,
+        [row.job_id, workspaceId],
+      );
+      await client.query(
+        `INSERT INTO rednote_publish_attempt_events(attempt_id,event_type,occurred_at,actor_type,actor_id)
+         VALUES($1::uuid,'superseded',CURRENT_TIMESTAMP,'operator','ready_x3_action_supersession')`,
+        [row.attempt_id],
+      );
+    }
     return true;
   });
 }
