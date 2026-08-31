@@ -244,7 +244,7 @@ export async function supersedeUnclaimedReadyX3Schedule(
          AND attempt.approved_at IS NOT NULL AND attempt.terminal_outcome IS NULL
          AND attempt.claim_token IS NULL AND attempt.dispatch_authorized_at IS NULL
          AND attempt.superseded_by_attempt_id IS NULL
-         AND (attempt.frozen_payload->'browserPayload' - 'scheduledDate' - 'targetPublishAt')
+         AND ((attempt.frozen_payload->'browserPayload') - 'scheduledDate'::text - 'targetPublishAt'::text)
              = $3::jsonb
        ORDER BY job.created_at DESC LIMIT 1 FOR UPDATE OF job, attempt`,
       [workspaceId, snapshot.notionPageId, JSON.stringify({
