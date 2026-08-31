@@ -41,12 +41,20 @@ export async function GET(request: NextRequest) {
       );
     }
     const lane = rawLane as LocalPublishWorkLane;
+    const claimToken = request.headers.get('x-local-publish-claim-token');
+    if (!claimToken || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(claimToken)) {
+      throw new LocalPublishJobError(
+        'A valid client-generated claim token is required',
+        'VALIDATION_ERROR',
+        400,
+      );
+    }
     if (expectedJobId !== undefined) {
       validateExpectedVerificationJobId(lane, expectedJobId);
     }
     const job = expectedJobId
-      ? await claimNextLocalPublishJob(lane, expectedJobId, workspaceId)
-      : await claimNextLocalPublishJob(lane, undefined, workspaceId);
+      ? await claimNextLocalPublishJob(lane, expectedJobId, workspaceId, claimToken)
+      : await claimNextLocalPublishJob(lane, undefined, workspaceId, claimToken);
     if (!job) {
       return new NextResponse(null, { status: 204, headers: NO_STORE_HEADERS });
     }

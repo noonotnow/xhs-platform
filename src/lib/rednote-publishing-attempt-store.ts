@@ -425,6 +425,15 @@ export async function bindLinkedAttemptClaim(
     [workspaceId, localJobId, claimToken, claimExpiresAt],
   );
   if (!result.rows[0]) {
+    const replay = await getPool().query<AttemptRow>(
+      `SELECT * FROM rednote_publish_attempts
+       WHERE workspace_id=$1 AND source_local_publish_job_id=$2::uuid AND active
+         AND approved_at IS NOT NULL AND terminal_outcome IS NULL
+         AND dispatch_authorized_at IS NULL AND claim_token=$3::uuid
+         AND claim_expires_at>CURRENT_TIMESTAMP`,
+      [workspaceId, localJobId, claimToken],
+    );
+    if (replay.rows[0]) return;
     throw new LocalPublishJobError('The linked publishing attempt is not claimable', 'ATTEMPT_NOT_CLAIMABLE', 409);
   }
   await getPool().query(

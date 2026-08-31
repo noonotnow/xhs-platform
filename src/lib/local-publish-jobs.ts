@@ -457,12 +457,19 @@ export async function claimNextLocalPublishJob(
   lane: LocalPublishWorkLane = 'all',
   expectedJobId?: string,
   workspaceId = 'legacy-local-publish',
+  claimToken?: string,
 ) {
   if (expectedJobId !== undefined) {
     validateExpectedVerificationJobId(lane, expectedJobId);
   }
   for (let attempt = 0; attempt < 10; attempt += 1) {
-    const job = await claimNextStoredLocalPublishJob(leaseSeconds(), lane, expectedJobId, workspaceId);
+    const job = await claimNextStoredLocalPublishJob(
+      leaseSeconds(),
+      lane,
+      expectedJobId,
+      workspaceId,
+      claimToken,
+    );
     if (!job && expectedJobId) {
       throw new LocalPublishJobError(
         'The expected verification job is not currently claimable',

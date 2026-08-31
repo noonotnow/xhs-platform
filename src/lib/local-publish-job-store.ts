@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import type { QueryResultRow } from 'pg';
 import { isDeepStrictEqual } from 'util';
 import { sql } from '@/lib/db';
@@ -381,6 +382,7 @@ export async function claimNextStoredLocalPublishJob(
   lane: LocalPublishWorkLane = 'all',
   expectedJobId?: string,
   workspaceId = 'legacy-local-publish',
+  claimToken = randomUUID(),
 ): Promise<ClaimedLocalPublishJob | null> {
   const result = await sql<LocalPublishJobRow>`
     WITH candidate AS (
@@ -389,6 +391,12 @@ export async function claimNextStoredLocalPublishJob(
       WHERE workspace_id = ${workspaceId}
         AND (
         (
+          ${lane} IN ('all', 'dispatch')
+          AND status = 'claimed'
+          AND claim_token = ${claimToken}::uuid
+          AND claim_expires_at > CURRENT_TIMESTAMP
+        )
+        OR (
           ${lane} IN ('all', 'dispatch')
           AND status = 'queued'
           AND EXISTS (
@@ -403,8 +411,8 @@ export async function claimNextStoredLocalPublishJob(
               AND dispatch_attempt.dispatch_authorized_at IS NULL
               AND dispatch_attempt.superseded_by_attempt_id IS NULL
               AND (
-                dispatch_attempt.claim_expires_at IS NULL
-                OR dispatch_attempt.claim_expires_at <= CURRENT_TIMESTAMP
+                 dispatch_attempt.claim_token IS NULL
+                 OR dispatch_attempt.claim_expires_at <= CURRENT_TIMESTAMP
               )
           )
         )
@@ -489,10 +497,19 @@ export async function claimNextStoredLocalPublishJob(
           WHEN candidate.status IN ('queued', 'claimed') THEN 'claimed'
           ELSE candidate.status
         END,
-        claim_token = gen_random_uuid(),
-        claim_attempts = claim_attempts + 1,
-        claimed_at = CURRENT_TIMESTAMP,
-        claim_expires_at = CURRENT_TIMESTAMP + (${leaseSeconds} * INTERVAL '1 second'),
+        claim_token = ${claimToken}::uuid,
+        claim_attempts = CASE
+          WHEN candidate.status = 'claimed' THEN claim_attempts
+          ELSE claim_attempts + 1
+        END,
+        claimed_at = CASE
+          WHEN candidate.status = 'claimed' THEN claimed_at
+          ELSE CURRENT_TIMESTAMP
+        END,
+        claim_expires_at = CASE
+          WHEN candidate.status = 'claimed' THEN claim_expires_at
+          ELSE CURRENT_TIMESTAMP + (${leaseSeconds} * INTERVAL '1 second')
+        END,
         error_code = CASE
           WHEN candidate.status IN ('queued', 'claimed', 'staged') THEN NULL
           ELSE job.error_code
