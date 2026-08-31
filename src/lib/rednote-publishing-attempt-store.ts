@@ -746,6 +746,110 @@ export async function requeueReadyX3PrestageClaim(input: {
   });
 }
 
+export async function requeueReadyX3InvalidClaimFailure(input: {
+  workspaceId: string;
+  jobId: string;
+  attemptId: string;
+  sourceNotionPageId: string;
+  revision: string;
+}) {
+  for (const [name, value] of Object.entries(input)) {
+    if (typeof value !== 'string' || !value.trim()) {
+      throw new LocalPublishJobError(`${name} is required`, 'VALIDATION_ERROR', 400);
+    }
+  }
+  return transaction(async (client) => {
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+      `${input.workspaceId}:${input.sourceNotionPageId}`,
+    ]);
+    const recovered = await client.query<{ id: string }>(
+      `WITH eligible AS (
+         SELECT job.id, attempt.id AS attempt_id
+         FROM local_publish_jobs job
+         JOIN rednote_publish_attempts attempt
+           ON attempt.source_local_publish_job_id=job.id
+          AND attempt.workspace_id=job.workspace_id
+         WHERE job.workspace_id=$1 AND job.id=$2::uuid
+           AND attempt.id=$3::uuid
+           AND job.notion_page_id=$4
+           AND attempt.source_notion_page_id=$4
+           AND attempt.payload_revision=$5
+           AND job.status='failed'
+           AND job.error_code='INVALID_CLAIM'
+           AND job.staged_at IS NULL
+           AND job.dispatch_authorized_at IS NULL
+           AND job.dispatched_at IS NULL
+           AND job.note_id IS NULL AND job.share_url IS NULL
+           AND job.success_attestation_id IS NULL
+           AND job.external_disposition_request_id IS NULL
+           AND attempt.authorization_kind='ready_x3'
+           AND NOT attempt.active
+           AND attempt.approved_at IS NOT NULL
+           AND attempt.terminal_outcome='known_failed'
+           AND attempt.receipt_lookup_state='not_required'
+           AND attempt.superseded_by_attempt_id IS NULL
+           AND attempt.dispatch_authorized_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM rednote_publish_attempt_events event
+             WHERE event.attempt_id=attempt.id
+               AND event.event_type='execution_started'
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM rednote_publish_attempt_receipts receipt
+             WHERE receipt.attempt_id=attempt.id
+           )
+         FOR UPDATE OF job, attempt
+       ), reset_attempt AS (
+         UPDATE rednote_publish_attempts attempt
+         SET active=true, terminal_outcome=NULL, terminal_at=NULL,
+             receipt_lookup_state=NULL, receipt_lookup_updated_at=NULL,
+             claim_token=NULL, claim_expires_at=NULL
+         FROM eligible
+         WHERE attempt.id=eligible.attempt_id
+         RETURNING attempt.id
+       )
+       UPDATE local_publish_jobs job
+       SET status='queued', claim_token=NULL, claimed_at=NULL,
+           claim_expires_at=NULL, error_code=NULL, error_message=NULL,
+           completed_at=NULL, updated_at=CURRENT_TIMESTAMP
+       FROM eligible
+       WHERE job.id=eligible.id
+         AND EXISTS (SELECT 1 FROM reset_attempt WHERE id=eligible.attempt_id)
+       RETURNING job.id`,
+      [
+        input.workspaceId,
+        input.jobId,
+        input.attemptId,
+        input.sourceNotionPageId,
+        input.revision,
+      ],
+    );
+    if (!recovered.rows[0]) {
+      throw new LocalPublishJobError(
+        'The Ready x3 validation failure is not safe to recover',
+        'READY_X3_INVALID_CLAIM_RECOVERY_UNSAFE',
+        409,
+      );
+    }
+    await client.query(
+      `INSERT INTO rednote_publish_attempt_events(
+         attempt_id,event_type,occurred_at,actor_type,actor_id,diagnostics
+       ) VALUES(
+         $1::uuid,'execution_evidence',CURRENT_TIMESTAMP,'admin',
+         'ready_x3_invalid_claim_recovery',
+         jsonb_build_object('kind','invalid_claim_failure_requeued')
+       )`,
+      [input.attemptId],
+    );
+    return {
+      requeued: true,
+      jobId: input.jobId,
+      attemptId: input.attemptId,
+      publicationMayHaveStarted: false,
+    };
+  });
+}
+
 export async function recordLinkedAttemptOutcome(input: {
   workspaceId: string; localJobId: string; claimToken: string;
   outcome: RednoteTerminalAttemptOutcome;

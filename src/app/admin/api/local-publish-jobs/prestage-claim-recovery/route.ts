@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
-import { requeueReadyX3PrestageClaim } from '@/lib/rednote-publishing-attempt-store';
+import {
+  requeueReadyX3InvalidClaimFailure,
+  requeueReadyX3PrestageClaim,
+} from '@/lib/rednote-publishing-attempt-store';
 import { parseWorkspaceId } from '@/lib/workspace-id';
 import { requireXhsOperator } from '@/lib/xhs-operator-auth';
 
@@ -19,20 +22,26 @@ export async function POST(request: NextRequest) {
   if (unauthorized) return unauthorized;
   try {
     const body = await request.json() as Record<string, unknown>;
-    if (body.confirm !== 'REQUEUE_EXACT_READY_X3_PRESTAGE_CLAIM') {
+    if (
+      body.confirm !== 'REQUEUE_EXACT_READY_X3_PRESTAGE_CLAIM' &&
+      body.confirm !== 'REQUEUE_EXACT_READY_X3_INVALID_CLAIM_FAILURE'
+    ) {
       throw new LocalPublishJobError(
         'Explicit pre-staging recovery confirmation is required',
         'RECOVERY_CONFIRMATION_REQUIRED',
         400,
       );
     }
-    const result = await requeueReadyX3PrestageClaim({
+    const recoveryInput = {
       workspaceId: parseWorkspaceId(request.headers.get('x-workspace-id')),
       jobId: String(body.jobId ?? ''),
       attemptId: String(body.attemptId ?? ''),
       sourceNotionPageId: String(body.sourceNotionPageId ?? ''),
       revision: String(body.revision ?? ''),
-    });
+    };
+    const result = body.confirm === 'REQUEUE_EXACT_READY_X3_INVALID_CLAIM_FAILURE'
+      ? await requeueReadyX3InvalidClaimFailure(recoveryInput)
+      : await requeueReadyX3PrestageClaim(recoveryInput);
     return NextResponse.json(result, { headers: NO_STORE_HEADERS });
   } catch (error) {
     const known = error instanceof LocalPublishJobError
