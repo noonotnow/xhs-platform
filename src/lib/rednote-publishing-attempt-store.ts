@@ -749,7 +749,10 @@ export async function requeueReadyX3PrestageClaim(input: {
   });
 }
 
-type RecoverableReadyX3PreproviderFailure = 'INVALID_CLAIM' | 'NOT_LOGGED_IN';
+type RecoverableReadyX3PreproviderFailure =
+  | 'INVALID_CLAIM'
+  | 'NOT_LOGGED_IN'
+  | 'INTERNAL_ERROR';
 
 async function requeueReadyX3PreproviderFailure(input: {
   workspaceId: string;
@@ -759,6 +762,7 @@ async function requeueReadyX3PreproviderFailure(input: {
   revision: string;
 }, recovery: {
   errorCode: RecoverableReadyX3PreproviderFailure;
+  errorMessageLike?: string;
   actorId: string;
   evidenceKind: string;
   unsafeMessage: string;
@@ -790,6 +794,7 @@ async function requeueReadyX3PreproviderFailure(input: {
            AND attempt.payload_revision=$5
            AND job.status='failed'
            AND job.error_code=$6
+            AND ($7::text IS NULL OR job.error_message LIKE $7)
            AND job.staged_at IS NULL
            AND job.dispatch_authorized_at IS NULL
            AND job.dispatched_at IS NULL
@@ -838,6 +843,7 @@ async function requeueReadyX3PreproviderFailure(input: {
         input.sourceNotionPageId,
         input.revision,
         recovery.errorCode,
+        recovery.errorMessageLike ?? null,
       ],
     );
     if (!recovered.rows[0]) {
@@ -895,6 +901,24 @@ export async function requeueReadyX3NotLoggedInFailure(input: {
     evidenceKind: 'not_logged_in_failure_requeued',
     unsafeMessage: 'The Ready x3 login failure is not safe to recover',
     unsafeCode: 'READY_X3_NOT_LOGGED_IN_RECOVERY_UNSAFE',
+  });
+}
+
+export async function requeueReadyX3StaleBrowserFrameFailure(input: {
+  workspaceId: string;
+  jobId: string;
+  attemptId: string;
+  sourceNotionPageId: string;
+  revision: string;
+}) {
+  return requeueReadyX3PreproviderFailure(input, {
+    errorCode: 'INTERNAL_ERROR',
+    errorMessageLike:
+      'page.goto: Protocol error (Page.navigate): No frame with given id found%',
+    actorId: 'ready_x3_stale_browser_frame_recovery',
+    evidenceKind: 'stale_browser_frame_failure_requeued',
+    unsafeMessage: 'The Ready x3 stale browser frame failure is not safe to recover',
+    unsafeCode: 'READY_X3_STALE_BROWSER_FRAME_RECOVERY_UNSAFE',
   });
 }
 
