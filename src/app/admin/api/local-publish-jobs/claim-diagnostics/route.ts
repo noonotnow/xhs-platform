@@ -51,12 +51,15 @@ export async function GET(request: NextRequest) {
   const workspaceId = parseWorkspaceId(request.headers.get('x-workspace-id'));
   const result = await getPool().query<{
     status: string;
+    error_code: string | null;
+    error_message: string | null;
     notion_page_id: string;
     snapshot: Record<string, unknown>;
     authorization_kind: string | null;
     browser_payload: Record<string, unknown> | null;
   }>(
-    `SELECT job.status, job.notion_page_id, job.snapshot,
+    `SELECT job.status, job.error_code, job.error_message,
+            job.notion_page_id, job.snapshot,
             attempt.authorization_kind,
             attempt.frozen_payload->'browserPayload' AS browser_payload
        FROM local_publish_jobs AS job
@@ -95,6 +98,9 @@ export async function GET(request: NextRequest) {
       deploymentCommit: process.env.VERCEL_GIT_COMMIT_SHA ?? null,
       jobId,
       status: row.status,
+      failure: row.error_code
+        ? { code: row.error_code, message: row.error_message }
+        : null,
       authorizationKind: row.authorization_kind,
       storedSnapshotFieldTypes: {
         headline: valueType(row.snapshot.headline),
