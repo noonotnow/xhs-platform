@@ -31,7 +31,9 @@ export async function GET(request: NextRequest) {
     return unauthorized;
   }
 
-  const jobId = request.nextUrl.searchParams.get('jobId');
+  const jobId =
+    request.headers.get('x-local-publish-job-id')
+    ?? request.nextUrl.searchParams.get('jobId');
   if (!jobId || !UUID_PATTERN.test(jobId)) {
     return NextResponse.json(
       { error: 'One exact jobId UUID is required.', code: 'VALIDATION_ERROR' },
