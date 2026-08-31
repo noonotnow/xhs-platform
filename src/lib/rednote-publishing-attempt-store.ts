@@ -870,7 +870,7 @@ async function requeueReadyX3PreproviderFailure(input: {
        ) VALUES(
          $1::uuid,'execution_evidence',CURRENT_TIMESTAMP,'admin',
          $2,
-         jsonb_build_object('kind',$3)
+          jsonb_build_object('kind',$3::text)
        )`,
       [input.attemptId, recovery.actorId, recovery.evidenceKind],
     );
