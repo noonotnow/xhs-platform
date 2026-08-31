@@ -754,6 +754,16 @@ type RecoverableReadyX3PreproviderFailure =
   | 'NOT_LOGGED_IN'
   | 'INTERNAL_ERROR';
 
+class ReadyX3RecoveryDiagnosticRollback extends Error {
+  constructor(readonly result: {
+    jobId: string;
+    attemptId: string;
+    publicationMayHaveStarted: false;
+  }) {
+    super('Ready x3 recovery diagnostic rolled back');
+  }
+}
+
 async function requeueReadyX3PreproviderFailure(input: {
   workspaceId: string;
   jobId: string;
@@ -767,20 +777,21 @@ async function requeueReadyX3PreproviderFailure(input: {
   evidenceKind: string;
   unsafeMessage: string;
   unsafeCode: string;
-}) {
+}, diagnosticOnly = false) {
   for (const [name, value] of Object.entries(input)) {
     if (typeof value !== 'string' || !value.trim()) {
       throw new LocalPublishJobError(`${name} is required`, 'VALIDATION_ERROR', 400);
     }
   }
-  return transaction(async (client) => {
-    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+  try {
+    return await transaction(async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
       `${input.workspaceId}:${input.sourceNotionPageId}`,
     ]);
-    await client.query(
+      await client.query(
       `SELECT set_config('app.ready_x3_invalid_claim_recovery', 'on', true)`,
     );
-    const recovered = await client.query<{ id: string }>(
+      const recovered = await client.query<{ id: string }>(
       `WITH eligible AS (
          SELECT job.id, attempt.id AS attempt_id
          FROM local_publish_jobs job
@@ -846,14 +857,14 @@ async function requeueReadyX3PreproviderFailure(input: {
         recovery.errorMessageLike ?? null,
       ],
     );
-    if (!recovered.rows[0]) {
-      throw new LocalPublishJobError(
+      if (!recovered.rows[0]) {
+        throw new LocalPublishJobError(
         recovery.unsafeMessage,
         recovery.unsafeCode,
         409,
       );
     }
-    await client.query(
+      await client.query(
       `INSERT INTO rednote_publish_attempt_events(
          attempt_id,event_type,occurred_at,actor_type,actor_id,diagnostics
        ) VALUES(
@@ -863,13 +874,22 @@ async function requeueReadyX3PreproviderFailure(input: {
        )`,
       [input.attemptId, recovery.actorId, recovery.evidenceKind],
     );
-    return {
-      requeued: true,
-      jobId: input.jobId,
-      attemptId: input.attemptId,
-      publicationMayHaveStarted: false,
-    };
-  });
+      const result = {
+        jobId: input.jobId,
+        attemptId: input.attemptId,
+        publicationMayHaveStarted: false as const,
+      };
+      if (diagnosticOnly) {
+        throw new ReadyX3RecoveryDiagnosticRollback(result);
+      }
+      return { requeued: true, ...result };
+    });
+  } catch (error) {
+    if (diagnosticOnly && error instanceof ReadyX3RecoveryDiagnosticRollback) {
+      return { diagnosticPassed: true, rolledBack: true, ...error.result };
+    }
+    throw error;
+  }
 }
 
 export async function requeueReadyX3InvalidClaimFailure(input: {
@@ -920,6 +940,24 @@ export async function requeueReadyX3StaleBrowserFrameFailure(input: {
     unsafeMessage: 'The Ready x3 stale browser frame failure is not safe to recover',
     unsafeCode: 'READY_X3_STALE_BROWSER_FRAME_RECOVERY_UNSAFE',
   });
+}
+
+export async function diagnoseReadyX3StaleBrowserFrameRecovery(input: {
+  workspaceId: string;
+  jobId: string;
+  attemptId: string;
+  sourceNotionPageId: string;
+  revision: string;
+}) {
+  return requeueReadyX3PreproviderFailure(input, {
+    errorCode: 'INTERNAL_ERROR',
+    errorMessageLike:
+      'page.goto: Protocol error (Page.navigate): No frame with given id found%',
+    actorId: 'ready_x3_stale_browser_frame_recovery_diagnostic',
+    evidenceKind: 'stale_browser_frame_failure_recovery_diagnostic',
+    unsafeMessage: 'The Ready x3 stale browser frame failure is not safe to recover',
+    unsafeCode: 'READY_X3_STALE_BROWSER_FRAME_RECOVERY_UNSAFE',
+  }, true);
 }
 
 export async function recordLinkedAttemptOutcome(input: {
