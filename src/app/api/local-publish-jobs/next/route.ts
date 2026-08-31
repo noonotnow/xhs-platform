@@ -17,6 +17,7 @@ const NO_STORE_HEADERS = {
   'Cache-Control': 'private, no-store, max-age=0, must-revalidate',
   'CDN-Cache-Control': 'no-store',
   'Vercel-CDN-Cache-Control': 'no-store',
+  'X-XHS-Deployment-Commit': process.env.VERCEL_GIT_COMMIT_SHA ?? 'unknown',
 };
 
 export async function GET(request: NextRequest) {
