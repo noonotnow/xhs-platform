@@ -30,7 +30,11 @@ import {
   normalizeRednoteShareUrl,
 } from '@/lib/rednote-publication';
 import type { PublishReadyPostResponse, ReadyXhsPost } from '@/types/ready-post';
-import type { LocalPublishSnapshot, LocalPublishWorkLane } from '@/types/local-publish-job';
+import type {
+  LocalPublishJobSummary,
+  LocalPublishSnapshot,
+  LocalPublishWorkLane,
+} from '@/types/local-publish-job';
 import type { ReadyX3Authorization } from '@/types/local-publish-job';
 import { rednoteMediaIdentity } from '@/lib/rednote-publish-authorization';
 import {
@@ -69,6 +73,14 @@ interface QueueDependencies {
   getPost: (pageId: string) => Promise<ReadyXhsPost>;
   findByIdempotencyKey: typeof findLocalPublishJobByIdempotencyKey;
   insert: typeof insertLocalPublishJob;
+}
+
+interface QueueLocalPublishJobResult {
+  job: LocalPublishJobSummary;
+  created: boolean;
+  attempt?:
+    | Awaited<ReturnType<typeof getLinkedRednotePublishAttempt>>
+    | Awaited<ReturnType<typeof createRednotePublishAttempt>>['attempt'];
 }
 
 interface ResultDependencies {
@@ -323,7 +335,7 @@ export async function queueLocalPublishJob(
   idempotencyKey: string,
   workspaceOrDependencies: string | QueueDependencies,
   suppliedDependencies?: QueueDependencies,
-) {
+): Promise<QueueLocalPublishJobResult> {
   const workspaceId = typeof workspaceOrDependencies === 'string'
     ? workspaceOrDependencies
     : 'legacy-local-publish';
