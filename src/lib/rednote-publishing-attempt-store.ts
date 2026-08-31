@@ -323,7 +323,7 @@ export async function invalidateLinkedReadyX3Source(
     }
     await client.query(
       `INSERT INTO rednote_publish_attempt_events(attempt_id,event_type,occurred_at,actor_type,actor_id)
-       VALUES($1,'terminal_outcome_recorded',CURRENT_TIMESTAMP,'system','ready_x3_source_stale')`,
+       VALUES($1,'terminal_outcome_recorded',CURRENT_TIMESTAMP,'admin','ready_x3_source_stale')`,
       [attempt.rows[0].id],
     );
   });
@@ -590,7 +590,7 @@ export async function fenceReadyX3SourceMutation(
     for (const attempt of attempts.rows) {
       await client.query(
         `INSERT INTO rednote_publish_attempt_events(attempt_id,event_type,occurred_at,actor_type,actor_id)
-         VALUES($1,'terminal_outcome_recorded',CURRENT_TIMESTAMP,'system','ready_x3_mutation_fence')`,
+         VALUES($1,'terminal_outcome_recorded',CURRENT_TIMESTAMP,'admin','ready_x3_mutation_fence')`,
         [attempt.id],
       );
     }
