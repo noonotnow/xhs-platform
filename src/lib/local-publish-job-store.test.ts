@@ -14,6 +14,7 @@ import {
   deferStoredLocalPublishVerification,
   deferStoredOperatorAttestedVerification,
   failStoredLocalPublishJob,
+  heartbeatStoredLocalPublishJob,
   insertLocalPublishJob,
   listLocalPublishJobs,
   listPublishOwningLocalJobs,
@@ -150,6 +151,7 @@ describe('local publish atomic claim storage', () => {
     expect(query).toContain('dispatch_attempt.source_local_publish_job_id = local_publish_jobs.id');
     expect(query).toContain('dispatch_attempt.approved_at IS NOT NULL');
     expect(query).toContain('dispatch_attempt.active');
+    expect(query).not.toContain("dispatch_attempt.authorization_kind = 'ready_x3'");
     expect(query).toContain('dispatch_attempt.dispatch_authorized_at IS NULL');
     expect(query).not.toContain("status = 'claimed' AND claim_expires_at <= CURRENT_TIMESTAMP");
     expect(query).not.toContain("status = 'staged'\n              AND dispatch_authorized_at IS NULL");
@@ -213,6 +215,31 @@ describe('local publish atomic claim storage', () => {
     expect(query).toContain("status = 'staged'");
     expect(query).toContain('claim_expires_at > CURRENT_TIMESTAMP');
     expect(query).toContain('external_disposition_request_id IS NULL');
+  });
+
+  it('renews a dispatch lease with the complete immutable worker claim', async () => {
+    mocks.sql.mockResolvedValue({
+      rows: [claimedRow()],
+      rowCount: 1,
+    });
+
+    await expect(heartbeatStoredLocalPublishJob(
+      claimedRow().id,
+      claimedRow().claim_token,
+      'workspace-a',
+      120,
+    )).resolves.toMatchObject({
+      id: claimedRow().id,
+      status: 'claimed',
+      notionPageId: snapshot.notionPageId,
+      headline: snapshot.headline,
+      title: snapshot.title,
+      caption: snapshot.caption,
+      tags: snapshot.tags,
+      mediaUrl: snapshot.mediaUrl,
+      claimToken: claimedRow().claim_token,
+      claimExpiresAt: claimedRow().claim_expires_at,
+    });
   });
 
   it('preserves post-dispatch state and returns verification-only work', async () => {
@@ -652,6 +679,27 @@ describe('local publish atomic claim storage', () => {
     const authorizationQuery =
       (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
     expect(authorizationQuery).not.toContain("'operator_attested'");
+  });
+
+  it('loads the same live staged claim after dispatch authorization for final revalidation', async () => {
+    mocks.sql.mockResolvedValueOnce({
+      rows: [{
+        ...claimedRow(),
+        status: 'staged',
+        dispatch_authorized_at: '2026-08-01T12:59:00.000Z',
+      }],
+      rowCount: 1,
+    });
+
+    await expect(authorizeStoredLocalPublishJob(
+      claimedRow().id,
+      claimedRow().claim_token,
+    )).resolves.toMatchObject({
+      status: 'staged',
+      dispatchAuthorizedAt: '2026-08-01T12:59:00.000Z',
+    });
+    const query = (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
+    expect(query).not.toContain("status <> 'staged'");
   });
 
   it('cannot record dispatch after operator attestation', async () => {

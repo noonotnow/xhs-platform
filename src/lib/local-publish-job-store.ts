@@ -815,7 +815,7 @@ export async function heartbeatStoredLocalPublishJob(
     await loadResultJob(id, workspaceId);
     throw new LocalPublishJobError('The local publish claim is stale, expired, or revoked', 'STALE_CLAIM', 409);
   }
-  return jobSummary(mapRow(result.rows[0]));
+  return claimedResponse(result.rows[0]);
 }
 
 export async function consumeStoredDispatchAuthorization(id: string, claimToken: string, workspaceId = 'legacy-local-publish') {
