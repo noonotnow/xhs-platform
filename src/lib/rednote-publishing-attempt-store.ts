@@ -244,7 +244,7 @@ export async function supersedeUnclaimedReadyX3Schedule(
          AND attempt.approved_at IS NOT NULL AND attempt.terminal_outcome IS NULL
          AND attempt.claim_token IS NULL AND attempt.dispatch_authorized_at IS NULL
          AND attempt.superseded_by_attempt_id IS NULL
-         AND ((attempt.frozen_payload->'browserPayload') - 'scheduledDate'::text - 'targetPublishAt'::text)
+          AND ((attempt.frozen_payload->'browserPayload') - 'scheduledDate'::text - 'targetPublishAt'::text)
              = $3::jsonb
        ORDER BY job.created_at DESC LIMIT 1 FOR UPDATE OF job, attempt`,
       [workspaceId, snapshot.notionPageId, JSON.stringify({
@@ -590,11 +590,150 @@ export async function fenceReadyX3SourceMutation(
     for (const attempt of attempts.rows) {
       await client.query(
         `INSERT INTO rednote_publish_attempt_events(attempt_id,event_type,occurred_at,actor_type,actor_id)
-         VALUES($1,'terminal_outcome_recorded',CURRENT_TIMESTAMP,'admin','ready_x3_mutation_fence')`,
+          VALUES($1,'terminal_outcome_recorded',CURRENT_TIMESTAMP,'admin','ready_x3_mutation_fence')`,
         [attempt.id],
       );
     }
     return { publicationMayHaveStarted: false, invalidatedAttemptIds: attempts.rows.map((row) => row.id), invalidatedJobIds: jobs.rows.map((row) => row.id) };
+  });
+}
+
+export async function requeueReadyX3PrestageClaim(input: {
+  workspaceId: string;
+  jobId: string;
+  attemptId: string;
+  sourceNotionPageId: string;
+  revision: string;
+}) {
+  for (const [name, value] of Object.entries(input)) {
+    if (typeof value !== 'string' || !value.trim()) {
+      throw new LocalPublishJobError(`${name} is required`, 'VALIDATION_ERROR', 400);
+    }
+  }
+  return transaction(async (client) => {
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+      `${input.workspaceId}:${input.sourceNotionPageId}`,
+    ]);
+    const locked = await client.query<{
+      job_claimed_at: Date | string | null;
+      job_claim_expires_at: Date | string | null;
+    }>(
+      `SELECT job.claimed_at AS job_claimed_at,
+              job.claim_expires_at AS job_claim_expires_at
+       FROM local_publish_jobs job
+       JOIN rednote_publish_attempts attempt
+         ON attempt.source_local_publish_job_id=job.id
+        AND attempt.workspace_id=job.workspace_id
+       WHERE job.workspace_id=$1 AND job.id=$2::uuid
+         AND attempt.id=$3::uuid
+         AND job.notion_page_id=$4
+         AND attempt.source_notion_page_id=$4
+         AND attempt.payload_revision=$5
+       FOR UPDATE OF job, attempt`,
+      [
+        input.workspaceId,
+        input.jobId,
+        input.attemptId,
+        input.sourceNotionPageId,
+        input.revision,
+      ],
+    );
+    if (!locked.rows[0]) {
+      throw new LocalPublishJobError(
+        'The exact Ready x3 claim was not found',
+        'READY_X3_PRESTAGE_CLAIM_NOT_FOUND',
+        404,
+      );
+    }
+    const recovered = await client.query<{ id: string }>(
+      `WITH eligible AS (
+         SELECT job.id, attempt.id AS attempt_id
+         FROM local_publish_jobs job
+         JOIN rednote_publish_attempts attempt
+           ON attempt.source_local_publish_job_id=job.id
+          AND attempt.workspace_id=job.workspace_id
+         WHERE job.workspace_id=$1 AND job.id=$2::uuid
+           AND attempt.id=$3::uuid
+           AND job.notion_page_id=$4
+           AND attempt.source_notion_page_id=$4
+           AND attempt.payload_revision=$5
+           AND job.status='claimed'
+           AND job.claim_token IS NOT NULL
+           AND job.staged_at IS NULL
+           AND job.dispatch_authorized_at IS NULL
+           AND job.dispatched_at IS NULL
+           AND job.note_id IS NULL AND job.share_url IS NULL
+           AND job.success_attestation_id IS NULL
+           AND job.external_disposition_request_id IS NULL
+           AND attempt.authorization_kind='ready_x3'
+           AND attempt.active
+           AND attempt.approved_at IS NOT NULL
+           AND attempt.terminal_outcome IS NULL
+           AND attempt.superseded_by_attempt_id IS NULL
+           AND attempt.dispatch_authorized_at IS NULL
+           AND attempt.claim_token=job.claim_token
+           AND NOT EXISTS (
+             SELECT 1 FROM rednote_publish_attempt_events event
+             WHERE event.attempt_id=attempt.id
+               AND event.event_type='execution_started'
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM rednote_publish_attempt_receipts receipt
+             WHERE receipt.attempt_id=attempt.id
+           )
+       ), reset_attempt AS (
+         UPDATE rednote_publish_attempts attempt
+         SET claim_token=NULL, claim_expires_at=NULL
+         FROM eligible
+         WHERE attempt.id=eligible.attempt_id
+         RETURNING attempt.id
+       )
+       UPDATE local_publish_jobs job
+       SET status='queued', claim_token=NULL, claimed_at=NULL,
+           claim_expires_at=NULL, updated_at=CURRENT_TIMESTAMP
+       FROM eligible
+       WHERE job.id=eligible.id
+         AND EXISTS (SELECT 1 FROM reset_attempt WHERE id=eligible.attempt_id)
+       RETURNING job.id`,
+      [
+        input.workspaceId,
+        input.jobId,
+        input.attemptId,
+        input.sourceNotionPageId,
+        input.revision,
+      ],
+    );
+    if (!recovered.rows[0]) {
+      throw new LocalPublishJobError(
+        'The Ready x3 claim has staging or execution evidence and cannot be requeued',
+        'READY_X3_PRESTAGE_RECOVERY_UNSAFE',
+        409,
+      );
+    }
+    await client.query(
+      `INSERT INTO rednote_publish_attempt_events(
+         attempt_id,event_type,occurred_at,actor_type,actor_id,diagnostics
+       ) VALUES(
+         $1::uuid,'execution_evidence',CURRENT_TIMESTAMP,'admin',
+         'ready_x3_prestage_claim_recovery',
+         jsonb_build_object(
+           'kind','prestage_claim_requeued',
+           'priorClaimedAt',$2::timestamptz,
+           'priorClaimExpiresAt',$3::timestamptz
+         )
+       )`,
+      [
+        input.attemptId,
+        locked.rows[0].job_claimed_at,
+        locked.rows[0].job_claim_expires_at,
+      ],
+    );
+    return {
+      requeued: true,
+      jobId: input.jobId,
+      attemptId: input.attemptId,
+      publicationMayHaveStarted: false,
+    };
   });
 }
 
