@@ -484,8 +484,13 @@ export async function claimNextLocalPublishJob(
     const linked = await getLinkedRednotePublishAttempt(workspaceId, job.id);
     const readyX3Authorization = readyX3AuthorizationFor(job, linked);
     if (readyX3Authorization) {
-      await assertReadyX3SourceCurrent(job, readyX3Authorization, workspaceId);
-      return { ...job, readyX3Authorization };
+      const current = await assertReadyX3SourceCurrent(
+        job,
+        readyX3Authorization,
+        workspaceId,
+        linked.payload,
+      );
+      return { ...current, readyX3Authorization };
     }
     if (!job.batchAuthorization) return job;
     if (
@@ -550,18 +555,37 @@ async function assertReadyX3SourceCurrent(
   job: ReadyX3Claim,
   authorization: ReadyX3Authorization,
   workspaceId: string,
+  frozenBrowserPayload?: {
+    title?: unknown;
+    caption?: unknown;
+    tags?: unknown;
+  },
 ) {
   try {
     const post = await getReadyXhsPost(job.notionPageId);
     const eligible = buildBatchSnapshot(post);
+    const hydratedJob: ReadyX3Claim = {
+      ...job,
+      headline: post.headline.trim(),
+      title: typeof frozenBrowserPayload?.title === 'string'
+        ? frozenBrowserPayload.title
+        : job.title,
+      caption: typeof frozenBrowserPayload?.caption === 'string'
+        ? frozenBrowserPayload.caption
+        : job.caption,
+      tags: Array.isArray(frozenBrowserPayload?.tags)
+        && frozenBrowserPayload.tags.every((tag): tag is string => typeof tag === 'string')
+        ? frozenBrowserPayload.tags
+        : job.tags,
+    };
     const current = buildLocalPublishSnapshot(post, {
       notionPageId: job.notionPageId,
       lastEditedTime: job.notionLastEditedTime,
       confirmed: true,
       compatibilityTrialConfirmed: false,
-      title: job.title,
-      caption: job.caption,
-      tags: job.tags,
+      title: hydratedJob.title,
+      caption: hydratedJob.caption,
+      tags: hydratedJob.tags,
       media: { type: job.mediaType, index: job.mediaIndex },
       mode: 'schedule',
     });
@@ -574,10 +598,10 @@ async function assertReadyX3SourceCurrent(
       post.status.trim().toLowerCase() === 'ready' &&
       current.platform === 'RedNote' &&
       current.notionLastEditedTime === job.notionLastEditedTime &&
-      current.headline === job.headline &&
-      current.title === job.title &&
-      post.caption === job.caption &&
-      isDeepStrictEqual(post.tags, job.tags) &&
+      current.headline === hydratedJob.headline &&
+      current.title === hydratedJob.title &&
+      post.caption === hydratedJob.caption &&
+      isDeepStrictEqual(post.tags, hydratedJob.tags) &&
       current.mediaType === job.mediaType &&
       current.mediaIndex === job.mediaIndex &&
       current.mediaUrl === job.mediaUrl &&
@@ -592,7 +616,7 @@ async function assertReadyX3SourceCurrent(
         type: job.mediaType,
         url: job.mediaUrl,
       })
-    ) return;
+    ) return hydratedJob;
   } catch (error) {
     // An upstream outage must close the dispatch path but must not revoke consent.
     if (error instanceof NotionPostsError && (error as NotionPostsError).status >= 500) {
@@ -668,9 +692,14 @@ export async function authorizeLocalPublishJob(id: string, claimToken: string, w
     const attempt = await getLinkedRednotePublishAttempt(workspaceId, job.id);
     const readyX3Authorization = readyX3AuthorizationFor(job, attempt);
     if (readyX3Authorization) {
-      await assertReadyX3SourceCurrent(job, readyX3Authorization, workspaceId);
+      const current = await assertReadyX3SourceCurrent(
+        job,
+        readyX3Authorization,
+        workspaceId,
+        attempt.payload,
+      );
       if (job.dispatchAuthorizedAt) {
-        return { ...job, readyX3Authorization };
+        return { ...current, readyX3Authorization };
       }
       await consumeLinkedReadyX3DispatchAuthorization(workspaceId, job.id, job.claimToken);
     } else {
@@ -680,13 +709,25 @@ export async function authorizeLocalPublishJob(id: string, claimToken: string, w
     const authorized = await consumeStoredDispatchAuthorization(job.id, job.claimToken, workspaceId);
     const authorizedAttempt = await getLinkedRednotePublishAttempt(workspaceId, job.id);
     const authorizedReadyX3Authorization = readyX3AuthorizationFor(authorized, authorizedAttempt);
-    return authorizedReadyX3Authorization
-      ? { ...authorized, readyX3Authorization: authorizedReadyX3Authorization }
-      : authorized;
+    if (!authorizedReadyX3Authorization) return authorized;
+    const current = await assertReadyX3SourceCurrent(
+      authorized,
+      authorizedReadyX3Authorization,
+      workspaceId,
+      authorizedAttempt.payload,
+    );
+    return { ...current, readyX3Authorization: authorizedReadyX3Authorization };
   }
   const attempt = await getLinkedRednotePublishAttempt(workspaceId, job.id);
   const readyX3Authorization = readyX3AuthorizationFor(job, attempt);
-  return readyX3Authorization ? { ...job, readyX3Authorization } : job;
+  if (!readyX3Authorization) return job;
+  const current = await assertReadyX3SourceCurrent(
+    job,
+    readyX3Authorization,
+    workspaceId,
+    attempt.payload,
+  );
+  return { ...current, readyX3Authorization };
 }
 
 export async function heartbeatLocalPublishJob(id: string, claimToken: string, workspaceId: string) {

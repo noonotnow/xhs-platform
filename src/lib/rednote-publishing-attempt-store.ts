@@ -361,7 +361,10 @@ export async function getLinkedRednotePublishAttempt(workspaceId: string, localJ
   if (!result.rows[0]) {
     throw new LocalPublishJobError('The local job is missing its durable publishing attempt', 'ATTEMPT_NOT_FOUND', 409);
   }
-  return publicAttempt(result.rows[0]);
+  return {
+    ...publicAttempt(result.rows[0]),
+    payload: result.rows[0].frozen_payload.browserPayload,
+  };
 }
 
 export async function approveRednotePublishAttempt(workspaceId: string, id: string) {
