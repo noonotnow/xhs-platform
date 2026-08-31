@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
 import {
   requeueReadyX3InvalidClaimFailure,
+  requeueReadyX3NotLoggedInFailure,
   requeueReadyX3PrestageClaim,
 } from '@/lib/rednote-publishing-attempt-store';
 import { parseWorkspaceId } from '@/lib/workspace-id';
@@ -24,7 +25,8 @@ export async function POST(request: NextRequest) {
     const body = await request.json() as Record<string, unknown>;
     if (
       body.confirm !== 'REQUEUE_EXACT_READY_X3_PRESTAGE_CLAIM' &&
-      body.confirm !== 'REQUEUE_EXACT_READY_X3_INVALID_CLAIM_FAILURE'
+      body.confirm !== 'REQUEUE_EXACT_READY_X3_INVALID_CLAIM_FAILURE' &&
+      body.confirm !== 'REQUEUE_EXACT_READY_X3_NOT_LOGGED_IN_FAILURE'
     ) {
       throw new LocalPublishJobError(
         'Explicit pre-staging recovery confirmation is required',
@@ -39,9 +41,12 @@ export async function POST(request: NextRequest) {
       sourceNotionPageId: String(body.sourceNotionPageId ?? ''),
       revision: String(body.revision ?? ''),
     };
-    const result = body.confirm === 'REQUEUE_EXACT_READY_X3_INVALID_CLAIM_FAILURE'
-      ? await requeueReadyX3InvalidClaimFailure(recoveryInput)
-      : await requeueReadyX3PrestageClaim(recoveryInput);
+    const result =
+      body.confirm === 'REQUEUE_EXACT_READY_X3_INVALID_CLAIM_FAILURE'
+        ? await requeueReadyX3InvalidClaimFailure(recoveryInput)
+        : body.confirm === 'REQUEUE_EXACT_READY_X3_NOT_LOGGED_IN_FAILURE'
+          ? await requeueReadyX3NotLoggedInFailure(recoveryInput)
+          : await requeueReadyX3PrestageClaim(recoveryInput);
     return NextResponse.json(result, { headers: NO_STORE_HEADERS });
   } catch (error) {
     const known = error instanceof LocalPublishJobError

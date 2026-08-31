@@ -749,12 +749,20 @@ export async function requeueReadyX3PrestageClaim(input: {
   });
 }
 
-export async function requeueReadyX3InvalidClaimFailure(input: {
+type RecoverableReadyX3PreproviderFailure = 'INVALID_CLAIM' | 'NOT_LOGGED_IN';
+
+async function requeueReadyX3PreproviderFailure(input: {
   workspaceId: string;
   jobId: string;
   attemptId: string;
   sourceNotionPageId: string;
   revision: string;
+}, recovery: {
+  errorCode: RecoverableReadyX3PreproviderFailure;
+  actorId: string;
+  evidenceKind: string;
+  unsafeMessage: string;
+  unsafeCode: string;
 }) {
   for (const [name, value] of Object.entries(input)) {
     if (typeof value !== 'string' || !value.trim()) {
@@ -781,7 +789,7 @@ export async function requeueReadyX3InvalidClaimFailure(input: {
            AND attempt.source_notion_page_id=$4
            AND attempt.payload_revision=$5
            AND job.status='failed'
-           AND job.error_code='INVALID_CLAIM'
+           AND job.error_code=$6
            AND job.staged_at IS NULL
            AND job.dispatch_authorized_at IS NULL
            AND job.dispatched_at IS NULL
@@ -829,12 +837,13 @@ export async function requeueReadyX3InvalidClaimFailure(input: {
         input.attemptId,
         input.sourceNotionPageId,
         input.revision,
+        recovery.errorCode,
       ],
     );
     if (!recovered.rows[0]) {
       throw new LocalPublishJobError(
-        'The Ready x3 validation failure is not safe to recover',
-        'READY_X3_INVALID_CLAIM_RECOVERY_UNSAFE',
+        recovery.unsafeMessage,
+        recovery.unsafeCode,
         409,
       );
     }
@@ -843,10 +852,10 @@ export async function requeueReadyX3InvalidClaimFailure(input: {
          attempt_id,event_type,occurred_at,actor_type,actor_id,diagnostics
        ) VALUES(
          $1::uuid,'execution_evidence',CURRENT_TIMESTAMP,'admin',
-         'ready_x3_invalid_claim_recovery',
-         jsonb_build_object('kind','invalid_claim_failure_requeued')
+         $2,
+         jsonb_build_object('kind',$3)
        )`,
-      [input.attemptId],
+      [input.attemptId, recovery.actorId, recovery.evidenceKind],
     );
     return {
       requeued: true,
@@ -854,6 +863,38 @@ export async function requeueReadyX3InvalidClaimFailure(input: {
       attemptId: input.attemptId,
       publicationMayHaveStarted: false,
     };
+  });
+}
+
+export async function requeueReadyX3InvalidClaimFailure(input: {
+  workspaceId: string;
+  jobId: string;
+  attemptId: string;
+  sourceNotionPageId: string;
+  revision: string;
+}) {
+  return requeueReadyX3PreproviderFailure(input, {
+    errorCode: 'INVALID_CLAIM',
+    actorId: 'ready_x3_invalid_claim_recovery',
+    evidenceKind: 'invalid_claim_failure_requeued',
+    unsafeMessage: 'The Ready x3 validation failure is not safe to recover',
+    unsafeCode: 'READY_X3_INVALID_CLAIM_RECOVERY_UNSAFE',
+  });
+}
+
+export async function requeueReadyX3NotLoggedInFailure(input: {
+  workspaceId: string;
+  jobId: string;
+  attemptId: string;
+  sourceNotionPageId: string;
+  revision: string;
+}) {
+  return requeueReadyX3PreproviderFailure(input, {
+    errorCode: 'NOT_LOGGED_IN',
+    actorId: 'ready_x3_not_logged_in_recovery',
+    evidenceKind: 'not_logged_in_failure_requeued',
+    unsafeMessage: 'The Ready x3 login failure is not safe to recover',
+    unsafeCode: 'READY_X3_NOT_LOGGED_IN_RECOVERY_UNSAFE',
   });
 }
 
