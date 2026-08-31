@@ -197,7 +197,8 @@ function cleanFailureMessage(value: unknown) {
   const message = cleanResultText(value, 'message', 500).replace(/\s+/g, ' ');
   if (
     /https?:\/\//i.test(message) ||
-    /\b(?:authorization|bearer|cookie|set-cookie|password|secret)\b/i.test(message) ||
+    /\b(?:bearer|cookie|set-cookie|password|secret)\b/i.test(message) ||
+    /\bauthorization\s*[:=]/i.test(message) ||
     /\btoken\s*=/i.test(message)
   ) {
     throw new LocalPublishJobError(

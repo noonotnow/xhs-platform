@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   parseLocalPublishWorkerResult,
+  parseQueueLocalPublishInput,
   queueLocalPublishJob,
   submitLocalPublishJobResult,
   type StoredLocalPublishJob,
@@ -82,6 +83,13 @@ const queueBody = {
 };
 
 describe('local publish job orchestration', () => {
+  it('parses only explicit Ready x3 consent', () => {
+    expect(parseQueueLocalPublishInput({ ...queueBody, consent: 'ready_x3' }))
+      .toMatchObject({ consent: 'ready_x3' });
+    expect(() => parseQueueLocalPublishInput({ ...queueBody, consent: 'always' }))
+      .toThrow('consent must be ready_x3');
+  });
+
   it('passes the same idempotency key through repeat queue requests', async () => {
     const getPost = vi.fn().mockResolvedValue(readyPost());
     const findByIdempotencyKey = vi.fn()
@@ -203,6 +211,15 @@ describe('local publish job orchestration', () => {
   });
 
   it('rejects credential-like failure details before persistence', () => {
+    expect(parseLocalPublishWorkerResult({
+      status: 'failed',
+      code: 'READY_X3_LATE_FALLBACK_DENIED',
+      message: 'Ready ×3 authorization does not permit Post now at this time',
+    })).toEqual({
+      status: 'failed',
+      code: 'READY_X3_LATE_FALLBACK_DENIED',
+      message: 'Ready ×3 authorization does not permit Post now at this time',
+    });
     expect(() => parseLocalPublishWorkerResult({
       status: 'failed',
       code: 'UPSTREAM_REJECTED',
