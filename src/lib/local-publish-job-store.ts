@@ -382,7 +382,7 @@ export async function claimNextStoredLocalPublishJob(
   lane: LocalPublishWorkLane = 'all',
   expectedJobId?: string,
   workspaceId = 'legacy-local-publish',
-  claimToken = randomUUID(),
+  claimToken: string = randomUUID(),
 ): Promise<ClaimedLocalPublishJob | null> {
   const result = await sql<LocalPublishJobRow>`
     WITH candidate AS (
