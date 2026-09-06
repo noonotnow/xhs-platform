@@ -27,6 +27,7 @@ const migrationFiles = [
   '020_ready_x3_authorization.sql',
   '021_local_publish_worker_heartbeats.sql',
   '022_ready_x3_invalid_claim_recovery.sql',
+  '023_rednote_worker_result_v2.sql',
 ] as const;
 
 describe('canonical local publishing migration chain', () => {
@@ -58,6 +59,7 @@ describe('canonical local publishing migration chain', () => {
         'rednote_publish_attempts',
         'rednote_publish_attempt_events',
         'rednote_publish_attempt_receipts',
+        'rednote_publication_evidence',
         'local_publish_worker_heartbeats',
       ]],
     );
@@ -66,6 +68,7 @@ describe('canonical local publishing migration chain', () => {
       'local_publish_worker_heartbeats',
       'manual_reconciliation_requests',
       'plan_operator_scheduled_posts',
+      'rednote_publication_evidence',
       'rednote_publish_attempt_events',
       'rednote_publish_attempt_receipts',
       'rednote_publish_attempts',
@@ -106,5 +109,106 @@ describe('canonical local publishing migration chain', () => {
       'authorization_kind',
       'stable_link_captured_at',
     ]);
+  });
+
+  it('supports Note ID-only receipts and append-only renewable evidence', async () => {
+    const columns = await database.query<{ is_nullable: string }>(
+      `SELECT is_nullable
+       FROM information_schema.columns
+       WHERE table_schema = 'public'
+         AND table_name = 'rednote_publish_attempt_receipts'
+         AND column_name = 'rednote_url'`,
+    );
+    expect(columns.rows[0]?.is_nullable).toBe('YES');
+
+    const jobId = '11111111-1111-4111-8111-111111111111';
+    await database.query(
+      `INSERT INTO local_publish_jobs(
+         id, notion_page_id, snapshot, status, idempotency_key, workspace_id
+       ) VALUES ($1, 'notion-page-1', $2::jsonb, 'verified', $3, 'workspace-1')`,
+      [
+        jobId,
+        JSON.stringify({ expectedAccountId: 'creator-account-1' }),
+        '22222222-2222-4222-8222-222222222222',
+      ],
+    );
+    const evidence = await database.query<{ id: string }>(
+      `INSERT INTO rednote_publication_evidence(
+         workspace_id, local_publish_job_id, note_id, evidence_kind,
+         captured_at, evidence_status
+       ) VALUES (
+         'workspace-1', $1, 'note_123', 'xsec_access',
+         '2026-08-02T12:00:00Z', 'accessible'
+       ) RETURNING id`,
+      [jobId],
+    );
+    await expect(database.query(
+      `UPDATE rednote_publication_evidence
+       SET captured_at = '2026-08-03T12:00:00Z'
+       WHERE id = $1`,
+      [evidence.rows[0]?.id],
+    )).rejects.toThrow(/append-only/);
+    await expect(database.query(
+      `INSERT INTO rednote_publication_evidence(
+         workspace_id, local_publish_job_id, note_id, evidence_kind,
+         captured_at, evidence_status, public_url
+       ) VALUES (
+         'workspace-1', $1, 'note_123', 'public_index',
+         '2026-08-03T12:00:00Z', 'pending',
+         'https://www.rednote.com/explore/note_123'
+       )`,
+      [jobId],
+    )).rejects.toThrow();
+    await expect(database.query(
+      `INSERT INTO rednote_publication_evidence(
+         workspace_id, local_publish_job_id, note_id, evidence_kind,
+         captured_at, account_id, evidence_status
+       ) VALUES (
+         'workspace-1', $1, NULL, 'authenticated_account',
+         '2026-08-02T12:05:00Z', 'creator-account-1', 'owned'
+       )`,
+      [jobId],
+    )).resolves.toMatchObject({ affectedRows: 1 });
+    await expect(database.query(
+      `INSERT INTO rednote_publication_evidence(
+         workspace_id, local_publish_job_id, note_id, evidence_kind,
+         captured_at, evidence_status
+       ) VALUES (
+         'workspace-1', $1, NULL, 'xsec_access',
+         '2026-08-02T12:06:00Z', 'accessible'
+       )`,
+      [jobId],
+    )).rejects.toThrow();
+
+    const attemptId = '33333333-3333-4333-8333-333333333333';
+    await database.query(
+      `INSERT INTO rednote_publish_attempts(
+         id, workspace_id, idempotency_key, contract_revision,
+         source_notion_page_id, source_local_publish_job_id,
+         frozen_payload, payload_digest, payload_revision,
+         executor_type, executor_kind, executor_id, requested_at,
+         terminal_outcome, terminal_at, receipt_lookup_state, active
+       ) VALUES (
+         $1, 'workspace-1', $2, 'rednote-publishing/v1',
+         'notion-page-1', $3, '{}'::jsonb, $4, 'revision-1',
+         'worker', 'playwright', 'worker-1', '2026-08-02T11:00:00Z',
+         'outcome_unknown', '2026-08-02T12:00:00Z', 'found', false
+       )`,
+      [
+        attemptId,
+        '44444444-4444-4444-8444-444444444444',
+        jobId,
+        'a'.repeat(64),
+      ],
+    );
+    await expect(database.query(
+      `INSERT INTO rednote_publish_attempt_receipts(
+         attempt_id, rednote_note_id, platform_publish_time, provenance
+       ) VALUES (
+         $1, 'note_ambiguous', '2026-08-02T12:00:00Z',
+         '{"kind":"rednote_worker_result_v2"}'::jsonb
+       )`,
+      [attemptId],
+    )).resolves.toBeDefined();
   });
 });

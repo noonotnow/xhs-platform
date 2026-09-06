@@ -6,7 +6,7 @@ import {
   LocalPublishJobError,
   normalizeLocalPublishTags,
 } from '@/lib/local-publish-job-input';
-import { rednoteMediaIdentity } from '@/lib/rednote-publish-authorization';
+import { snapshotPublishMedia } from '@/lib/rednote-publish-authorization';
 import {
   acknowledgeOperatorSuccessAttestationRelease,
   loadOperatorSuccessAttestation,
@@ -53,6 +53,16 @@ interface LocalPublishJobRow extends QueryResultRow {
   batch_item_id?: string | null;
   dispatch_authorized_at?: Date | string | null;
   success_attestation_id?: string | null;
+  receipt_contract_version?: string | null;
+  receipt_outcome?: 'acknowledged' | 'scheduled' | 'ambiguous' | 'rejected' | null;
+  receipt_acknowledged_at?: Date | string | null;
+  authenticated_account_id?: string | null;
+  authenticated_account_at?: Date | string | null;
+  xsec_accessible_at?: Date | string | null;
+  public_index_status?: 'indexed' | 'pending' | 'not_found' | null;
+  public_index_checked_at?: Date | string | null;
+  provider_restriction_status?: 'removed' | 'restricted' | null;
+  provider_restriction_reported_at?: Date | string | null;
 }
 
 export interface StoredLocalPublishJob {
@@ -80,6 +90,16 @@ export interface StoredLocalPublishJob {
   completedAt?: string;
   batchAuthorization?: BatchAuthorization;
   successAttestation?: OperatorSuccessAttestationSummary;
+  receiptContractVersion?: 'rednote-worker-result/v2';
+  receiptOutcome?: 'acknowledged' | 'scheduled' | 'ambiguous' | 'rejected';
+  receiptAcknowledgedAt?: string;
+  authenticatedAccountId?: string;
+  authenticatedAccountAt?: string;
+  xsecAccessibleAt?: string;
+  publicIndexStatus?: 'indexed' | 'pending' | 'not_found';
+  publicIndexCheckedAt?: string;
+  restrictionStatus?: 'removed' | 'restricted';
+  restrictionReportedAt?: string;
 }
 
 function timestamp(value: Date | string) {
@@ -100,7 +120,11 @@ export function normalizeStoredLocalPublishSnapshot(
   snapshot: LocalPublishSnapshot & { scheduledDate?: string },
 ): LocalPublishSnapshot {
   const { scheduledDate, ...current } = snapshot;
-  if (current.publishAt || !scheduledDate) return current;
+  const normalized = {
+    ...current,
+    media: snapshotPublishMedia(current),
+  };
+  if (current.publishAt || !scheduledDate) return normalized;
   const legacyPublishAt = new Date(scheduledDate);
   if (Number.isNaN(legacyPublishAt.getTime())) {
     throw new LocalPublishJobError(
@@ -109,7 +133,7 @@ export function normalizeStoredLocalPublishSnapshot(
       500,
     );
   }
-  return { ...current, publishAt: legacyPublishAt.toISOString() };
+  return { ...normalized, publishAt: legacyPublishAt.toISOString() };
 }
 
 function mapRow(row: LocalPublishJobRow): StoredLocalPublishJob {
@@ -152,6 +176,32 @@ function mapRow(row: LocalPublishJobRow): StoredLocalPublishJob {
     ...(optionalTimestamp(row.completed_at)
       ? { completedAt: optionalTimestamp(row.completed_at) }
       : {}),
+    ...(row.receipt_contract_version === 'rednote-worker-result/v2'
+      ? { receiptContractVersion: row.receipt_contract_version }
+      : {}),
+    ...(row.receipt_outcome ? { receiptOutcome: row.receipt_outcome } : {}),
+    ...(optionalTimestamp(row.receipt_acknowledged_at ?? null)
+      ? { receiptAcknowledgedAt: optionalTimestamp(row.receipt_acknowledged_at ?? null) }
+      : {}),
+    ...(row.authenticated_account_id
+      ? { authenticatedAccountId: row.authenticated_account_id }
+      : {}),
+    ...(optionalTimestamp(row.authenticated_account_at ?? null)
+      ? { authenticatedAccountAt: optionalTimestamp(row.authenticated_account_at ?? null) }
+      : {}),
+    ...(optionalTimestamp(row.xsec_accessible_at ?? null)
+      ? { xsecAccessibleAt: optionalTimestamp(row.xsec_accessible_at ?? null) }
+      : {}),
+    ...(row.public_index_status ? { publicIndexStatus: row.public_index_status } : {}),
+    ...(optionalTimestamp(row.public_index_checked_at ?? null)
+      ? { publicIndexCheckedAt: optionalTimestamp(row.public_index_checked_at ?? null) }
+      : {}),
+    ...(row.provider_restriction_status
+      ? { restrictionStatus: row.provider_restriction_status }
+      : {}),
+    ...(optionalTimestamp(row.provider_restriction_reported_at ?? null)
+      ? { restrictionReportedAt: optionalTimestamp(row.provider_restriction_reported_at ?? null) }
+      : {}),
   };
 }
 
@@ -182,11 +232,56 @@ export function jobSummary(job: StoredLocalPublishJob): LocalPublishJobSummary {
     ...(job.reconciledAt ? { reconciledAt: job.reconciledAt } : {}),
     ...(job.completedAt ? { completedAt: job.completedAt } : {}),
     ...(job.successAttestation ? { successAttestation: job.successAttestation } : {}),
+    ...(job.receiptContractVersion
+      ? { receiptContractVersion: job.receiptContractVersion }
+      : {}),
+    ...(job.receiptOutcome ? { receiptOutcome: job.receiptOutcome } : {}),
+    ...(job.receiptAcknowledgedAt
+      ? { receiptAcknowledgedAt: job.receiptAcknowledgedAt }
+      : {}),
+    ...(
+      job.authenticatedAccountId && job.authenticatedAccountAt
+        ? {
+            evidence: {
+              authenticatedAccount: {
+                accountId: job.authenticatedAccountId,
+                capturedAt: job.authenticatedAccountAt,
+                ownership: job.snapshot.expectedAccountId === job.authenticatedAccountId
+                  ? 'owned' as const
+                  : 'account_mismatch' as const,
+              },
+              ...(job.xsecAccessibleAt
+                ? { xsecAccess: { capturedAt: job.xsecAccessibleAt, accessible: true as const } }
+                : {}),
+              ...(job.publicIndexStatus && job.publicIndexCheckedAt
+                ? {
+                    publicIndex: {
+                      status: job.publicIndexStatus,
+                      checkedAt: job.publicIndexCheckedAt,
+                      ...(job.shareUrl ? { publicUrl: job.shareUrl } : {}),
+                    },
+                  }
+                : {}),
+              ...(job.restrictionStatus && job.restrictionReportedAt
+                ? {
+                    restriction: {
+                      status: job.restrictionStatus,
+                      reportedAt: job.restrictionReportedAt,
+                    },
+                  }
+                : {}),
+            },
+          }
+        : {}
+    ),
   };
 }
 
 function sameSnapshot(left: LocalPublishSnapshot, right: LocalPublishSnapshot) {
-  return isDeepStrictEqual(left, right);
+  return isDeepStrictEqual(
+    normalizeStoredLocalPublishSnapshot(left),
+    normalizeStoredLocalPublishSnapshot(right),
+  );
 }
 
 export async function insertLocalPublishJob(
@@ -534,20 +629,72 @@ export async function releaseExpiredStoredLocalPublishClaims() {
   const result = await sql<{ id: string }>`
     WITH released AS (
       UPDATE local_publish_jobs
-      SET status = 'failed',
+      SET status = CASE
+            WHEN EXISTS (
+              SELECT 1
+              FROM rednote_publish_attempts AS attempt
+              JOIN rednote_publish_attempt_receipts AS receipt
+                ON receipt.attempt_id = attempt.id
+              WHERE attempt.workspace_id = local_publish_jobs.workspace_id
+                AND attempt.source_local_publish_job_id = local_publish_jobs.id
+                AND attempt.receipt_lookup_state = 'found'
+            ) THEN 'verification_pending'
+            ELSE 'failed'
+          END,
           claim_token = NULL,
           claim_expires_at = CURRENT_TIMESTAMP,
           error_code = CASE
+            WHEN EXISTS (
+              SELECT 1
+              FROM rednote_publish_attempts AS attempt
+              JOIN rednote_publish_attempt_receipts AS receipt
+                ON receipt.attempt_id = attempt.id
+              WHERE attempt.workspace_id = local_publish_jobs.workspace_id
+                AND attempt.source_local_publish_job_id = local_publish_jobs.id
+                AND attempt.receipt_lookup_state = 'found'
+            ) THEN 'RECEIPT_RECONCILIATION_REQUIRED'
             WHEN dispatch_authorized_at IS NOT NULL
               THEN 'PUBLISH_ATTEMPT_OUTCOME_UNKNOWN'
             ELSE 'CLAIM_LEASE_EXPIRED'
           END,
           error_message = CASE
+            WHEN EXISTS (
+              SELECT 1
+              FROM rednote_publish_attempts AS attempt
+              JOIN rednote_publish_attempt_receipts AS receipt
+                ON receipt.attempt_id = attempt.id
+              WHERE attempt.workspace_id = local_publish_jobs.workspace_id
+                AND attempt.source_local_publish_job_id = local_publish_jobs.id
+                AND attempt.receipt_lookup_state = 'found'
+            ) THEN 'A durable RedNote receipt was recorded before the claim expired. Verify and reconcile that receipt; do not publish again.'
             WHEN dispatch_authorized_at IS NOT NULL
               THEN 'The publish lease expired after dispatch authorization. Automatic dispatch is permanently closed; reconcile the existing post or record operator handling.'
             ELSE 'The publish lease expired without a terminal result. Automatic dispatch is permanently closed; review the frozen attempt before operator handling or reconciliation.'
           END,
-          completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
+          next_verification_at = CASE
+            WHEN EXISTS (
+              SELECT 1
+              FROM rednote_publish_attempts AS attempt
+              JOIN rednote_publish_attempt_receipts AS receipt
+                ON receipt.attempt_id = attempt.id
+              WHERE attempt.workspace_id = local_publish_jobs.workspace_id
+                AND attempt.source_local_publish_job_id = local_publish_jobs.id
+                AND attempt.receipt_lookup_state = 'found'
+            ) THEN CURRENT_TIMESTAMP
+            ELSE next_verification_at
+          END,
+          completed_at = CASE
+            WHEN EXISTS (
+              SELECT 1
+              FROM rednote_publish_attempts AS attempt
+              JOIN rednote_publish_attempt_receipts AS receipt
+                ON receipt.attempt_id = attempt.id
+              WHERE attempt.workspace_id = local_publish_jobs.workspace_id
+                AND attempt.source_local_publish_job_id = local_publish_jobs.id
+                AND attempt.receipt_lookup_state = 'found'
+            ) THEN completed_at
+            ELSE COALESCE(completed_at, CURRENT_TIMESTAMP)
+          END,
           updated_at = CURRENT_TIMESTAMP
       WHERE status IN ('claimed', 'staged')
         AND claim_expires_at <= CURRENT_TIMESTAMP
@@ -558,13 +705,15 @@ export async function releaseExpiredStoredLocalPublishClaims() {
         AND reconciled_at IS NULL
         AND success_attestation_id IS NULL
         AND external_disposition_request_id IS NULL
-      RETURNING id
+      RETURNING id, status
     ),
     released_items AS (
       UPDATE rednote_publish_batch_items
       SET state = 'failed',
           updated_at = CURRENT_TIMESTAMP
-      WHERE local_publish_job_id IN (SELECT id FROM released)
+      WHERE local_publish_job_id IN (
+        SELECT id FROM released WHERE status = 'failed'
+      )
         AND state IN ('claimed', 'staged')
       RETURNING local_publish_job_id
     )
@@ -636,17 +785,18 @@ async function claimedResponse(row: LocalPublishJobRow): Promise<ClaimedLocalPub
       snapshotRevision: job.snapshot.notionLastEditedTime,
       approvedState: 'approved',
       approvedAt: timestamp(approved.approved_at),
-      media: {
-        url: job.snapshot.mediaUrl,
-        type: job.snapshot.mediaType,
-        identity: rednoteMediaIdentity({
-          type: job.snapshot.mediaType,
-          url: job.snapshot.mediaUrl,
-        }),
-      },
+      media: snapshotPublishMedia(job.snapshot),
       publishAt: job.snapshot.publishAt,
       lateAction: approved.dispatch_mode === 'post_now' ? 'post_now' : 'schedule',
     };
+  }
+  const expectedAccountId = job.snapshot.expectedAccountId?.trim();
+  if (!expectedAccountId) {
+    throw new LocalPublishJobError(
+      'The frozen job is missing expectedAccountId and cannot be claimed',
+      'EXPECTED_ACCOUNT_NOT_CONFIGURED',
+      409,
+    );
   }
   const base = {
     id: job.id,
@@ -662,11 +812,13 @@ async function claimedResponse(row: LocalPublishJobRow): Promise<ClaimedLocalPub
     mediaType: job.snapshot.mediaType,
     mediaIndex: job.snapshot.mediaIndex,
     mediaUrl: job.snapshot.mediaUrl,
+    media: snapshotPublishMedia(job.snapshot),
     ...(job.snapshot.compatibilityTrial
       ? { compatibilityTrial: job.snapshot.compatibilityTrial }
       : {}),
     ...(job.snapshot.thumbnailUrl ? { thumbnailUrl: job.snapshot.thumbnailUrl } : {}),
     ...(job.snapshot.publishAt ? { publishAt: job.snapshot.publishAt } : {}),
+    expectedAccountId,
     notionLastEditedTime: job.snapshot.notionLastEditedTime,
     claimToken: row.claim_token,
     claimExpiresAt: timestamp(row.claim_expires_at),
@@ -721,9 +873,9 @@ async function claimedResponse(row: LocalPublishJobRow): Promise<ClaimedLocalPub
     job.status === 'scheduled' ||
     job.status === 'verification_pending'
   ) {
-    if (!job.noteId || !job.shareUrl || !job.nextVerificationAt) {
+    if (!job.nextVerificationAt) {
       throw new LocalPublishJobError(
-        'A verification job is missing durable publication identifiers',
+        'A verification job is missing its next verification time',
         'INVALID_VERIFICATION_JOB',
         500,
       );
@@ -731,16 +883,16 @@ async function claimedResponse(row: LocalPublishJobRow): Promise<ClaimedLocalPub
     return {
       ...base,
       status: job.status,
-      noteId: job.noteId,
-      shareUrl: job.shareUrl,
+      ...(job.noteId ? { noteId: job.noteId } : {}),
+      ...(job.shareUrl ? { shareUrl: job.shareUrl } : {}),
       verificationAttempts: job.verificationAttempts,
       nextVerificationAt: job.nextVerificationAt,
     };
   }
   if (job.status === 'verified') {
-    if (!job.noteId || !job.shareUrl) {
+    if (!job.noteId) {
       throw new LocalPublishJobError(
-        'A reconciliation job is missing durable publication identifiers',
+        'A reconciliation job is missing its durable Note ID',
         'INVALID_RECONCILIATION_JOB',
         500,
       );
@@ -749,7 +901,7 @@ async function claimedResponse(row: LocalPublishJobRow): Promise<ClaimedLocalPub
       ...base,
       status: job.status,
       noteId: job.noteId,
-      shareUrl: job.shareUrl,
+      ...(job.shareUrl ? { shareUrl: job.shareUrl } : {}),
       verificationAttempts: job.verificationAttempts,
     };
   }
@@ -807,7 +959,13 @@ export async function heartbeatStoredLocalPublishJob(
       AND workspace_id = ${workspaceId}
       AND claim_token = ${claimToken}::uuid
       AND claim_expires_at > CURRENT_TIMESTAMP
-      AND status IN ('claimed', 'staged')
+      AND status IN (
+        'claimed',
+        'staged',
+        'submitted',
+        'scheduled',
+        'verification_pending'
+      )
       AND external_disposition_request_id IS NULL
     RETURNING *
   `;
@@ -942,6 +1100,366 @@ export async function stageStoredLocalPublishJob(id: string, claimToken: string,
     'INVALID_JOB_TRANSITION',
     409,
   );
+}
+
+export async function recordStoredAcknowledgedPublication(
+  id: string,
+  claimToken: string,
+  receipt: {
+    noteId: string;
+    acknowledgedAt: string;
+    accountId: string;
+    accountCapturedAt: string;
+    ownership: 'owned' | 'account_mismatch';
+    xsecCapturedAt?: string;
+    publicIndexStatus?: 'indexed' | 'pending' | 'not_found';
+    publicIndexCheckedAt?: string;
+    publicUrl?: string;
+  },
+  workspaceId = 'legacy-local-publish',
+) {
+  const expectedAccountMatches = receipt.ownership === 'owned';
+  const result = await sql<LocalPublishJobRow>`
+    WITH updated AS (
+      UPDATE local_publish_jobs
+      SET status = CASE
+            WHEN snapshot->>'expectedAccountId' = ${receipt.accountId}
+              AND ${expectedAccountMatches}
+              THEN 'verified'
+            ELSE 'verification_pending'
+          END,
+          note_id = ${receipt.noteId},
+          share_url = ${receipt.publicUrl ?? null},
+          dispatched_at = COALESCE(dispatched_at, ${receipt.acknowledgedAt}::timestamptz),
+          verified_at = CASE
+            WHEN snapshot->>'expectedAccountId' = ${receipt.accountId}
+              AND ${expectedAccountMatches}
+              THEN COALESCE(verified_at, ${receipt.accountCapturedAt}::timestamptz)
+            ELSE verified_at
+          END,
+          verification_attempts = CASE
+            WHEN snapshot->>'expectedAccountId' = ${receipt.accountId}
+              AND ${expectedAccountMatches}
+              THEN verification_attempts
+            ELSE verification_attempts + 1
+          END,
+          next_verification_at = CASE
+            WHEN snapshot->>'expectedAccountId' = ${receipt.accountId}
+              AND ${expectedAccountMatches}
+              THEN NULL
+            ELSE CURRENT_TIMESTAMP + INTERVAL '15 minutes'
+          END,
+          receipt_contract_version = 'rednote-worker-result/v2',
+          receipt_outcome = 'acknowledged',
+          receipt_acknowledged_at = ${receipt.acknowledgedAt}::timestamptz,
+          authenticated_account_id = ${receipt.accountId},
+          authenticated_account_at = ${receipt.accountCapturedAt}::timestamptz,
+          xsec_accessible_at = ${receipt.xsecCapturedAt ?? null}::timestamptz,
+          public_index_status = ${receipt.publicIndexStatus ?? null},
+          public_index_checked_at = ${receipt.publicIndexCheckedAt ?? null}::timestamptz,
+          error_code = CASE
+            WHEN snapshot->>'expectedAccountId' = ${receipt.accountId}
+              AND ${expectedAccountMatches}
+              THEN NULL
+            ELSE 'ACCOUNT_MISMATCH'
+          END,
+          error_message = CASE
+            WHEN snapshot->>'expectedAccountId' = ${receipt.accountId}
+              AND ${expectedAccountMatches}
+              THEN NULL
+            ELSE 'Authenticated Creator account does not match the frozen expectedAccountId'
+          END,
+          claim_expires_at = CASE
+            WHEN snapshot->>'expectedAccountId' = ${receipt.accountId}
+              AND ${expectedAccountMatches}
+              THEN claim_expires_at
+            ELSE CURRENT_TIMESTAMP
+          END,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${id}::uuid
+        AND workspace_id = ${workspaceId}
+        AND status IN ('claimed', 'staged', 'submitted', 'scheduled', 'verification_pending')
+        AND claim_token = ${claimToken}::uuid
+        AND claim_expires_at > CURRENT_TIMESTAMP
+        AND external_disposition_request_id IS NULL
+      RETURNING *
+    ),
+    evidence AS (
+      INSERT INTO rednote_publication_evidence(
+        workspace_id, local_publish_job_id, attempt_id, note_id,
+        evidence_kind, captured_at, account_id, evidence_status, public_url
+      )
+      SELECT workspace_id, id,
+        (SELECT attempt.id FROM rednote_publish_attempts AS attempt
+         WHERE attempt.workspace_id = updated.workspace_id
+           AND attempt.source_local_publish_job_id = updated.id
+         ORDER BY attempt.created_at DESC LIMIT 1),
+        ${receipt.noteId}, 'authenticated_account',
+        ${receipt.accountCapturedAt}::timestamptz, ${receipt.accountId},
+        CASE
+          WHEN updated.snapshot->>'expectedAccountId' = ${receipt.accountId}
+            AND ${expectedAccountMatches}
+            THEN 'owned'
+          ELSE 'account_mismatch'
+        END,
+        NULL
+      FROM updated
+      UNION ALL
+      SELECT workspace_id, id, NULL, ${receipt.noteId}, 'xsec_access',
+        ${receipt.xsecCapturedAt ?? receipt.accountCapturedAt}::timestamptz,
+        NULL, 'accessible', NULL
+      FROM updated WHERE ${receipt.xsecCapturedAt ?? null}::timestamptz IS NOT NULL
+      UNION ALL
+      SELECT workspace_id, id, NULL, ${receipt.noteId}, 'public_index',
+        ${receipt.publicIndexCheckedAt ?? receipt.accountCapturedAt}::timestamptz,
+        NULL, ${receipt.publicIndexStatus ?? 'pending'}, ${receipt.publicUrl ?? null}
+      FROM updated WHERE ${receipt.publicIndexStatus ?? null}::text IS NOT NULL
+      RETURNING id
+    )
+    SELECT * FROM updated
+  `;
+  if (result.rows[0]) return mapRow(result.rows[0]);
+  const job = await loadResultJob(id, workspaceId);
+  assertMatchingClaim(job, claimToken);
+  if (
+    ['verified', 'reconciled', 'verification_pending'].includes(job.status)
+    && job.noteId === receipt.noteId
+    && job.receiptOutcome === 'acknowledged'
+  ) {
+    return job;
+  }
+  if (job.status === 'claimed' || job.status === 'staged') assertUnexpiredClaim(job);
+  throw new LocalPublishJobError(
+    'The acknowledged result cannot be recorded from this state',
+    'INVALID_JOB_TRANSITION',
+    409,
+  );
+}
+
+export async function recordStoredScheduledAcknowledgement(
+  id: string,
+  claimToken: string,
+  receipt: {
+    acknowledgedAt: string;
+    scheduledFor: string;
+    accountId: string;
+    accountCapturedAt: string;
+    ownership: 'owned' | 'account_mismatch';
+    noteId?: string;
+  },
+  workspaceId = 'legacy-local-publish',
+  scheduleMatches = true,
+) {
+  const ownershipOwned = receipt.ownership === 'owned';
+  const result = await sql<LocalPublishJobRow>`
+    WITH updated AS (
+      UPDATE local_publish_jobs
+      SET status = CASE
+            WHEN snapshot->>'expectedAccountId' = ${receipt.accountId}
+              AND ${ownershipOwned}
+              AND ${scheduleMatches}
+              THEN 'scheduled'
+            ELSE 'verification_pending'
+          END,
+          note_id = COALESCE(note_id, ${receipt.noteId ?? null}),
+          dispatched_at = COALESCE(
+            dispatched_at,
+            ${receipt.acknowledgedAt}::timestamptz
+          ),
+          receipt_contract_version = 'rednote-worker-result/v2',
+          receipt_outcome = 'scheduled',
+          receipt_acknowledged_at = ${receipt.acknowledgedAt}::timestamptz,
+          authenticated_account_id = ${receipt.accountId},
+          authenticated_account_at = ${receipt.accountCapturedAt}::timestamptz,
+          verification_attempts = CASE
+            WHEN snapshot->>'expectedAccountId' = ${receipt.accountId}
+              AND ${ownershipOwned}
+              AND ${scheduleMatches}
+              THEN 0
+            ELSE verification_attempts + 1
+          END,
+          next_verification_at = CASE
+            WHEN snapshot->>'expectedAccountId' = ${receipt.accountId}
+              AND ${ownershipOwned}
+              AND ${scheduleMatches}
+              THEN GREATEST(
+                CURRENT_TIMESTAMP,
+                ${receipt.scheduledFor}::timestamptz
+              ) + INTERVAL '15 minutes'
+            ELSE CURRENT_TIMESTAMP + INTERVAL '15 minutes'
+          END,
+          claim_expires_at = CURRENT_TIMESTAMP,
+          error_code = CASE
+            WHEN snapshot->>'expectedAccountId' = ${receipt.accountId}
+              AND ${ownershipOwned}
+              AND ${scheduleMatches}
+              THEN NULL
+            WHEN NOT ${scheduleMatches}
+              THEN 'SCHEDULE_READBACK_MISMATCH'
+            ELSE 'ACCOUNT_MISMATCH'
+          END,
+          error_message = CASE
+            WHEN snapshot->>'expectedAccountId' = ${receipt.accountId}
+              AND ${ownershipOwned}
+              AND ${scheduleMatches}
+              THEN NULL
+            WHEN NOT ${scheduleMatches}
+              THEN 'RedNote scheduled the post for a different time than the frozen publishing packet'
+            ELSE 'Authenticated Creator account does not match the frozen expectedAccountId'
+          END,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${id}::uuid
+        AND workspace_id = ${workspaceId}
+        AND status IN ('claimed', 'staged')
+        AND claim_token = ${claimToken}::uuid
+        AND claim_expires_at > CURRENT_TIMESTAMP
+        AND external_disposition_request_id IS NULL
+        AND (note_id IS NULL OR note_id = ${receipt.noteId ?? null})
+      RETURNING *
+    ),
+    evidence AS (
+      INSERT INTO rednote_publication_evidence(
+        workspace_id, local_publish_job_id, attempt_id, note_id,
+        evidence_kind, captured_at, account_id, evidence_status
+      )
+      SELECT workspace_id, id,
+        (SELECT attempt.id FROM rednote_publish_attempts AS attempt
+         WHERE attempt.workspace_id = updated.workspace_id
+           AND attempt.source_local_publish_job_id = updated.id
+         ORDER BY attempt.created_at DESC LIMIT 1),
+        ${receipt.noteId ?? null}, 'authenticated_account',
+        ${receipt.accountCapturedAt}::timestamptz, ${receipt.accountId},
+        CASE
+          WHEN updated.snapshot->>'expectedAccountId' = ${receipt.accountId}
+            AND ${ownershipOwned}
+            THEN 'owned'
+          ELSE 'account_mismatch'
+        END
+      FROM updated
+      RETURNING id
+    )
+    SELECT * FROM updated
+  `;
+  if (result.rows[0]) return mapRow(result.rows[0]);
+  const job = await loadResultJob(id, workspaceId);
+  assertMatchingClaim(job, claimToken);
+  if (
+    ['scheduled', 'verification_pending'].includes(job.status)
+    && job.receiptOutcome === 'scheduled'
+    && job.authenticatedAccountId === receipt.accountId
+    && (!receipt.noteId || !job.noteId || job.noteId === receipt.noteId)
+  ) {
+    return job;
+  }
+  if (job.status === 'claimed' || job.status === 'staged') assertUnexpiredClaim(job);
+  throw new LocalPublishJobError(
+    'The scheduled acknowledgement cannot be recorded from this state',
+    'INVALID_JOB_TRANSITION',
+    409,
+  );
+}
+
+export async function recordStoredAmbiguousOutcome(
+  id: string,
+  claimToken: string,
+  occurredAt: string,
+  code: string,
+  message: string,
+  workspaceId = 'legacy-local-publish',
+) {
+  const result = await sql<LocalPublishJobRow>`
+    UPDATE local_publish_jobs
+    SET status = 'verification_pending',
+        dispatched_at = COALESCE(dispatched_at, ${occurredAt}::timestamptz),
+        receipt_contract_version = 'rednote-worker-result/v2',
+        receipt_outcome = 'ambiguous',
+        verification_attempts = verification_attempts + 1,
+        next_verification_at = CURRENT_TIMESTAMP + INTERVAL '15 minutes',
+        claim_expires_at = CURRENT_TIMESTAMP,
+        error_code = ${code},
+        error_message = ${message},
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ${id}::uuid
+      AND workspace_id = ${workspaceId}
+      AND status IN ('claimed', 'staged')
+      AND claim_token = ${claimToken}::uuid
+      AND claim_expires_at > CURRENT_TIMESTAMP
+      AND external_disposition_request_id IS NULL
+    RETURNING *
+  `;
+  if (result.rows[0]) return mapRow(result.rows[0]);
+  const job = await loadResultJob(id, workspaceId);
+  assertMatchingClaim(job, claimToken);
+  if (
+    job.status === 'verification_pending'
+    && job.receiptOutcome === 'ambiguous'
+    && job.errorCode === code
+  ) {
+    return job;
+  }
+  if (job.status === 'claimed' || job.status === 'staged') assertUnexpiredClaim(job);
+  throw new LocalPublishJobError(
+    'The ambiguous outcome cannot be recorded from this state',
+    'INVALID_JOB_TRANSITION',
+    409,
+  );
+}
+
+export async function recordStoredRejectedOutcome(
+    id: string,
+    claimToken: string,
+    occurredAt: string,
+    code: string,
+    message: string,
+    workspaceId = 'legacy-local-publish',
+  ) {
+    const result = await sql<LocalPublishJobRow>`
+      WITH failed AS (
+        UPDATE local_publish_jobs
+        SET status = 'failed',
+            receipt_contract_version = 'rednote-worker-result/v2',
+            receipt_outcome = 'rejected',
+            receipt_acknowledged_at = ${occurredAt}::timestamptz,
+            claim_token = NULL,
+            claim_expires_at = CURRENT_TIMESTAMP,
+            error_code = ${code},
+            error_message = ${message},
+            completed_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ${id}::uuid
+          AND workspace_id = ${workspaceId}
+          AND status IN ('claimed', 'staged')
+          AND claim_token = ${claimToken}::uuid
+          AND claim_expires_at > CURRENT_TIMESTAMP
+          AND external_disposition_request_id IS NULL
+        RETURNING *
+      ),
+      failed_items AS (
+        UPDATE rednote_publish_batch_items
+        SET state = 'failed',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE local_publish_job_id IN (SELECT id FROM failed)
+          AND state IN ('claimed', 'staged')
+        RETURNING local_publish_job_id
+      )
+      SELECT * FROM failed
+    `;
+    if (result.rows[0]) return mapRow(result.rows[0]);
+    const job = await loadResultJob(id, workspaceId);
+    if (
+      job.status === 'failed'
+      && job.receiptOutcome === 'rejected'
+      && job.errorCode === code
+    ) {
+      return job;
+    }
+    assertMatchingClaim(job, claimToken);
+    if (job.status === 'claimed' || job.status === 'staged') assertUnexpiredClaim(job);
+    throw new LocalPublishJobError(
+      'The rejected outcome cannot be recorded from this state',
+      'INVALID_JOB_TRANSITION',
+      409,
+    );
 }
 
 export async function recordStoredLocalPublishDispatch(
@@ -1384,7 +1902,7 @@ export async function completeStoredLocalPublishReconciliation(
   id: string,
   claimToken: string,
   noteId: string,
-  shareUrl: string,
+  shareUrl: string | undefined,
   workspaceId = 'legacy-local-publish',
 ) {
   const result = await sql<LocalPublishJobRow>`
@@ -1399,7 +1917,7 @@ export async function completeStoredLocalPublishReconciliation(
       AND claim_token = ${claimToken}::uuid
       AND claim_expires_at > CURRENT_TIMESTAMP
       AND note_id = ${noteId}
-      AND share_url = ${shareUrl}
+      AND share_url IS NOT DISTINCT FROM ${shareUrl ?? null}
       AND external_disposition_request_id IS NULL
       AND NOT EXISTS (
         SELECT 1
@@ -1420,7 +1938,11 @@ export async function completeStoredLocalPublishReconciliation(
 
   const job = await loadResultJob(id, workspaceId);
   assertMatchingClaim(job, claimToken);
-  if (job.status === 'reconciled' && job.noteId === noteId && job.shareUrl === shareUrl) {
+  if (
+    job.status === 'reconciled'
+    && job.noteId === noteId
+    && job.shareUrl === shareUrl
+  ) {
     return job;
   }
   assertUnexpiredClaim(job);

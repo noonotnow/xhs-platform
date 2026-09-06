@@ -28,6 +28,7 @@ import {
 
 const browserPayload = {
   sourcePostId: 'notion-page-1',
+  expectedAccountId: 'creator-account-1',
   title: 'Canonical title',
   caption: 'Exact final Caption',
   tags: ['FirstTag', 'SecondTag'],
@@ -158,17 +159,23 @@ describe('rednote publishing contract v1', () => {
     expect(invalidPayload.caption).toBeUndefined();
   });
 
-  it('represents Published identity atomically', () => {
+  it('uses Note ID as durable Published identity with an optional canonical URL', () => {
     expect(hasAtomicPublishedIdentity({
       rednoteUrl: 'https://www.rednote.com/explore/note-1',
       rednoteNoteId: 'note-1',
     })).toBe(true);
     expect(hasAtomicPublishedIdentity({ rednoteUrl: 'url-only' })).toBe(false);
+    expect(hasAtomicPublishedIdentity({ rednoteNoteId: 'note-1' })).toBe(true);
     expect(() => assertPublishedInvariant({
       publicationStatus: 'Published',
       rednoteUrl: null,
       rednoteNoteId: null,
-    })).toThrow(/requires Rednote URL and Rednote Note ID atomically/);
+    })).toThrow(/requires a durable Rednote Note ID/);
+    expect(() => assertPublishedInvariant({
+      publicationStatus: 'Published',
+      rednoteUrl: null,
+      rednoteNoteId: 'note-1',
+    })).not.toThrow();
     expect(() => assertPublishedInvariant({
       publicationStatus: 'Published',
       rednoteUrl: 'https://www.rednote.com/explore/note-1',

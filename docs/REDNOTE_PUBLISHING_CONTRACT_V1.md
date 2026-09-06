@@ -1,60 +1,117 @@
-# Rednote publishing contract v1
+# RedNote publishing control-plane contract
 
-`rednote-publishing/v1` supplies shared field and invariant definitions for XHS
-Admin. Migration `017` remains additive shadow storage; existing runtime
-workers do not dual-write it. CREATE-owned production fields remain independent
-from publication execution and receipt reconciliation.
+`rednote-publishing/v1` remains the immutable execution-packet contract. The
+authoritative TypeScript definitions are in
+`src/lib/rednote-publishing-contract-v1.ts`. Every frozen browser payload
+contains `expectedAccountId` alongside the exact copy, ordered media identities
+and checksums, visibility, mode, and requested timing. The expected account is
+therefore covered by the packet digest and must be checked in authenticated
+RedNote Creator before any publish side effect.
 
-The authoritative TypeScript API is
-`src/lib/rednote-publishing-contract-v1.ts`. It freezes canonical production
-status/next-action values, Publication Status and Publication Next Step values,
-attempt outcomes, executor identity,
-frozen payload, event/evidence, and receipt shapes; Published identity; active
-attempt lifecycle; and new-attempt retry semantics. The frozen browser payload
-contains exact title, Caption, ordered tags, stable ordered media identities and
-checksums, optional video cover/poster, visibility, mode, and requested timing;
-arbitrary creative fields are not part of the execution contract. `Backfill
-receipt` is the only writable receipt queue. `Backfill metadata` and `Backfill
-URL/metrics` are read-only aliases accepted solely when interpreting legacy
-records with receipt/metrics completeness context.
+Every executable claim requires `expectedAccountId` and an ordered `media`
+array of 1–18 immutable `{identity,type,url}` entries. All entries have the same
+type; video claims contain exactly one. The compatibility fields `mediaType`
+and `mediaUrl` are projections of `media[0]`, not independent inputs.
+`identity` is lowercase SHA-256 of `JSON.stringify({type,url})` with that key
+order. Batch and Ready ×3 authorization records carry an array that must equal
+the claim array entry-for-entry and in order. For image posts, xhs-platform
+places the operator-selected image first and then preserves all remaining
+canonical image URLs in source order.
 
-Manual scheduling or posting attestation writes only
-`Publication Status = Verify receipt` and
-`Publication Next Step = Verify receipt`. A verified result writes
+The worker response contract is `rednote-worker-result/v2`:
+
+```json
+{
+  "contractVersion": "rednote-worker-result/v2",
+  "outcome": "acknowledged",
+  "noteId": "durable-note-id",
+  "acknowledgedAt": "2026-08-01T12:00:00Z",
+  "authenticatedAccount": {
+    "accountId": "creator-account-id",
+    "capturedAt": "2026-08-01T12:00:01Z",
+    "ownership": "owned"
+  },
+  "xsecAccess": {
+    "accessible": true,
+    "capturedAt": "2026-08-01T12:00:02Z"
+  },
+  "publicIndex": {
+    "status": "indexed",
+    "checkedAt": "2026-08-01T12:00:03Z",
+    "publicUrl": "https://www.rednote.com/explore/durable-note-id"
+  }
+}
+```
+
+`xsecAccess` and `publicIndex` are optional. An acknowledged outcome requires a
+`noteId` and authenticated ownership evidence, but it does not require a public
+URL. The remaining outcomes are:
+
+```json
+{"contractVersion":"rednote-worker-result/v2","outcome":"scheduled","acknowledgedAt":"2026-08-01T12:00:00Z","scheduledFor":"2026-08-02T12:00:00Z","authenticatedAccount":{"accountId":"creator-account-id","capturedAt":"2026-08-01T12:00:01Z","ownership":"owned"},"noteId":"optional-durable-note-id"}
+{"contractVersion":"rednote-worker-result/v2","outcome":"ambiguous","code":"POST_CLICK_TIMEOUT","message":"Publication outcome is unknown","occurredAt":"2026-08-01T12:00:00Z"}
+{"contractVersion":"rednote-worker-result/v2","outcome":"rejected","code":"UPSTREAM_REJECTED","message":"RedNote rejected publication","occurredAt":"2026-08-01T12:00:00Z"}
+```
+
+For `scheduled`, authenticated-account evidence is required and `noteId` is
+optional. `scheduledFor` must represent the same instant as the frozen
+`browserPayload.targetPublishAt`. A mismatched Creator readback or authenticated
+account is recorded as an ambiguous verification case and must not be
+republished automatically.
+
+`acknowledged` means RedNote accepted publication and issued the durable
+`noteId`. With matching authenticated-account ownership it authorizes
 `Publication Status = Published` and
-`Publication Next Step = Backfill metrics` only when Rednote URL and Rednote
-Note ID are both stable. No publication path may change Status, Next action,
-Production Next Step, Publish packet ready, ScheduledDate, copy, media, or
-later CREATE edits.
+`Publication Next Step = Backfill metrics`. `scheduled` closes dispatch and
+enters receipt verification. `ambiguous` records `outcome_unknown`, closes
+dispatch, and enters Verify receipt; it must never be automatically republished.
+`rejected` records a known failure. A later attempt is possible only through the
+normal approval and authorization path.
 
-Migration `017_rednote_publishing_attempts.sql` adds immutable attempts,
-append-only events/evidence, and immutable receipts. Frozen attempt inputs never
-change. The only attempt control-plane transitions are: setting a terminal
-outcome once, advancing receipt lookup state until terminal, clearing `active`,
-setting a supersession pointer once, and binding worker/Playwright run identity
-from null once. A partial unique index permits only one
-active worker-originated attempt per Notion Post. A single
-`execution_started` event per attempt prevents automatic same-attempt retry.
-Receipts require URL, Note ID, confirmed platform publish time, and provenance;
-requested/target time remains separate intent.
+The durable identity is `noteId`. A canonical query-free
+`https://www.rednote.com/explore/{noteId}` URL is optional derived metadata.
+Current `noteId` + `xsecToken` reachability is renewable evidence, not identity.
+Public indexing is asynchronous, informational evidence and never blocks,
+downgrades, or reopens Published. Explicit removed/restricted evidence is
+preserved without deleting publication history.
 
-A worker claim is a bounded lease for one immutable attempt, not durable
-ownership of the live CREATE record. Expired pre-receipt claims are terminalized
-and released; they are never claimed again for dispatch. If dispatch
-authorization makes the outcome ambiguous, automatic publishing remains
-permanently closed while operator handling and public-post reconciliation remain
-available.
+Migration `017_rednote_publishing_attempts.sql` supplies immutable attempts,
+append-only events, frozen payload digests, terminal outcomes, and immutable
+receipts. Migration `023_rednote_worker_result_v2.sql` makes receipt URLs
+optional, adds v2 receipt state and current evidence summaries, and creates the
+append-only `rednote_publication_evidence` history. Existing claim-token/lease
+compare-and-set behavior, one-shot authorization, active-attempt uniqueness,
+idempotency, duplicate prevention, and Notion `lastEditedTime` protection remain
+authoritative in xhs-platform.
 
-No legacy rows are classified or copied by this migration. A later backfill must
-leave ambiguous outcomes unknown and quarantine them for review rather than
-turning historical failures into successes or retries. Human/operator
-supersession must create a new attempt and retain the prior attempt and evidence.
-The two supersession links cannot be made reciprocally consistent by independent
-row constraints; the Phase 2 transaction must lock both attempts and write both
-links atomically.
+## Read-only adapter evidence
 
-The next phase should implement XHS Admin transactions over these types and
-tables: immutable attempt creation, claim/pointer compare-and-set, event append,
-terminal resolution, receipt capture, and supersession. CREATE and PLAN may
-request those transactions, but must never mutate execution fields directly and
-must fail closed when the required XHS Admin execution action is unavailable.
+The separate read-only MCP adapter uses:
+
+- `GET /api/rednote-publications/{noteId}/evidence?workspaceId={workspaceId}`
+- `POST /api/rednote-publications/{noteId}/evidence`
+
+Both require the worker bearer token and an `X-Workspace-ID` header. POST
+accepts exactly one `rednote-evidence/v1` body:
+
+```json
+{"contractVersion":"rednote-evidence/v1","kind":"authenticated_account","capturedAt":"2026-08-01T12:00:00Z","accountId":"creator-account-id","ownership":"owned"}
+{"contractVersion":"rednote-evidence/v1","kind":"xsec_access","capturedAt":"2026-08-01T12:05:00Z","accessible":true}
+{"contractVersion":"rednote-evidence/v1","kind":"public_index","capturedAt":"2026-08-01T12:10:00Z","status":"pending"}
+{"contractVersion":"rednote-evidence/v1","kind":"public_index","capturedAt":"2026-08-01T12:20:00Z","status":"indexed","publicUrl":"https://www.rednote.com/explore/durable-note-id"}
+{"contractVersion":"rednote-evidence/v1","kind":"removed_restricted","capturedAt":"2026-08-01T12:30:00Z","status":"restricted"}
+```
+
+Never send `xsecToken`, cookies, authorization headers, or other credentials.
+The endpoint rejects unknown fields and stores only reachability plus capture
+time. Resolve xsec routes live from `noteId`; refresh evidence when it changes.
+If an acknowledged result was quarantined for account mismatch, reclaim that
+job through the verification lane after correcting the authenticated account,
+then resubmit the same acknowledged v2 receipt. The control plane attaches the
+corrected evidence to the existing acknowledged attempt and performs the
+concurrency-checked Notion reconciliation. Never create a new publish claim to
+resolve ambiguous or mismatched receipt evidence.
+
+Legacy Playwright result bodies remain accepted during migration, but only v2
+provides the noteId-first semantics above. Compatibility must not be used to
+reintroduce a stable-public-URL requirement.

@@ -13,6 +13,7 @@ import type {
   LocalPublishMediaType,
   LocalPublishSnapshot,
 } from '@/types/local-publish-job';
+import { rednotePublishMedia } from '@/lib/rednote-publish-authorization';
 import { createHash } from 'crypto';
 
 const MAX_TITLE_LENGTH = 100;
@@ -214,6 +215,25 @@ export function buildLocalPublishSnapshot(
       422,
     );
   }
+  const orderedMediaUrls = compatibilityTrial || input.media.type === 'video'
+    ? [mediaUrl]
+    : [
+        mediaUrl,
+        ...candidates.filter((_, index) => index !== input.media.index),
+      ];
+  if (
+    orderedMediaUrls.length > 18
+    || (
+      input.media.type === 'image'
+      && orderedMediaUrls.some((url) => !isCanonicalMediaImage(url))
+    )
+  ) {
+    throw new LocalPublishJobError(
+      'RedNote image posts require 1-18 trusted canonical HTTPS assets',
+      'INVALID_MEDIA_CHOICE',
+      422,
+    );
+  }
 
   const thumbnailUrl = isCanonicalMediaImage(post.thumbnailUrl)
     ? post.thumbnailUrl
@@ -229,6 +249,7 @@ export function buildLocalPublishSnapshot(
     mediaType: input.media.type,
     mediaIndex: input.media.index,
     mediaUrl,
+    media: orderedMediaUrls.map((url) => rednotePublishMedia(input.media.type, url)),
     ...(compatibilityTrial ? { compatibilityTrial: 'unverified_mov' as const } : {}),
     ...(thumbnailUrl ? { thumbnailUrl } : {}),
     ...(post.publishAt && (input.mode !== 'publish' || input.consent === 'ready_x3')

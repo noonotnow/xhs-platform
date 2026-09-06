@@ -13,8 +13,11 @@ import {
 const claim = {
   notion_page_id: 'post-page-id',
   note_id: 'note_123',
-  share_url: 'https://www.rednote.com/explore/note_123',
+  share_url: null,
   published_at: '2026-08-01T12:00:00.000Z',
+  authenticated_account_id: 'creator-account-1',
+  authenticated_account_at: '2026-08-01T12:00:00.000Z',
+  xsec_accessible_at: '2026-08-02T11:00:00.000Z',
   claim_token: '11111111-1111-4111-8111-111111111111',
   claim_expires_at: '2026-08-02T12:30:00.000Z',
   latest_metrics: { views: 10, likes: 2, comments: 1, saves: 1, shares: 0 },
@@ -42,8 +45,12 @@ describe('RedNote metric work storage', () => {
     await expect(claimDueRednoteMetricPosts(20, false)).resolves.toEqual([{
       notionPageId: claim.notion_page_id,
       noteId: claim.note_id,
-      shareUrl: claim.share_url,
       publishedAt: claim.published_at,
+      authenticatedAccount: {
+        accountId: claim.authenticated_account_id,
+        capturedAt: claim.authenticated_account_at,
+      },
+      xsecAccessibleAt: claim.xsec_accessible_at,
       claimToken: claim.claim_token,
       claimExpiresAt: claim.claim_expires_at,
       previousMetrics: claim.latest_metrics,

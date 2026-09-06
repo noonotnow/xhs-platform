@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { PoolClient, QueryResultRow } from 'pg';
 
-export const REDNOTE_SCHEMA_MIGRATIONS = ['018', '019', '020', '021', '022'] as const;
+export const REDNOTE_SCHEMA_MIGRATIONS = ['018', '019', '020', '021', '022', '023'] as const;
 export type RednoteSchemaMigration = (typeof REDNOTE_SCHEMA_MIGRATIONS)[number];
 export type RednoteSchemaReadiness = Record<RednoteSchemaMigration, boolean>;
 export const REDNOTE_SCHEMA_PREREQUISITES = [
@@ -56,6 +56,7 @@ const migrationFiles: Record<RednoteSchemaMigration, readonly string[]> = {
   '020': ['020_ready_x3_authorization.sql'],
   '021': ['021_local_publish_worker_heartbeats.sql'],
   '022': ['022_ready_x3_invalid_claim_recovery.sql'],
+  '023': ['023_rednote_worker_result_v2.sql'],
 };
 
 const READINESS_SQL = `
@@ -95,7 +96,13 @@ const READINESS_SQL = `
       ('021', 'column', 'local_publish_worker_heartbeats', 'next_poll_at'),
       ('021', 'column', 'local_publish_worker_heartbeats', 'last_heartbeat_at'),
       ('021', 'column', 'local_publish_worker_heartbeats', 'lease_expires_at'),
-      ('022', 'routine', NULL, 'ready_x3_invalid_claim_recovery_guard_revision')
+      ('022', 'routine', NULL, 'ready_x3_invalid_claim_recovery_guard_revision'),
+      ('023', 'column', 'local_publish_jobs', 'receipt_contract_version'),
+      ('023', 'column', 'local_publish_jobs', 'receipt_outcome'),
+      ('023', 'column', 'local_publish_jobs', 'authenticated_account_at'),
+      ('023', 'nullable_column', 'rednote_publish_attempt_receipts', 'rednote_url'),
+      ('023', 'table', NULL, 'rednote_publication_evidence'),
+      ('023', 'trigger', 'rednote_publication_evidence', 'rednote_publication_evidence_no_update')
   )
   SELECT
     migration,
@@ -110,6 +117,13 @@ const READINESS_SQL = `
           WHERE table_schema = 'public'
             AND information_schema.columns.table_name = required_objects.table_name
             AND column_name = object_name
+        )
+        WHEN 'nullable_column' THEN EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND information_schema.columns.table_name = required_objects.table_name
+            AND column_name = object_name
+            AND is_nullable = 'YES'
         )
         WHEN 'routine' THEN EXISTS (
           SELECT 1 FROM information_schema.routines

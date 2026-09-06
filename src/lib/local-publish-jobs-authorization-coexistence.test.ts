@@ -35,6 +35,15 @@ import { rednoteMediaIdentity } from '@/lib/rednote-publish-authorization';
 const workspaceId = 'workspace-1';
 const jobId = '11111111-1111-4111-8111-111111111111';
 const claimToken = '22222222-2222-4222-8222-222222222222';
+const mediaUrls = [
+  'https://images.xhs.justlikekatie.com/post.png',
+  'https://images.xhs.justlikekatie.com/post-2.png',
+];
+const media = mediaUrls.map((url) => ({
+  url,
+  type: 'image' as const,
+  identity: rednoteMediaIdentity({ url, type: 'image' }),
+}));
 const stagedLegacyJob = {
   id: jobId,
   status: 'staged' as const,
@@ -46,7 +55,9 @@ const stagedLegacyJob = {
   platform: 'RedNote' as const,
   mediaType: 'image' as const,
   mediaIndex: 0,
-  mediaUrl: 'https://images.xhs.justlikekatie.com/post.png',
+  mediaUrl: media[0].url,
+  media,
+  expectedAccountId: 'creator-account-1',
   publishAt: '2099-08-05T15:00:00.000Z',
   notionLastEditedTime: '2099-08-05T12:00:00.000Z',
   claimToken,
@@ -57,14 +68,7 @@ const readyX3Authorization = {
   action: 'schedule' as const,
   packetRevision: stagedLegacyJob.notionLastEditedTime,
   packetDigest: 'a'.repeat(64),
-  media: {
-    url: stagedLegacyJob.mediaUrl,
-    type: stagedLegacyJob.mediaType,
-    identity: rednoteMediaIdentity({
-      url: stagedLegacyJob.mediaUrl,
-      type: stagedLegacyJob.mediaType,
-    }),
-  },
+  media,
   platform: 'RedNote' as const,
   publishAt: stagedLegacyJob.publishAt,
   authorizedAt: '2099-08-05T12:30:00.000Z',
@@ -87,8 +91,8 @@ describe('local publish authorization coexistence', () => {
       hasVideo: false,
       needsMedia: false,
       needsCaption: false,
-      mediaUrls: [stagedLegacyJob.mediaUrl],
-      imageUrls: [stagedLegacyJob.mediaUrl],
+      mediaUrls,
+      imageUrls: mediaUrls,
       videoUrls: [],
       thumbnailUrl: '',
       tags: stagedLegacyJob.tags,
@@ -122,7 +126,10 @@ describe('local publish authorization coexistence', () => {
       ...stagedLegacyJob,
       dispatchAuthorizedAt: '2099-08-05T13:00:00.000Z',
     });
-    attempts.get.mockResolvedValue({ readyX3Authorization });
+    attempts.get.mockResolvedValue({
+      readyX3Authorization,
+      payload: { expectedAccountId: stagedLegacyJob.expectedAccountId },
+    });
 
     await expect(authorizeLocalPublishJob(jobId, claimToken, workspaceId))
       .resolves.toMatchObject({

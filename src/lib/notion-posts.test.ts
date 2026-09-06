@@ -1030,6 +1030,25 @@ describe('Notion Posts mapping', () => {
         },
         '2026-07-31T20:00:00.000Z',
       )).not.toHaveProperty('ScheduledDate');
+
+      expect(buildPublishedProperties(
+        fixture,
+        resolved,
+        duplicateAliases,
+        schemaProperties,
+        {
+          status: 'success',
+          noteId: 'note-123',
+        },
+        '2026-07-31T20:00:00.000Z',
+      )).toEqual({
+        'Publication Status': { status: { name: 'Published' } },
+        'Publication Next Step': { select: { name: 'Backfill metrics' } },
+        'Rednote Note ID': {
+          rich_text: [{ type: 'text', text: { content: 'note-123' } }],
+        },
+        'Published At': { date: { start: '2026-07-31T20:00:00.000Z' } },
+      });
   });
 
   it('backfills a manual receipt without rewriting packet, media, or copy truth', () => {
@@ -1199,6 +1218,11 @@ describe('Notion Posts mapping', () => {
           status: 'success',
           noteId: 'different-note',
           shareUrl: 'https://www.rednote.com/explore/different-note',
+        })).toBe('conflict');
+
+        expect(publishedResultState(fixture, resolved, duplicateAliases, {
+          status: 'success',
+          noteId: 'different-note',
         })).toBe('conflict');
   });
 

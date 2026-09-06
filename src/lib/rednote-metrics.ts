@@ -16,8 +16,11 @@ const METRIC_KEYS = ['comments', 'likes', 'saves', 'shares', 'views'] as const;
 interface MetricClaimRow extends QueryResultRow {
   notion_page_id: string;
   note_id: string;
-  share_url: string;
+  share_url: string | null;
   published_at: Date | string;
+  authenticated_account_id: string;
+  authenticated_account_at: Date | string;
+  xsec_accessible_at: Date | string | null;
   claim_token: string;
   claim_expires_at: Date | string;
   latest_metrics: RednoteMetrics | null;
@@ -154,6 +157,9 @@ export async function claimDueRednoteMetricPosts(
         job.notion_page_id,
         job.note_id,
         job.share_url,
+        job.authenticated_account_id,
+        job.authenticated_account_at,
+        job.xsec_accessible_at,
         CASE
           WHEN COALESCE(
             job.snapshot->>'publishAt',
@@ -168,7 +174,9 @@ export async function claimDueRednoteMetricPosts(
       FROM local_publish_jobs AS job
       WHERE job.status = 'reconciled'
         AND job.note_id IS NOT NULL
-        AND job.share_url IS NOT NULL
+        AND job.authenticated_account_id IS NOT NULL
+        AND job.authenticated_account_at IS NOT NULL
+        AND job.snapshot->>'expectedAccountId' = job.authenticated_account_id
         AND NOT EXISTS (
           SELECT 1
           FROM plan_operator_scheduled_posts AS manual
@@ -190,6 +198,9 @@ export async function claimDueRednoteMetricPosts(
         handling.notion_page_id,
         handling.note_id,
         handling.share_url,
+        'manual_operator'::text AS authenticated_account_id,
+        handling.published_at AS authenticated_account_at,
+        NULL::timestamptz AS xsec_accessible_at,
         handling.published_at
       FROM plan_operator_scheduled_posts AS handling
       WHERE handling.receipt_status = 'reconciled'
@@ -259,6 +270,9 @@ export async function claimDueRednoteMetricPosts(
       candidates.note_id,
       candidates.share_url,
       candidates.published_at,
+      candidates.authenticated_account_id,
+      candidates.authenticated_account_at,
+      candidates.xsec_accessible_at,
       claimed.claim_token,
       claimed.claim_expires_at,
       claimed.latest_metrics,
@@ -270,8 +284,15 @@ export async function claimDueRednoteMetricPosts(
   return result.rows.map((row) => ({
     notionPageId: row.notion_page_id,
     noteId: row.note_id,
-    shareUrl: row.share_url,
+    ...(row.share_url ? { shareUrl: row.share_url } : {}),
     publishedAt: iso(row.published_at),
+    authenticatedAccount: {
+      accountId: row.authenticated_account_id,
+      capturedAt: iso(row.authenticated_account_at),
+    },
+    ...(row.xsec_accessible_at
+      ? { xsecAccessibleAt: iso(row.xsec_accessible_at) }
+      : {}),
     claimToken: row.claim_token,
     claimExpiresAt: iso(row.claim_expires_at),
     ...(row.latest_metrics ? { previousMetrics: row.latest_metrics } : {}),

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const attempt = vi.hoisted(() => ({
   create: vi.fn(),
   get: vi.fn(),
+  recordOutcome: vi.fn(),
   supersede: vi.fn(),
   withSourceLock: vi.fn(async (
     _workspaceId: string,
@@ -17,12 +18,16 @@ vi.mock('@/lib/rednote-publishing-attempt-store', async (importOriginal) => {
     ...original,
     createRednotePublishAttempt: attempt.create,
     getLinkedRednotePublishAttempt: attempt.get,
+    recordLinkedAttemptOutcome: attempt.recordOutcome,
     supersedeUnclaimedReadyX3Schedule: attempt.supersede,
     withReadyX3SourceLock: attempt.withSourceLock,
   };
 });
 
-import { queueLocalPublishJob } from '@/lib/local-publish-jobs';
+import {
+  queueLocalPublishJob,
+  submitLocalPublishJobResult,
+} from '@/lib/local-publish-jobs';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
 import type { ReadyXhsPost } from '@/types/ready-post';
 
@@ -32,8 +37,10 @@ const future = '2099-08-04T13:30:00.000Z';
 const post: ReadyXhsPost = {
   id: pageId, pageUrl: 'https://notion.so/post', headline: 'Headline', caption: 'Caption',
   status: 'Ready', candidateKind: 'packet_ready', publishPacketReady: true, hasVideo: true,
-  needsMedia: false, needsCaption: false, mediaUrls: ['https://images.xhs.justlikekatie.com/post.mp4'],
-  imageUrls: [], videoUrls: ['https://images.xhs.justlikekatie.com/post.mp4'],
+  needsMedia: false, needsCaption: false,
+  mediaUrls: ['https://images.xhs.justlikekatie.com/videos/assets/post.mp4'],
+  imageUrls: [],
+  videoUrls: ['https://images.xhs.justlikekatie.com/videos/assets/post.mp4'],
   thumbnailUrl: 'https://images.xhs.justlikekatie.com/cover.jpg',
   tags: ['Tag'], publishAt: future, scheduledDate: null, lastEditedTime: '2099-08-01T12:00:00.000Z',
   automationBlockers: [], manualWarnings: [], publishBlockers: [],
@@ -47,13 +54,15 @@ const stored = {
   snapshot: { notionPageId: pageId, headline: 'Headline', title: 'Title', caption: 'Caption',
     tags: ['Tag'], platform: 'RedNote' as const, mediaType: 'video' as const, mediaIndex: 0,
     mediaUrl: post.videoUrls[0], thumbnailUrl: post.thumbnailUrl,
-    publishAt: future, notionLastEditedTime: post.lastEditedTime },
+    publishAt: future, notionLastEditedTime: post.lastEditedTime,
+    expectedAccountId: 'creator-account-1' },
   status: 'queued' as const, verificationAttempts: 0, createdAt: future, updatedAt: future,
 };
 
 describe('Ready x3 queue regression contract', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubEnv('REDNOTE_EXPECTED_ACCOUNT_ID', 'creator-account-1');
   });
 
   it('requires an exact future Ready x3 schedule before it writes work', async () => {
@@ -146,6 +155,73 @@ describe('Ready x3 queue regression contract', () => {
         insert: vi.fn(),
       },
     )).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+  });
+
+  it('preserves optional identity evidence and enters verification on schedule mismatch', async () => {
+    attempt.get.mockResolvedValue({
+      payload: {
+        expectedAccountId: stored.snapshot.expectedAccountId,
+        targetPublishAt: future,
+      },
+    });
+    attempt.recordOutcome.mockResolvedValue(undefined);
+    const recordScheduledAcknowledgement = vi.fn().mockResolvedValue({
+      ...stored,
+      status: 'verification_pending',
+      noteId: 'scheduled-note-1',
+      receiptOutcome: 'scheduled',
+      authenticatedAccountId: stored.snapshot.expectedAccountId,
+      errorCode: 'SCHEDULE_READBACK_MISMATCH',
+    });
+
+    await expect(submitLocalPublishJobResult(
+      stored.id,
+      '55555555-5555-4555-8555-555555555555',
+      {
+        contractVersion: 'rednote-worker-result/v2',
+        outcome: 'scheduled',
+        scheduledFor: '2099-08-04T13:31:00.000Z',
+        acknowledgedAt: '2099-08-01T12:00:00.000Z',
+        authenticatedAccount: {
+          accountId: stored.snapshot.expectedAccountId,
+          capturedAt: '2099-08-01T11:59:00.000Z',
+          ownership: 'owned',
+        },
+        noteId: 'scheduled-note-1',
+      },
+      'workspace-1',
+      {
+        stage: vi.fn(),
+        recordDispatch: vi.fn(),
+        deferVerification: vi.fn(),
+        fail: vi.fn(),
+        prepareVerification: vi.fn(),
+        completeReconciliation: vi.fn(),
+        backfill: vi.fn(),
+        recordScheduledAcknowledgement,
+      },
+    )).resolves.toMatchObject({
+      status: 'verification_pending',
+      noteId: 'scheduled-note-1',
+      errorCode: 'SCHEDULE_READBACK_MISMATCH',
+    });
+    expect(attempt.recordOutcome).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: 'outcome_unknown',
+      receipt: expect.objectContaining({
+        rednoteNoteId: 'scheduled-note-1',
+        platformPublishTime: '2099-08-01T12:00:00.000Z',
+      }),
+    }));
+    expect(recordScheduledAcknowledgement).toHaveBeenCalledWith(
+      stored.id,
+      '55555555-5555-4555-8555-555555555555',
+      expect.objectContaining({
+        noteId: 'scheduled-note-1',
+        accountId: stored.snapshot.expectedAccountId,
+      }),
+      'workspace-1',
+      false,
+    );
   });
 
   it('repairs a matching Ready x3 job when attempt creation previously failed', async () => {
