@@ -221,6 +221,7 @@ export interface FrozenRednoteMediaAsset {
 
 interface FrozenRednoteBrowserPayloadBase {
   sourcePostId: string;
+  expectedAccountId: string;
   title: string;
   caption: string;
   tags: readonly string[];
@@ -316,7 +317,7 @@ export interface RednoteAttemptEvent {
 
 export interface RednotePublishReceipt {
   attemptId: string;
-  rednoteUrl: string;
+  rednoteUrl?: string;
   rednoteNoteId: string;
   platformPublishTime: string;
   capturedAt: string;
@@ -327,7 +328,7 @@ export function hasAtomicPublishedIdentity(value: {
   rednoteUrl?: string | null;
   rednoteNoteId?: string | null;
 }): boolean {
-  return Boolean(value.rednoteUrl) === Boolean(value.rednoteNoteId);
+  return Boolean(value.rednoteNoteId);
 }
 
 export function assertPublishedInvariant(value: {
@@ -338,9 +339,9 @@ export function assertPublishedInvariant(value: {
   if (
     !hasAtomicPublishedIdentity(value) ||
     (value.publicationStatus === 'Published' &&
-      (!value.rednoteUrl || !value.rednoteNoteId))
+      !value.rednoteNoteId)
   ) {
-    throw new Error('Published requires Rednote URL and Rednote Note ID atomically');
+    throw new Error('Published requires a durable Rednote Note ID');
   }
 }
 

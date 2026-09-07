@@ -3,12 +3,16 @@ import { AsyncLocalStorage } from 'async_hooks';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { getPool } from '@/lib/db';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
-import { rednoteMediaIdentity } from '@/lib/rednote-publish-authorization';
+import {
+  rednotePublishMedia,
+  snapshotPublishMedia,
+} from '@/lib/rednote-publish-authorization';
 import type { ReadyX3Authorization } from '@/types/local-publish-job';
 import type { LocalPublishSnapshot } from '@/types/local-publish-job';
 import {
   REDNOTE_PUBLISHING_CONTRACT_REVISION,
   type FrozenRednoteAttemptPayload,
+  type FrozenRednoteBrowserPayload,
   type RednoteTerminalAttemptOutcome,
 } from '@/lib/rednote-publishing-contract-v1';
 import { readLocalPublishWorkerHeartbeat } from '@/lib/local-publish-worker-heartbeat';
@@ -40,6 +44,33 @@ interface AttemptRow extends QueryResultRow {
   dispatch_authorized_at: Date | string | null;
   authorization_kind?: 'ready_x3' | null;
   late_fallback_policy?: { action: 'schedule' | 'post_now'; maxLateMinutes: 30 } | null;
+}
+
+interface AttemptReceiptRow extends QueryResultRow {
+  rednote_url: string | null;
+  rednote_note_id: string;
+}
+
+async function assertAttemptReceiptMatches(
+  loadReceipt: () => Promise<{ rows: AttemptReceiptRow[] }>,
+  expected: { rednoteUrl?: string; rednoteNoteId: string },
+) {
+  const stored = (await loadReceipt()).rows[0];
+  if (
+    !stored
+    || stored.rednote_note_id !== expected.rednoteNoteId
+    || (
+      stored.rednote_url !== null
+      && expected.rednoteUrl !== undefined
+      && stored.rednote_url !== expected.rednoteUrl
+    )
+  ) {
+    throw new LocalPublishJobError(
+      'The submitted publication identity conflicts with the immutable attempt receipt',
+      'ATTEMPT_RECEIPT_CONFLICT',
+      409,
+    );
+  }
 }
 
 const readyX3SourceLockContext = new AsyncLocalStorage<string>();
@@ -80,6 +111,8 @@ function publicAttempt(row: AttemptRow) {
 function attemptReadyX3Authorization(row: AttemptRow): ReadyX3Authorization {
   const payload = row.frozen_payload;
   const media = payload.browserPayload.mediaAssets[0];
+  const contentMedia = payload.browserPayload.mediaAssets.map((item) =>
+    rednotePublishMedia(item.mediaType, item.deliveryUrl));
   const action = payload.browserPayload.timingMode === 'post_now'
     ? 'post_now' as const
     : 'schedule' as const;
@@ -99,7 +132,7 @@ function attemptReadyX3Authorization(row: AttemptRow): ReadyX3Authorization {
     action,
     packetRevision: row.payload_revision,
     packetDigest: row.payload_digest,
-    media: { url: media.deliveryUrl, type: media.mediaType, identity: rednoteMediaIdentity({ url: media.deliveryUrl, type: media.mediaType }) },
+    media: contentMedia,
     platform: 'RedNote',
     publishAt: new Date(payload.browserPayload.scheduledDate).toISOString(),
     authorizedAt: iso(row.approved_at)!,
@@ -120,6 +153,123 @@ function stable(value: unknown): string {
 
 export function frozenPayloadDigest(payload: FrozenRednoteAttemptPayload) {
   return createHash('sha256').update(stable(payload.browserPayload)).digest('hex');
+}
+
+export async function createLinkedRednotePublishAttempt(
+  snapshot: LocalPublishSnapshot,
+  idempotencyKey: string,
+  workspaceId: string,
+  localJobId: string,
+  readyX3Action?: 'schedule' | 'post_now',
+  createAttempt: typeof createRednotePublishAttempt = createRednotePublishAttempt,
+) {
+  if (!snapshot.expectedAccountId) {
+    throw new LocalPublishJobError(
+      'REDNOTE_EXPECTED_ACCOUNT_ID is required before creating an executable attempt',
+      'EXPECTED_ACCOUNT_NOT_CONFIGURED',
+      503,
+    );
+  }
+  const requestedAt = new Date().toISOString();
+  const timingMode = readyX3Action ??
+    (snapshot.publishAt ? 'schedule' as const : 'post_now' as const);
+  const commonBrowserPayload = {
+    sourcePostId: snapshot.notionPageId,
+    expectedAccountId: snapshot.expectedAccountId,
+    title: snapshot.title,
+    caption: snapshot.caption,
+    tags: snapshot.tags,
+    scheduledDate: snapshot.publishAt ?? null,
+    targetPublishAt: timingMode === 'post_now'
+      ? requestedAt
+      : snapshot.publishAt ?? requestedAt,
+    timingMode: timingMode === 'schedule' ? 'scheduled' as const : 'post_now' as const,
+    visibility: 'public' as const,
+  };
+  const media = snapshotPublishMedia(snapshot);
+  let browserPayload: FrozenRednoteBrowserPayload;
+  if (snapshot.mediaType === 'video') {
+    if (media.length !== 1 || media[0]?.type !== 'video') {
+      throw new LocalPublishJobError(
+        'Video publishing attempts require exactly one canonical video',
+        'INVALID_MEDIA',
+        409,
+      );
+    }
+    browserPayload = {
+      ...commonBrowserPayload,
+      publishMode: 'video',
+      mediaAssets: [{
+        assetId: 'video-0',
+        deliveryUrl: media[0].url,
+        sha256: createHash('sha256').update(media[0].url).digest('hex'),
+        mediaType: 'video',
+        role: 'content',
+      }],
+      ...(snapshot.thumbnailUrl
+        ? {
+            coverAsset: {
+              assetId: 'video-cover',
+              deliveryUrl: snapshot.thumbnailUrl,
+              sha256: createHash('sha256').update(snapshot.thumbnailUrl).digest('hex'),
+              mediaType: 'image' as const,
+              role: 'cover' as const,
+            },
+          }
+        : {}),
+    };
+  } else {
+    const imageAssets = media.map((item, index) => {
+      if (item.type !== 'image') {
+        throw new LocalPublishJobError(
+          'Image publishing attempts require only canonical images',
+          'INVALID_MEDIA',
+          409,
+        );
+      }
+      return {
+        assetId: `image-${index}`,
+        deliveryUrl: item.url,
+        sha256: createHash('sha256').update(item.url).digest('hex'),
+        mediaType: 'image' as const,
+        role: 'content' as const,
+      };
+    });
+    if (!imageAssets[0]) {
+      throw new LocalPublishJobError(
+        'Image publishing attempts require at least one canonical image',
+        'INVALID_MEDIA',
+        409,
+      );
+    }
+    browserPayload = {
+      ...commonBrowserPayload,
+      publishMode: 'image',
+      mediaAssets: [imageAssets[0], ...imageAssets.slice(1)],
+    };
+  }
+  const payload: FrozenRednoteAttemptPayload = {
+    contractRevision: REDNOTE_PUBLISHING_CONTRACT_REVISION,
+    sourceNotionPageId: snapshot.notionPageId,
+    sourceLocalPublishJobId: localJobId,
+    payloadRevision: snapshot.notionLastEditedTime,
+    payloadDigest: '',
+    requestedAt,
+    executor: {
+      type: 'worker' as const,
+      kind: 'playwright' as const,
+      id: 'local-publish-worker',
+    },
+    browserPayload,
+  };
+  payload.payloadDigest = frozenPayloadDigest(payload);
+  return createAttempt({
+    workspaceId,
+    idempotencyKey,
+    payload,
+    approve: Boolean(readyX3Action),
+    readyX3: Boolean(readyX3Action),
+  });
 }
 
 function validatePayload(payload: FrozenRednoteAttemptPayload) {
@@ -1024,14 +1174,82 @@ export async function requeueReadyX3ScheduleReadbackMismatch(input: {
 export async function recordLinkedAttemptOutcome(input: {
   workspaceId: string; localJobId: string; claimToken: string;
   outcome: RednoteTerminalAttemptOutcome;
-  receipt?: { rednoteUrl: string; rednoteNoteId: string; platformPublishTime: string; provenance: Record<string, unknown> };
+  receipt?: { rednoteUrl?: string; rednoteNoteId: string; platformPublishTime: string; provenance: Record<string, unknown> };
 }) {
   const found = await getPool().query<AttemptRow>(
     `SELECT * FROM rednote_publish_attempts WHERE workspace_id=$1
        AND source_local_publish_job_id=$2::uuid AND claim_token=$3::uuid`,
     [input.workspaceId, input.localJobId, input.claimToken],
   );
-  if (!found.rows[0]) throw new LocalPublishJobError('Linked attempt result is stale', 'STALE_ATTEMPT_RESULT', 409);
+  if (!found.rows[0]) {
+    const current = await getPool().query<AttemptRow>(
+      `SELECT attempt.*
+       FROM rednote_publish_attempts attempt
+       JOIN local_publish_jobs job
+         ON job.workspace_id=attempt.workspace_id
+        AND job.id=attempt.source_local_publish_job_id
+       WHERE attempt.workspace_id=$1
+         AND attempt.source_local_publish_job_id=$2::uuid
+         AND job.claim_token=$3::uuid
+         AND job.claim_expires_at>CURRENT_TIMESTAMP
+         AND (
+           attempt.terminal_outcome=$4
+           OR (
+             $4='accepted'
+             AND $5::boolean
+             AND attempt.terminal_outcome='outcome_unknown'
+           )
+         )
+       ORDER BY attempt.created_at DESC LIMIT 1`,
+      [
+        input.workspaceId,
+        input.localJobId,
+        input.claimToken,
+        input.outcome,
+        Boolean(input.receipt),
+      ],
+    );
+    const attempt = current.rows[0];
+    if (!attempt) {
+      throw new LocalPublishJobError(
+        'Linked attempt result is stale',
+        'STALE_ATTEMPT_RESULT',
+        409,
+      );
+    }
+    if (
+      input.outcome === 'accepted'
+      && input.receipt
+      && attempt.receipt_lookup_state !== 'found'
+    ) {
+      return resolveIdentityPendingReceipt({
+        workspaceId: input.workspaceId,
+        attemptId: attempt.id,
+        actorId: attempt.executor_id,
+        actorType: 'worker',
+        receipt: input.receipt,
+      });
+    }
+    if (input.outcome === 'accepted' && attempt.receipt_lookup_state === 'found') {
+      if (!input.receipt) {
+        throw new LocalPublishJobError(
+          'The linked attempt already has an acknowledged publication receipt',
+          'ATTEMPT_RECEIPT_CONFLICT',
+          409,
+        );
+      }
+      await assertAttemptReceiptMatches(
+        () => getPool().query<AttemptReceiptRow>(
+          `SELECT rednote_url, rednote_note_id
+           FROM rednote_publish_attempt_receipts
+           WHERE attempt_id=$1::uuid`,
+          [attempt.id],
+        ),
+        input.receipt,
+      );
+    }
+    return publicAttempt(attempt);
+  }
   return recordRednotePublishOutcome({
     workspaceId: input.workspaceId,
     attemptId: found.rows[0].id,
@@ -1044,14 +1262,14 @@ export async function recordLinkedAttemptOutcome(input: {
 export async function recordRednotePublishOutcome(input: {
   workspaceId: string; attemptId: string; claimToken: string;
   outcome: RednoteTerminalAttemptOutcome;
-  receipt?: { rednoteUrl: string; rednoteNoteId: string; platformPublishTime: string; provenance: Record<string, unknown> };
+  receipt?: { rednoteUrl?: string; rednoteNoteId: string; platformPublishTime: string; provenance: Record<string, unknown> };
 }) {
   if (input.outcome === 'accepted' && input.receipt &&
-      (!input.receipt.rednoteUrl || !input.receipt.rednoteNoteId)) {
-    throw new LocalPublishJobError('Receipt URL and Note ID must be recorded atomically', 'INVALID_RECEIPT', 400);
+      !input.receipt.rednoteNoteId) {
+    throw new LocalPublishJobError('Receipt Note ID is required', 'INVALID_RECEIPT', 400);
   }
   return transaction(async (client) => {
-    const state = input.outcome === 'accepted'
+    const state = input.outcome === 'accepted' || input.outcome === 'outcome_unknown'
       ? (input.receipt ? 'found' : 'identity_pending')
       : 'not_required';
     const result = await client.query<AttemptRow>(
@@ -1068,7 +1286,27 @@ export async function recordRednotePublishOutcome(input: {
         'SELECT * FROM rednote_publish_attempts WHERE workspace_id=$1 AND id=$2::uuid',
         [input.workspaceId, input.attemptId],
       );
-      if (current.rows[0]?.terminal_outcome === input.outcome) return publicAttempt(current.rows[0]);
+      if (current.rows[0]?.terminal_outcome === input.outcome) {
+        if (current.rows[0].receipt_lookup_state === 'found') {
+          if (!input.receipt) {
+            throw new LocalPublishJobError(
+              'The publishing attempt already has a publication receipt',
+              'ATTEMPT_RECEIPT_CONFLICT',
+              409,
+            );
+          }
+          await assertAttemptReceiptMatches(
+            () => client.query<AttemptReceiptRow>(
+              `SELECT rednote_url, rednote_note_id
+               FROM rednote_publish_attempt_receipts
+               WHERE attempt_id=$1::uuid`,
+              [input.attemptId],
+            ),
+            input.receipt,
+          );
+        }
+        return publicAttempt(current.rows[0]);
+      }
       throw new LocalPublishJobError('Attempt result is stale or conflicts with its terminal outcome', 'STALE_ATTEMPT_RESULT', 409);
     }
     if (input.receipt) {
@@ -1078,6 +1316,15 @@ export async function recordRednotePublishOutcome(input: {
         ) VALUES($1,$2,$3,$4,$5::jsonb) ON CONFLICT(attempt_id) DO NOTHING`,
         [input.attemptId, input.receipt.rednoteUrl, input.receipt.rednoteNoteId,
           input.receipt.platformPublishTime, JSON.stringify(input.receipt.provenance)],
+      );
+      await assertAttemptReceiptMatches(
+        () => client.query<AttemptReceiptRow>(
+          `SELECT rednote_url, rednote_note_id
+           FROM rednote_publish_attempt_receipts
+           WHERE attempt_id=$1::uuid`,
+          [input.attemptId],
+        ),
+        input.receipt,
       );
     }
     await client.query(
@@ -1091,14 +1338,16 @@ export async function recordRednotePublishOutcome(input: {
 
 export async function resolveIdentityPendingReceipt(input: {
   workspaceId: string; attemptId: string; actorId: string;
-  receipt?: { rednoteUrl: string; rednoteNoteId: string; platformPublishTime: string; provenance: Record<string, unknown> };
+  actorType?: 'operator' | 'worker';
+  receipt?: { rednoteUrl?: string; rednoteNoteId: string; platformPublishTime: string; provenance: Record<string, unknown> };
 }) {
   return transaction(async (client) => {
     const state = input.receipt ? 'found' : 'not_found';
     const result = await client.query<AttemptRow>(
       `UPDATE rednote_publish_attempts SET receipt_lookup_state=$3,
        receipt_lookup_updated_at=CURRENT_TIMESTAMP
-       WHERE workspace_id=$1 AND id=$2::uuid AND terminal_outcome='accepted'
+       WHERE workspace_id=$1 AND id=$2::uuid
+         AND terminal_outcome IN ('accepted','outcome_unknown')
          AND receipt_lookup_state IN ('identity_pending','not_found') AND NOT active RETURNING *`,
       [input.workspaceId, input.attemptId, state],
     );
@@ -1111,11 +1360,21 @@ export async function resolveIdentityPendingReceipt(input: {
         [input.attemptId, input.receipt.rednoteUrl, input.receipt.rednoteNoteId,
           input.receipt.platformPublishTime, JSON.stringify(input.receipt.provenance)],
       );
+      await assertAttemptReceiptMatches(
+        () => client.query<AttemptReceiptRow>(
+          `SELECT rednote_url, rednote_note_id
+           FROM rednote_publish_attempt_receipts
+           WHERE attempt_id=$1::uuid`,
+          [input.attemptId],
+        ),
+        input.receipt,
+      );
     }
+
     await client.query(
       `INSERT INTO rednote_publish_attempt_events(attempt_id,event_type,occurred_at,actor_type,actor_id)
-       VALUES($1,'receipt_lookup',CURRENT_TIMESTAMP,'operator',$2)`,
-      [input.attemptId, input.actorId],
+       VALUES($1,'receipt_lookup',CURRENT_TIMESTAMP,$2,$3)`,
+      [input.attemptId, input.actorType ?? 'operator', input.actorId],
     );
     return publicAttempt(result.rows[0]);
   });

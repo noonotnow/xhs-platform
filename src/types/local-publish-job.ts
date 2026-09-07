@@ -13,6 +13,50 @@ export type LocalPublishJobStatus =
   | 'reconciled'
   | 'failed';
 
+export const REDNOTE_WORKER_RESULT_CONTRACT_VERSION =
+  'rednote-worker-result/v2' as const;
+export const REDNOTE_EVIDENCE_CONTRACT_VERSION =
+  'rednote-evidence/v1' as const;
+
+export type RednoteWorkerResultOutcome =
+  | 'acknowledged'
+  | 'scheduled'
+  | 'ambiguous'
+  | 'rejected';
+
+export interface AuthenticatedAccountEvidence {
+  accountId: string;
+  capturedAt: string;
+  ownership: 'owned' | 'account_mismatch';
+}
+
+export interface XsecAccessEvidence {
+  capturedAt: string;
+  accessible: true;
+}
+
+export interface PublicIndexEvidence {
+  checkedAt: string;
+  status: 'indexed' | 'pending' | 'not_found';
+  publicUrl?: string;
+}
+
+export interface PublishMedia {
+  identity: string;
+  type: LocalPublishMediaType;
+  url: string;
+}
+
+export interface RednotePublicationEvidenceSummary {
+  authenticatedAccount?: AuthenticatedAccountEvidence;
+  xsecAccess?: XsecAccessEvidence;
+  publicIndex?: PublicIndexEvidence;
+  restriction?: {
+    reportedAt: string;
+    status: 'removed' | 'restricted';
+  };
+}
+
 export interface LocalPublishSnapshot {
   notionPageId: string;
   headline: string;
@@ -23,11 +67,14 @@ export interface LocalPublishSnapshot {
   mediaType: LocalPublishMediaType;
   mediaIndex: number;
   mediaUrl: string;
+  /** Ordered immutable media list; absent only on pre-v2 stored snapshots. */
+  media?: PublishMedia[];
   compatibilityTrial?: LocalPublishCompatibilityTrial;
   thumbnailUrl?: string;
   publishAt?: string;
   automationConsent?: 'ready_x3';
   notionLastEditedTime: string;
+  expectedAccountId?: string;
 }
 
 export interface LocalPublishJobSummary {
@@ -52,6 +99,10 @@ export interface LocalPublishJobSummary {
   reconciledAt?: string;
   completedAt?: string;
   successAttestation?: OperatorSuccessAttestationSummary;
+  receiptContractVersion?: typeof REDNOTE_WORKER_RESULT_CONTRACT_VERSION;
+  receiptOutcome?: RednoteWorkerResultOutcome;
+  receiptAcknowledgedAt?: string;
+  evidence?: RednotePublicationEvidenceSummary;
 }
 
 export interface BatchAuthorization {
@@ -61,11 +112,7 @@ export interface BatchAuthorization {
   snapshotRevision: string;
   approvedState: 'approved';
   approvedAt: string;
-  media: {
-    url: string;
-    type: LocalPublishMediaType;
-    identity: string;
-  };
+  media: PublishMedia[];
   publishAt: string;
   lateAction: 'schedule' | 'post_now';
 }
@@ -76,11 +123,7 @@ export interface ReadyX3Authorization {
   action: 'schedule' | 'post_now';
   packetRevision: string;
   packetDigest: string;
-  media: {
-    url: string;
-    type: LocalPublishMediaType;
-    identity: string;
-  };
+  media: PublishMedia[];
   platform: 'RedNote';
   publishAt: string;
   authorizedAt: string;
@@ -91,10 +134,15 @@ export interface ReadyX3Authorization {
 }
 
 interface ClaimedLocalPublishJobBase
-  extends Omit<LocalPublishSnapshot, 'notionLastEditedTime'> {
+  extends Omit<
+    LocalPublishSnapshot,
+    'notionLastEditedTime' | 'media' | 'expectedAccountId'
+  > {
   id: string;
   claimToken: string;
   claimExpiresAt: string;
+  media: PublishMedia[];
+  expectedAccountId: string;
   /** Revision of the exact Notion packet frozen into this claim. */
   notionLastEditedTime: string;
   batchAuthorization?: BatchAuthorization;
@@ -235,8 +283,8 @@ export type ClaimedLocalPublishJob =
   | (ClaimedLocalPublishJobBase & { status: 'claimed' | 'staged' })
   | (ClaimedLocalPublishJobBase & {
       status: 'submitted' | 'scheduled' | 'verification_pending';
-      noteId: string;
-      shareUrl: string;
+      noteId?: string;
+      shareUrl?: string;
       verificationAttempts: number;
       nextVerificationAt: string;
     })
@@ -249,7 +297,7 @@ export type ClaimedLocalPublishJob =
   | (ClaimedLocalPublishJobBase & {
       status: 'verified';
       noteId: string;
-      shareUrl: string;
+      shareUrl?: string;
       verificationAttempts: number;
     });
 

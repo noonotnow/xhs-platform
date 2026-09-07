@@ -242,21 +242,28 @@ previous worker can no longer report a result. Verification retries default to
 15 minutes, 1 hour, 6 hours, and 24 hours; set exactly four comma-separated
 values in `LOCAL_PUBLISH_VERIFICATION_BACKOFF_SECONDS` to override them.
 
-The local worker contract is:
+The legacy Playwright worker contract remains accepted during migration:
 
 1. `GET /api/local-publish-jobs/next` with
    `Authorization: Bearer <LOCAL_PUBLISH_WORKER_TOKEN>`. HTTP 204 means the queue
    is empty. A claim returns `id`, `notionPageId`, `headline`, `title`, `caption`,
-   `tags`, `platform`, `mediaType`, `mediaUrl`, optional `thumbnailUrl`, optional
-   canonical UTC `publishAt`, `claimToken`, `claimExpiresAt`,
-   and `status`. Unscheduled records can never enter a batch. An
+   `tags`, `platform`, ordered canonical `media`, compatibility projections
+   `mediaType` and `mediaUrl`, optional `thumbnailUrl`, optional canonical UTC
+   `publishAt`, required frozen `expectedAccountId`, `claimToken`,
+   `claimExpiresAt`, and `status`. `media` contains 1–18 immutable
+   `{identity,type,url}` entries, uses exactly one entry for video, and has one
+   media type throughout. `media[0]` exactly matches `mediaType` and `mediaUrl`;
+   each `identity` is lowercase SHA-256 of `JSON.stringify({type,url})`.
+   Image jobs put the operator-selected image first and retain all other
+   canonical image URLs in source order. Unscheduled records can never enter a batch. An
    unverified MOV trial additionally
    returns `"compatibilityTrial":"unverified_mov"`; normal jobs omit this field.
 2. Only batch-approved claims include `batchAuthorization`:
    `{"batchId","manifestHash","itemHash","snapshotRevision",
-   "approvedState":"approved","approvedAt","media":{"url","type","identity"},
+   "approvedState":"approved","approvedAt","media":[{"url","type","identity"}],
    "publishAt","lateAction"}`. Hashes and `media.identity` are lowercase SHA-256;
-   the identity hashes canonical JSON `{type,url}`. `publishAt` always retains the
+   the ordered authorization `media` array must exactly equal the claim array.
+   `publishAt` always retains the
    original exact canonical UTC minute. `lateAction:"post_now"` authorizes immediate
    submission only when the approved preview recorded lateness of at most 24 hours;
    `"schedule"` uses `publishAt`. Legacy claims omit `batchAuthorization` and retain
@@ -274,25 +281,26 @@ The local worker contract is:
    and reviewed copy at `https://creator.rednote.com`, report `staged`, then submit
    or schedule only after the required approval and second authorization check.
    A valid bounded batch is that approval; a legacy claim still requires exact
-   `PUBLISH <jobId>`. Capture the stable note ID and URL from authenticated Creator.
+   `PUBLISH <jobId>`. Capture the durable note ID and authenticated account
+   ownership from Creator. A clean public URL is optional derived metadata.
    For `unverified_mov`, a Creator staging rejection must be reported as failed
    without clicking Publish. If staging succeeds, the worker must still wait for
    the existing exact `PUBLISH <jobId>` human approval before any Publish click;
    it must never auto-publish.
 5. A claim with `status` `submitted`, `scheduled`, or `verification_pending`
-   is verification-only work and includes durable `noteId`, `shareUrl`,
+   is verification-only work and can include durable `noteId`, optional `shareUrl`,
    `verificationAttempts`, and `nextVerificationAt`. Never click Publish for
-   these states. Query-free public error `300031`, processing, indexing delay, or
-   any other post-dispatch uncertainty must be reported as
-   `verification_pending`, not failed. A scheduled job's first check is anchored
+   these states. Processing or any other post-dispatch uncertainty must be
+   reported as `verification_pending`, not failed. Public indexing delay is
+   informational and never reopens Published. A scheduled job's first check is anchored
    after its frozen `publishAt`; an immediate submission's first check starts
    after the initial 15-minute delay.
 6. A claim with `status` `verified` is reconciliation-only work. It includes the
-   durable identifiers and must be re-reported as `verified` without dispatching
+   durable note ID and must be re-reported as `verified` without dispatching
    or creating another post. This makes a Notion outage recoverable even after
    the original worker exits.
 7. `POST /api/local-publish-jobs/{id}/result` with the bearer token and
-   `X-Local-Publish-Claim-Token: <claimToken>`. Accepted bodies are:
+   `X-Local-Publish-Claim-Token: <claimToken>`. Legacy accepted bodies are:
    - `{"status":"staged"}`
    - `{"status":"submitted","noteId":"...","shareUrl":"https://www.rednote.com/explore/..."}`
    - `{"status":"scheduled","noteId":"...","shareUrl":"https://www.rednote.com/explore/..."}`
@@ -302,26 +310,65 @@ The local worker contract is:
    - `{"status":"failed","code":"SAFE_CODE","message":"Safe operator message"}`,
      only before dispatch while the durable state is `claimed` or `staged`.
 
-The lifecycle is `queued -> claimed -> staged -> submitted|scheduled ->
-verification_pending -> verified -> reconciled`; an immediate `submitted`
-receipt advances through `verified` and reconciliation in the same request,
-while `scheduled` cannot do so until a later `verified` receipt. A verified
-result may skip intermediate reporting but is always persisted before
-reconciliation. Matching query parameters, fragments, a trailing slash, and the official
-`www.xiaohongshu.com` host are normalized to the canonical query-free
-`www.rednote.com` URL; unsupported hosts remain invalid.
-Reconciliation updates only the frozen job's `notionPageId`, setting the
-published identity, readiness flags, `Published At` when mapped, and the
-established published `Next action`, without changing `ScheduledDate`. Only a
-successful Notion backfill advances the job to `reconciled`. If backfill fails,
-the row remains `verified` and is reclaimable for idempotent reconciliation.
-Legacy worker bodies `status:"published"` and `status:"succeeded"` remain
-accepted aliases during rollout. An ambiguous Creator acceptance is not a live
-receipt: scheduled work must report `scheduled` and cannot reconcile until a
-later explicit live result.
-`metrics_available` is a later sync concern and is not a publication-verification
-state. An immediate `submitted` receipt is durable publication evidence and
-enters reconciliation immediately; it is never returned as dispatch work.
+The authoritative worker response is `rednote-worker-result/v2`:
+
+```json
+{
+  "contractVersion": "rednote-worker-result/v2",
+  "outcome": "acknowledged",
+  "noteId": "durable-note-id",
+  "acknowledgedAt": "2026-08-01T12:00:00Z",
+  "authenticatedAccount": {
+    "accountId": "creator-account-id",
+    "capturedAt": "2026-08-01T12:00:01Z",
+    "ownership": "owned"
+  },
+  "xsecAccess": {
+    "accessible": true,
+    "capturedAt": "2026-08-01T12:00:02Z"
+  },
+  "publicIndex": {
+    "status": "pending",
+    "checkedAt": "2026-08-01T12:00:03Z"
+  }
+}
+```
+
+`xsecAccess` and `publicIndex` are optional. The other result shapes are:
+
+```json
+{"contractVersion":"rednote-worker-result/v2","outcome":"scheduled","acknowledgedAt":"2026-08-01T12:00:00Z","scheduledFor":"2026-08-02T12:00:00Z","authenticatedAccount":{"accountId":"creator-account-id","capturedAt":"2026-08-01T12:00:01Z","ownership":"owned"},"noteId":"optional-durable-note-id"}
+{"contractVersion":"rednote-worker-result/v2","outcome":"ambiguous","code":"POST_CLICK_TIMEOUT","message":"Publication outcome is unknown","occurredAt":"2026-08-01T12:00:00Z"}
+{"contractVersion":"rednote-worker-result/v2","outcome":"rejected","code":"UPSTREAM_REJECTED","message":"RedNote rejected publication","occurredAt":"2026-08-01T12:00:00Z"}
+```
+
+`scheduled` requires authenticated-account evidence; `noteId` is optional when
+RedNote exposes it at scheduling time. `scheduledFor` must match the frozen
+`browserPayload.targetPublishAt` instant. A mismatched schedule readback or
+authenticated account enters receipt verification and never permits an
+automatic republish.
+
+`noteId` is the durable publication identity. Matching authenticated-account
+ownership plus `noteId` can mark the canonical Notion row Published without a
+public URL. A query-free `/explore/{noteId}` URL is optional derived metadata.
+Current xsec reachability and public indexing are renewable, timestamped
+evidence; indexing never blocks or reopens Published.
+
+`scheduled` and `ambiguous` close dispatch and enter Verify receipt. Ambiguous
+work is never automatically republished. `rejected` is a known failure and any
+later attempt must pass the normal approval path. Only successful Notion
+backfill advances a verified job to `reconciled`; a backfill failure remains
+reclaimable for idempotent reconciliation.
+
+The read-only adapter records renewable evidence through
+`GET|POST /api/rednote-publications/{noteId}/evidence`. POST accepts one
+strict `rednote-evidence/v1` body, scoped by the required `X-Workspace-ID`
+header, with kind
+`authenticated_account`, `xsec_access`, `public_index`, or
+`removed_restricted`. Never send `xsecToken`, cookies, authorization headers, or
+other credentials; unknown fields are rejected and tokens are not persisted.
+See `docs/REDNOTE_PUBLISHING_CONTRACT_V1.md` for exact evidence bodies and the
+account-mismatch reconciliation procedure.
 
 #### Operator-attested scheduled success
 
@@ -657,8 +704,12 @@ Metrics use a separate bounded batch because they are read-only collection work:
    {
      "notionPageId": "canonical-post-page-id",
      "noteId": "rednote-id",
-     "shareUrl": "https://www.rednote.com/explore/rednote-id",
      "publishedAt": "2026-08-01T12:00:00.000Z",
+     "authenticatedAccount": {
+       "accountId": "creator-account-id",
+       "capturedAt": "2026-08-01T12:00:01.000Z"
+     },
+     "xsecAccessibleAt": "2026-08-02T11:00:00.000Z",
      "claimToken": "11111111-1111-4111-8111-111111111111",
      "claimExpiresAt": "2026-08-02T12:30:00.000Z",
      "previousMetrics": {
@@ -724,7 +775,8 @@ legacy `ambiguous` rows to `verified`, and maps legacy `succeeded` rows to
 `reconciled`. The worker must consume the frozen snapshot and must never read
 Notion.
 
-Posts created outside this queue can be reconciled by the same trusted worker:
+The legacy manual/public-URL recovery path for posts created outside this queue
+remains available:
 
 1. Verify the live post and send `POST /api/local-publish-jobs/reconcile-external`
    with the bearer token, a UUID `Idempotency-Key`, and exactly
@@ -735,7 +787,9 @@ Posts created outside this queue can be reconciled by the same trusted worker:
    first, then exact `Rednote URL`. Conflicting or duplicate matches fail safely.
    A match is updated; a missing canonical target fails closed rather than
    creating a CREATE-owned row.
-4. Only a successful reconciliation with both stable identifiers writes
+4. This legacy path requires both identifiers because its operator-supplied URL
+   is the evidence source. Normal v2 worker acknowledgement does not. A
+   successful legacy reconciliation writes
    `Publication Status=Published`,
    `Publication Next Step=Backfill metrics`, the verified note ID and URL, and
    `Published At`. It never rewrites production status/actions, copy, media,

@@ -24,7 +24,6 @@ import {
   normalizeRednoteShareUrl,
 } from '@/lib/rednote-publication';
 import type {
-  PublishReadyPostResponse,
   ReadyPostCandidateKind,
   ReadyXhsPost,
   XhsPost,
@@ -753,13 +752,15 @@ function buildVerifiedPublicationProperties(
   schema: ResolvedSchema,
   duplicates: Partial<Record<CanonicalProperty, string[]>>,
   schemaProperties: PropertyMap,
-  result: Pick<PublishReadyPostResponse, 'noteId' | 'shareUrl'>,
+  result: { noteId: string; shareUrl?: string },
   publishedAt: string,
 ) {
-  const shareUrl = normalizeRednoteShareUrl(result.noteId, result.shareUrl);
-  if (!isRednoteNoteId(result.noteId) || !shareUrl) {
+  const shareUrl = result.shareUrl
+    ? normalizeRednoteShareUrl(result.noteId, result.shareUrl)
+    : undefined;
+  if (!isRednoteNoteId(result.noteId) || (result.shareUrl && !shareUrl)) {
     throw new NotionPostsError(
-      'The publication result does not contain both stable RedNote identifiers',
+      'The publication result does not contain a valid RedNote Note ID',
       'INVALID_SUCCESS_RESULT',
       400,
     );
@@ -777,7 +778,6 @@ function buildVerifiedPublicationProperties(
     true,
   );
   const noteIdName = assertWritable(schema, duplicates, 'xhsNoteId', true);
-  const shareUrlName = assertWritable(schema, duplicates, 'xhsShareUrl', true);
   const properties: PropertyUpdates = {
     [publicationStatusName]: textUpdate(
       schemaProperties[publicationStatusName].type,
@@ -799,11 +799,14 @@ function buildVerifiedPublicationProperties(
       schemaProperties[noteIdName].type,
       result.noteId,
     ),
-    [shareUrlName]: textUpdate(
+  };
+  if (shareUrl) {
+    const shareUrlName = assertWritable(schema, duplicates, 'xhsShareUrl', true);
+    properties[shareUrlName] = textUpdate(
       schemaProperties[shareUrlName].type,
       shareUrl,
-    ),
-  };
+    );
+  }
   const publishedAtName = assertWritable(
     schema,
     duplicates,
@@ -824,7 +827,7 @@ export function buildPublishedProperties(
   schema: ResolvedSchema,
   duplicates: Partial<Record<CanonicalProperty, string[]>>,
   schemaProperties: PropertyMap,
-  result: PublishReadyPostResponse,
+  result: { status: 'success'; noteId: string; shareUrl?: string },
   publishedAt: string,
 ) {
   void page;
@@ -841,10 +844,14 @@ export function publishedResultState(
   page: PageObjectResponse,
   schema: ResolvedSchema,
   duplicates: Partial<Record<CanonicalProperty, string[]>>,
-  result: PublishReadyPostResponse,
+  result: { status: 'success'; noteId: string; shareUrl?: string },
 ) {
-  const shareUrl = normalizeRednoteShareUrl(result.noteId, result.shareUrl);
-  if (!shareUrl) return 'conflict' as const;
+  const shareUrl = result.shareUrl
+    ? normalizeRednoteShareUrl(result.noteId, result.shareUrl)
+    : undefined;
+  if (!isRednoteNoteId(result.noteId) || (result.shareUrl && !shareUrl)) {
+    return 'conflict' as const;
+  }
   const storedShareUrl = plainText(property(page, schema, 'xhsShareUrl'));
   const normalizedStoredShareUrl = normalizeRednoteShareUrl(
     result.noteId,
@@ -855,12 +862,13 @@ export function publishedResultState(
     ? plainText(page.properties[noteIdName]).trim()
     : '';
   if (
-    (storedShareUrl && normalizedStoredShareUrl !== shareUrl) ||
+    (storedShareUrl && !normalizedStoredShareUrl) ||
+    (shareUrl && storedShareUrl && normalizedStoredShareUrl !== shareUrl) ||
     (storedNoteId && storedNoteId !== result.noteId)
   ) {
     return 'conflict' as const;
   }
-  if (!storedShareUrl || !storedNoteId) return 'unpublished' as const;
+  if (!storedNoteId) return 'unpublished' as const;
   const status = normalized(
     plainText(property(page, schema, 'publicationStatus')),
   );
@@ -872,7 +880,7 @@ export function publishedResultState(
   const nextStep = normalized(
     plainText(property(page, schema, 'publicationNextStep')),
   );
-  const canonicalUrlMatches = storedShareUrl === shareUrl;
+  const canonicalUrlMatches = !shareUrl || storedShareUrl === shareUrl;
   return canonicalUrlMatches &&
       status === 'published' &&
       nextStep === 'backfill metrics' &&
@@ -889,14 +897,14 @@ export function buildPublicationAwaitingReceiptProperties(
 ) {
   const storedShareUrl = plainText(property(page, schema, 'xhsShareUrl')).trim();
   const storedNoteId = plainText(property(page, schema, 'xhsNoteId')).trim();
-  if (Boolean(storedShareUrl) !== Boolean(storedNoteId)) {
+  if (storedShareUrl && !storedNoteId) {
     throw new NotionPostsError(
       'The canonical post has a partial RedNote identity and requires operator reconciliation',
       'NOTION_PUBLISH_CONFLICT',
       409,
     );
   }
-  if (storedShareUrl && storedNoteId) {
+  if (storedNoteId) {
     const status = normalized(
       plainText(property(page, schema, 'publicationStatus')),
     );
@@ -977,7 +985,7 @@ export async function markXhsPostAwaitingReceipt(pageId: string) {
 
 export async function markXhsPostPublished(
   pageId: string,
-  result: PublishReadyPostResponse,
+  result: { status: 'success'; noteId: string; shareUrl?: string },
   publishedAt = new Date().toISOString(),
 ) {
   assertPageId(pageId);

@@ -20,13 +20,18 @@ import {
   listPublishOwningLocalJobs,
   normalizeStoredLocalPublishSnapshot,
   prepareStoredLocalPublishVerification,
+  recordStoredAcknowledgedPublication,
+  recordStoredAmbiguousOutcome,
   recordStoredLocalPublishDispatch,
+  recordStoredRejectedOutcome,
+  recordStoredScheduledAcknowledgement,
   releaseExpiredStoredLocalPublishClaims,
   stageStoredLocalPublishJob,
 } from '@/lib/local-publish-job-store';
 import type { LocalPublishSnapshot } from '@/types/local-publish-job';
 
 const snapshot: LocalPublishSnapshot = {
+  expectedAccountId: 'creator-account-1',
   notionPageId: '11111111-1111-4111-8111-111111111111',
   headline: 'Headline',
   title: 'Title',
@@ -60,6 +65,205 @@ describe('publish ownership lookup', () => {
         expect.objectContaining({ id: 'active', status: 'scheduled' }),
         expect.objectContaining({ id: 'dispatch-authorized-failure', status: 'failed' }),
       ]);
+  });
+});
+
+describe('worker result v2 storage', () => {
+  beforeEach(() => mocks.sql.mockReset());
+
+  it('accepts an acknowledged Note ID without a public URL', async () => {
+    mocks.sql.mockResolvedValue({
+      rows: [{
+        ...claimedRow(),
+        status: 'verified',
+        note_id: 'note_123',
+        receipt_contract_version: 'rednote-worker-result/v2',
+        receipt_outcome: 'acknowledged',
+        receipt_acknowledged_at: '2026-08-01T12:00:00Z',
+        authenticated_account_id: 'creator-account-1',
+        authenticated_account_at: '2026-08-01T12:00:01Z',
+      }],
+      rowCount: 1,
+    });
+    await expect(recordStoredAcknowledgedPublication(
+      claimedRow().id,
+      claimedRow().claim_token,
+      {
+        noteId: 'note_123',
+        acknowledgedAt: '2026-08-01T12:00:00Z',
+        accountId: 'creator-account-1',
+        accountCapturedAt: '2026-08-01T12:00:01Z',
+        ownership: 'owned',
+      },
+    )).resolves.toMatchObject({
+      status: 'verified',
+      noteId: 'note_123',
+      authenticatedAccountId: 'creator-account-1',
+    });
+    const query = (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
+    expect(query).toContain("THEN 'verified'");
+    expect(query).toContain("'authenticated_account'");
+    expect(query).toContain("'scheduled'");
+    expect(query).toContain("'verification_pending'");
+  });
+
+  it('stores scheduled and ambiguous outcomes as verification-only work', async () => {
+    mocks.sql
+      .mockResolvedValueOnce({
+        rows: [{
+          ...claimedRow(),
+          status: 'scheduled',
+          receipt_contract_version: 'rednote-worker-result/v2',
+          receipt_outcome: 'scheduled',
+          receipt_acknowledged_at: '2026-08-01T12:00:00Z',
+          next_verification_at: '2026-08-02T12:15:00Z',
+        }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          ...claimedRow(),
+          status: 'verification_pending',
+          receipt_contract_version: 'rednote-worker-result/v2',
+          receipt_outcome: 'ambiguous',
+          error_code: 'POST_CLICK_TIMEOUT',
+          error_message: 'Publication outcome is unknown',
+          next_verification_at: '2026-08-01T12:15:00Z',
+        }],
+        rowCount: 1,
+      });
+    await expect(recordStoredScheduledAcknowledgement(
+      claimedRow().id,
+      claimedRow().claim_token,
+      {
+        acknowledgedAt: '2026-08-01T12:00:00Z',
+        scheduledFor: '2026-08-02T12:00:00Z',
+        accountId: snapshot.expectedAccountId!,
+        accountCapturedAt: '2026-08-01T11:59:00Z',
+        ownership: 'owned',
+      },
+    )).resolves.toMatchObject({ status: 'scheduled', receiptOutcome: 'scheduled' });
+    await expect(recordStoredAmbiguousOutcome(
+      claimedRow().id,
+      claimedRow().claim_token,
+      '2026-08-01T12:00:00Z',
+      'POST_CLICK_TIMEOUT',
+      'Publication outcome is unknown',
+    )).resolves.toMatchObject({
+      status: 'verification_pending',
+      receiptOutcome: 'ambiguous',
+    });
+    const ambiguousQuery =
+      (mocks.sql.mock.calls[1][0] as TemplateStringsArray).join('?');
+    expect(ambiguousQuery).toContain("status = 'verification_pending'");
+    expect(ambiguousQuery).not.toContain("status = 'queued'");
+  });
+
+  it('quarantines a scheduled account mismatch while preserving its optional note ID', async () => {
+    mocks.sql.mockResolvedValueOnce({
+      rows: [{
+        ...claimedRow(),
+        status: 'verification_pending',
+        note_id: 'scheduled_note_123',
+        receipt_contract_version: 'rednote-worker-result/v2',
+        receipt_outcome: 'scheduled',
+        receipt_acknowledged_at: '2026-08-01T12:00:00Z',
+        authenticated_account_id: 'wrong-account',
+        authenticated_account_at: '2026-08-01T11:59:00Z',
+        error_code: 'ACCOUNT_MISMATCH',
+        error_message:
+          'Authenticated Creator account does not match the frozen expectedAccountId',
+      }],
+      rowCount: 1,
+    });
+
+    await expect(recordStoredScheduledAcknowledgement(
+      claimedRow().id,
+      claimedRow().claim_token,
+      {
+        acknowledgedAt: '2026-08-01T12:00:00Z',
+        scheduledFor: '2026-08-02T12:00:00Z',
+        accountId: 'wrong-account',
+        accountCapturedAt: '2026-08-01T11:59:00Z',
+        ownership: 'owned',
+        noteId: 'scheduled_note_123',
+      },
+    )).resolves.toMatchObject({
+      status: 'verification_pending',
+      noteId: 'scheduled_note_123',
+      receiptOutcome: 'scheduled',
+      authenticatedAccountId: 'wrong-account',
+      errorCode: 'ACCOUNT_MISMATCH',
+    });
+    const query = (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
+    expect(query).toContain("'account_mismatch'");
+    expect(query).toContain("ELSE 'verification_pending'");
+    expect(query).not.toContain("status = 'queued'");
+  });
+
+  it('preserves a scheduled note ID and account evidence after a schedule mismatch', async () => {
+    mocks.sql.mockResolvedValueOnce({
+      rows: [{
+        ...claimedRow(),
+        status: 'verification_pending',
+        note_id: 'scheduled_note_456',
+        receipt_contract_version: 'rednote-worker-result/v2',
+        receipt_outcome: 'scheduled',
+        receipt_acknowledged_at: '2026-08-01T12:00:00Z',
+        authenticated_account_id: snapshot.expectedAccountId,
+        authenticated_account_at: '2026-08-01T11:59:00Z',
+        error_code: 'SCHEDULE_READBACK_MISMATCH',
+        error_message:
+          'RedNote scheduled the post for a different time than the frozen publishing packet',
+      }],
+      rowCount: 1,
+    });
+
+    await expect(recordStoredScheduledAcknowledgement(
+      claimedRow().id,
+      claimedRow().claim_token,
+      {
+        acknowledgedAt: '2026-08-01T12:00:00Z',
+        scheduledFor: '2026-08-02T12:30:00Z',
+        accountId: snapshot.expectedAccountId!,
+        accountCapturedAt: '2026-08-01T11:59:00Z',
+        ownership: 'owned',
+        noteId: 'scheduled_note_456',
+      },
+      'legacy-local-publish',
+      false,
+    )).resolves.toMatchObject({
+      status: 'verification_pending',
+      noteId: 'scheduled_note_456',
+      receiptOutcome: 'scheduled',
+      authenticatedAccountId: snapshot.expectedAccountId,
+      errorCode: 'SCHEDULE_READBACK_MISMATCH',
+    });
+    const query = (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
+    expect(query).toContain("'SCHEDULE_READBACK_MISMATCH'");
+    expect(query).toContain('note_id = COALESCE');
+    expect(query).toContain("'authenticated_account'");
+  });
+
+  it('records a definitive rejection as failed', async () => {
+    mocks.sql.mockResolvedValue({
+      rows: [{
+        ...claimedRow(),
+        status: 'failed',
+        receipt_contract_version: 'rednote-worker-result/v2',
+        receipt_outcome: 'rejected',
+        error_code: 'UPSTREAM_REJECTED',
+        error_message: 'RedNote rejected publication',
+      }],
+      rowCount: 1,
+    });
+    await expect(recordStoredRejectedOutcome(
+      claimedRow().id,
+      claimedRow().claim_token,
+      '2026-08-01T12:00:00Z',
+      'UPSTREAM_REJECTED',
+      'RedNote rejected publication',
+    )).resolves.toMatchObject({ status: 'failed', receiptOutcome: 'rejected' });
   });
 });
 
@@ -162,9 +366,10 @@ describe('local publish atomic claim storage', () => {
     expect(query).toContain("attestation.provenance = 'worker_ambiguous'");
     expect(query).toContain('claim_expires_at IS NULL');
     expect(query).toContain('FOR UPDATE SKIP LOCKED');
-    expect(query).toContain('claim_token = gen_random_uuid()');
+    expect(query).toContain('claim_token = ?::uuid');
     expect(query).toContain("request_kind = 'targeted_local_job'");
-    expect(query).toContain('claim_attempts = claim_attempts + 1');
+    expect(query).toContain("WHEN candidate.status = 'claimed' THEN claim_attempts");
+    expect(query).toContain('ELSE claim_attempts + 1');
     expect(mocks.sql.mock.calls[0]).toContain('dispatch');
     expect(claimed).toMatchObject({
       id: claimedRow().id,
@@ -190,7 +395,11 @@ describe('local publish atomic claim storage', () => {
     expect(query).toContain('claim_expires_at <= CURRENT_TIMESTAMP');
     expect(query).toContain('claim_token = NULL');
     expect(query).toContain("'PUBLISH_ATTEMPT_OUTCOME_UNKNOWN'");
+    expect(query).toContain("'RECEIPT_RECONCILIATION_REQUIRED'");
+    expect(query).toContain("THEN 'verification_pending'");
+    expect(query).toContain('rednote_publish_attempt_receipts');
     expect(query).toContain("SET state = 'failed'");
+    expect(query).toContain("WHERE status = 'failed'");
     expect(query).not.toContain("SET status = 'queued'");
     expect(query).not.toContain('gen_random_uuid()');
   });
@@ -336,6 +545,12 @@ describe('local publish atomic claim storage', () => {
     };
     expect(normalizeStoredLocalPublishSnapshot(legacySnapshot)).toEqual({
       ...snapshot,
+      media: expect.arrayContaining([
+        expect.objectContaining({
+          type: snapshot.mediaType,
+          url: snapshot.mediaUrl,
+        }),
+      ]),
       publishAt: '2026-08-04T13:30:00.000Z',
     });
     mocks.sql.mockResolvedValue({
@@ -422,6 +637,7 @@ describe('local publish atomic claim storage', () => {
       caption: snapshot.caption,
       title: snapshot.title,
       headline: snapshot.headline,
+      expectedAccountId: snapshot.expectedAccountId,
       notionPageId: snapshot.notionPageId,
     };
     mocks.sql

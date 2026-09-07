@@ -81,10 +81,22 @@ describe('bounded RedNote publish batches', () => {
       [post('2026-08-04T12:00:00.000Z')],
       'bootstrap',
       now,
+      'creator-account-1',
     )[0]).toMatchObject({
       dispatchMode: 'post_now',
       lateBySeconds: 3_600,
-      snapshot: { title: 'Frozen title' },
+      snapshot: {
+        title: 'Frozen title',
+        expectedAccountId: 'creator-account-1',
+        media: [{
+          type: 'video',
+          url: 'https://images.xhs.justlikekatie.com/videos/assets/post.mp4',
+          identity: rednoteMediaIdentity({
+            type: 'video',
+            url: 'https://images.xhs.justlikekatie.com/videos/assets/post.mp4',
+          }),
+        }],
+      },
     });
 
     expect(buildBatchItems(

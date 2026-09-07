@@ -1,6 +1,9 @@
 import { createHash } from 'crypto';
 import { isDeepStrictEqual } from 'util';
-import { buildLocalPublishSnapshot } from '@/lib/local-publish-job-input';
+import {
+  buildLocalPublishSnapshot,
+  LocalPublishJobError,
+} from '@/lib/local-publish-job-input';
 import {
   getReadyXhsPost,
   listReadyXhsPosts,
@@ -16,6 +19,10 @@ import {
   listStoredPublishBatches,
   type NewPublishBatchItem,
 } from '@/lib/rednote-publish-batch-store';
+import {
+  createLinkedRednotePublishAttempt,
+  getLinkedRednotePublishAttempt,
+} from '@/lib/rednote-publishing-attempt-store';
 import { listPlanOperatorScheduledPageIds } from '@/lib/plan-operator-scheduled-store';
 import type {
   LocalPublishSnapshot,
@@ -56,7 +63,10 @@ function primaryMedia(post: ReadyXhsPost) {
   return null;
 }
 
-export function buildBatchSnapshot(post: ReadyXhsPost): LocalPublishSnapshot | null {
+export function buildBatchSnapshot(
+  post: ReadyXhsPost,
+  expectedAccountId?: string,
+): LocalPublishSnapshot | null {
   if (
     post.publicationStatus?.trim().toLowerCase() === 'published' ||
     (!post.publicationStatus && post.status.trim().toLowerCase() === 'published') ||
@@ -86,7 +96,11 @@ export function buildBatchSnapshot(post: ReadyXhsPost): LocalPublishSnapshot | n
     tags: post.tags,
     media,
   });
-  return { ...snapshot, publishAt: publishAt.toISOString() };
+  return {
+    ...snapshot,
+    publishAt: publishAt.toISOString(),
+    ...(expectedAccountId ? { expectedAccountId } : {}),
+  };
 }
 
 function zonedParts(date: Date) {
@@ -160,10 +174,11 @@ export function buildBatchItems(
   posts: ReadyXhsPost[],
   kind: PublishBatchKind,
   now: Date,
+  expectedAccountId?: string,
 ) {
   const weekly = weeklyWindow(now);
   return posts.flatMap((post): NewPublishBatchItem[] => {
-    const snapshot = buildBatchSnapshot(post);
+    const snapshot = buildBatchSnapshot(post, expectedAccountId);
     if (!snapshot?.publishAt) return [];
     const publishAt = new Date(snapshot.publishAt);
     if (kind === 'weekly' && (publishAt < weekly.start || publishAt >= weekly.end)) return [];
@@ -185,13 +200,14 @@ export function buildBatchCandidateAccounting(
   kind: PublishBatchKind,
   now: Date,
   localJobs: LocalPublishJobSummary[] = [],
+  expectedAccountId?: string,
 ) {
   const weekly = weeklyWindow(now);
   const owningJobs = new Map<string, LocalPublishJobSummary>();
   for (const job of localJobs) {
     if (!owningJobs.has(job.notionPageId)) owningJobs.set(job.notionPageId, job);
   }
-  const items = buildBatchItems(posts, kind, now)
+  const items = buildBatchItems(posts, kind, now, expectedAccountId)
     .filter((item) => !owningJobs.has(item.notionPageId));
   const included = new Set(items.map((item) => item.notionPageId));
   const blockedCandidates = posts.flatMap((post): PublishBatchBlockedCandidate[] => {
@@ -251,6 +267,10 @@ export async function createPublishBatch(
   notionPageIds: string[],
   now = new Date(),
 ) {
+  const expectedAccountId = process.env.REDNOTE_EXPECTED_ACCOUNT_ID?.trim();
+  if (!expectedAccountId) {
+    throw new Error('REDNOTE_EXPECTED_ACCOUNT_ID is required before creating a publish batch.');
+  }
   const selectedPageIds = new Set(notionPageIds);
   if (selectedPageIds.size === 0) return null;
   const { posts } = await listReadyXhsPosts({ includePublishedCandidates: true });
@@ -265,6 +285,7 @@ export async function createPublishBatch(
     kind,
     now,
     jobs.map(jobSummary),
+    expectedAccountId,
   );
   const window = kind === 'weekly' ? weeklyWindow(now) : undefined;
   return createStoredPublishBatch({
@@ -281,6 +302,43 @@ export async function createPublishBatch(
   });
 }
 
+async function materializeApprovedBatchAttempts(
+  batch: Awaited<ReturnType<typeof listStoredPublishBatches>>[number],
+) {
+  await Promise.all(batch.items.map(async (item) => {
+    if (!item.localPublishJobId || item.state !== 'queued') return;
+    try {
+      const existing = await getLinkedRednotePublishAttempt(
+        'legacy-local-publish',
+        item.localPublishJobId,
+      );
+      if (
+        existing.payload.expectedAccountId !== item.snapshot.expectedAccountId ||
+        !isDeepStrictEqual(existing.readyX3Authorization?.media, item.snapshot.media)
+      ) {
+        throw new LocalPublishJobError(
+          'The linked worker attempt does not match the approved batch packet',
+          'ATTEMPT_PACKET_MISMATCH',
+          409,
+        );
+      }
+      return;
+    } catch (error) {
+      if (
+        !(error instanceof LocalPublishJobError) ||
+        error.code !== 'ATTEMPT_NOT_FOUND'
+      ) throw error;
+    }
+    await createLinkedRednotePublishAttempt(
+      item.snapshot,
+      item.localPublishJobId,
+      'legacy-local-publish',
+      item.localPublishJobId,
+      item.dispatchMode === 'post_now' ? 'post_now' : 'schedule',
+    );
+  }));
+}
+
 export async function approvePublishBatch(
   batchId: string,
   expectedManifestHash: string,
@@ -290,17 +348,34 @@ export async function approvePublishBatch(
   if (!batch || batch.manifestHash !== expectedManifestHash) {
     throw new Error('The batch manifest changed or no longer exists; refresh before approving.');
   }
-  if (batch.status !== 'pending_approval') {
+  if (!['pending_approval', 'approved', 'partially_approved'].includes(batch.status)) {
     throw new Error(
       batch.status === 'superseded'
         ? 'This batch was superseded and can never be approved. Refresh to review its replacement manifest.'
         : 'The batch is no longer pending approval; refresh before approving.',
     );
   }
+  const expectedAccountId = process.env.REDNOTE_EXPECTED_ACCOUNT_ID?.trim();
+  if (!expectedAccountId) {
+    throw new Error('REDNOTE_EXPECTED_ACCOUNT_ID is required before approving a publish batch.');
+  }
+  if (
+    batch.status !== 'pending_approval'
+    && batch.items.some((item) =>
+      item.localPublishJobId && item.snapshot.expectedAccountId !== expectedAccountId)
+  ) {
+    throw new Error(
+      'The approved batch was frozen for a different RedNote account and cannot be dispatched.',
+    );
+  }
+  if (batch.status !== 'pending_approval') {
+    await materializeApprovedBatchAttempts(batch);
+    return (await listStoredPublishBatches(batchId))[0];
+  }
   const decisions = await Promise.all(batch.items.map(async (item) => {
     try {
       const post = await getReadyXhsPost(item.notionPageId);
-      const current = buildBatchSnapshot(post);
+      const current = buildBatchSnapshot(post, expectedAccountId);
       const currentHash = current ? manifestHash(current) : '';
       return {
         itemId: item.id,
@@ -319,12 +394,14 @@ export async function approvePublishBatch(
       };
     }
   }));
-  return approveStoredPublishBatch(
+  const approved = await approveStoredPublishBatch(
     batchId,
     expectedManifestHash,
     approvedBy,
     decisions,
   );
+  await materializeApprovedBatchAttempts(approved);
+  return (await listStoredPublishBatches(batchId))[0];
 }
 
 export async function listPublishBatches(batchId?: string) {

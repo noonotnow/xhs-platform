@@ -19,7 +19,7 @@ describe('RedNote publishing schema migration gate', () => {
   });
 
   it('rejects migration names outside the controlled set', () => {
-    expect(() => parseExpectedMissing(['022'])).toThrow(
+    expect(() => parseExpectedMissing(['024'])).toThrow(
       'expectedMissing contains an unsupported migration',
     );
   });
@@ -30,7 +30,9 @@ describe('RedNote publishing schema migration gate', () => {
       '019': false,
       '020': false,
       '021': true,
-    })).toEqual(['019', '020']);
+      '022': true,
+      '023': false,
+    })).toEqual(['019', '020', '023']);
   });
 
   it('retains expected and actual state for a safe 409 response', () => {

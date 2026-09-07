@@ -177,13 +177,32 @@ caching.
 | `GET /api/local-publish-jobs/next?lane=verification` | Atomic single claim only when verification or reconciliation is due |
 | `GET /api/local-publish-jobs/next?lane=verification&expectedJobId=:jobId` | Atomic fail-closed claim of that exact due, unacknowledged `operator_attested` release; never falls back to another row |
 | `GET /api/local-publish-jobs/next` | Backward-compatible combined lane |
-| `POST /api/local-publish-jobs/:id/result` | Per-job token result; preserves staging, human approval, verification, and reconciliation gates |
+| `POST /api/local-publish-jobs/:id/result` | Per-job claim-token result; `rednote-worker-result/v2` outcomes are `acknowledged`, `scheduled`, `ambiguous`, or `rejected` |
+| `GET /api/rednote-publications/:noteId/evidence?workspaceId=:workspaceId` | Read current authenticated-account, xsec-access, public-index, and restriction evidence |
+| `POST /api/rednote-publications/:noteId/evidence` | Append one strict, token-free `rednote-evidence/v1` observation |
 | `POST /admin/api/local-publish-job-success-attestations` | Access-authenticated exact scheduled-success attestation; immutable receipt, dispatch quarantine, and immediate worker release handshake |
 | `POST /admin/api/publish-job-recoveries` | Cloudflare Access operator action that requeues the same exact approved job only for a pre-dispatch `BOUNDED_BATCH_BYPASS_DISABLED` terminal claim generation and writes one append-only audit per generation |
 | `GET /admin/api/manual-post-handlings` | Access-authenticated durable manual handling state for Admin |
 | `POST /admin/api/manual-post-handlings` | Access-authenticated exact Approved-revision marker; warnings do not block operator truth |
 | `GET /api/rednote-metrics/due?limit=20` | Bounded metrics batch with a distinct token and lease per post |
 | `POST /api/rednote-metrics/observations` | Consolidated observations and one coalesced run summary |
+
+The frozen publish packet includes `expectedAccountId`, and the executor must
+match it against authenticated Creator before any side effect. `noteId` is the
+durable publication identity. A matching authenticated-account observation can
+authorize Published and metrics work without a public URL. xsec reachability is
+renewable timestamped access evidence; tokens and cookies are rejected rather
+than persisted. Query-free public indexing is asynchronous information and
+never blocks or reopens Published. Scheduled, ambiguous, and account-mismatch
+results enter Verify receipt without creating another publish claim.
+
+Executable claims contain required `expectedAccountId` and 1–18 exact ordered
+canonical `media[]` entries with `{identity,type,url}`. Video claims contain one
+entry; image claims place the selected image first and retain the remaining
+source order. Legacy `mediaType` and `mediaUrl` project only `media[0]`.
+Batch and Ready ×3 authorizations must repeat the claim array exactly. Scheduled
+v2 acknowledgements require `scheduledFor`, `acknowledgedAt`, and authenticated
+account evidence; they may include `noteId`.
 
 Metrics cadence is 6-hourly through 48 hours, daily through day 14, weekly
 through day 90, and manual afterward. The server stores a performance snapshot

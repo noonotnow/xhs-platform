@@ -64,11 +64,42 @@ describe('local publish job input', () => {
       mediaType: 'video',
       mediaIndex: 0,
       mediaUrl: 'https://images.xhs.justlikekatie.com/videos/assets/post.mp4',
+      media: [{
+        identity: expect.stringMatching(/^[a-f0-9]{64}$/),
+        type: 'video',
+        url: 'https://images.xhs.justlikekatie.com/videos/assets/post.mp4',
+      }],
       thumbnailUrl: 'https://images.xhs.justlikekatie.com/uploads/thumb.jpg',
       publishAt: '2026-08-04T13:30:00.000Z',
       notionLastEditedTime: readyPost().lastEditedTime,
     });
     expect(snapshot.mediaUrl).not.toContain('attacker.example');
+  });
+
+  it('freezes the complete ordered image set with the selected item first', () => {
+    const urls = [
+      'https://images.xhs.justlikekatie.com/uploads/one.jpg',
+      'https://images.xhs.justlikekatie.com/uploads/two.jpg',
+      'https://images.xhs.justlikekatie.com/uploads/three.jpg',
+    ];
+    const parsed = parseQueueLocalPublishInput(input({
+      media: { type: 'image', index: 1 },
+    }));
+    const snapshot = buildLocalPublishSnapshot(readyPost({
+      hasVideo: false,
+      mediaUrls: urls,
+      imageUrls: urls,
+      videoUrls: [],
+    }), parsed);
+
+    expect(snapshot.mediaUrl).toBe(urls[1]);
+    expect(snapshot.media?.map(({ type, url }) => ({ type, url }))).toEqual([
+      { type: 'image', url: urls[1] },
+      { type: 'image', url: urls[0] },
+      { type: 'image', url: urls[2] },
+    ]);
+    expect(snapshot.media?.every((item) => /^[a-f0-9]{64}$/.test(item.identity)))
+      .toBe(true);
   });
 
   it('keeps legacy fallback hashtags out of the frozen body caption', () => {

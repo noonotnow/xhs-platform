@@ -21,6 +21,10 @@ import {
   listLocalPublishJobs,
   prepareStoredLocalPublishVerification,
   recordStoredLocalPublishDispatch,
+  recordStoredAcknowledgedPublication,
+  recordStoredAmbiguousOutcome,
+  recordStoredRejectedOutcome,
+  recordStoredScheduledAcknowledgement,
   stageStoredLocalPublishJob,
   type StoredLocalPublishJob,
   heartbeatStoredLocalPublishJob,
@@ -34,17 +38,20 @@ import type {
   LocalPublishJobSummary,
   LocalPublishSnapshot,
   LocalPublishWorkLane,
+  AuthenticatedAccountEvidence,
+  PublicIndexEvidence,
+  XsecAccessEvidence,
 } from '@/types/local-publish-job';
 import type { ReadyX3Authorization } from '@/types/local-publish-job';
-import { rednoteMediaIdentity } from '@/lib/rednote-publish-authorization';
+import { snapshotPublishMedia } from '@/lib/rednote-publish-authorization';
 import {
   buildBatchSnapshot,
   manifestHash,
 } from '@/lib/rednote-publish-batches';
 import { invalidateStoredBatchItem } from '@/lib/rednote-publish-batch-store';
 import {
+  createLinkedRednotePublishAttempt,
   createRednotePublishAttempt,
-  frozenPayloadDigest,
   bindLinkedAttemptClaim,
   authorizeLinkedAttempt,
   consumeLinkedReadyX3DispatchAuthorization,
@@ -55,11 +62,7 @@ import {
   supersedeUnclaimedReadyX3Schedule,
   withReadyX3SourceLock,
 } from '@/lib/rednote-publishing-attempt-store';
-import {
-  REDNOTE_PUBLISHING_CONTRACT_REVISION,
-  type FrozenRednoteAttemptPayload,
-} from '@/lib/rednote-publishing-contract-v1';
-import { createHash } from 'crypto';
+import type { FrozenRednoteAttemptPayload } from '@/lib/rednote-publishing-contract-v1';
 
 const DEFAULT_LEASE_SECONDS = 2 * 60 * 60;
 const MIN_LEASE_SECONDS = 60;
@@ -91,9 +94,13 @@ interface ResultDependencies {
   fail: typeof failStoredLocalPublishJob;
   prepareVerification: typeof prepareStoredLocalPublishVerification;
   completeReconciliation: typeof completeStoredLocalPublishReconciliation;
+  recordAcknowledged?: typeof recordStoredAcknowledgedPublication;
+  recordAmbiguous?: typeof recordStoredAmbiguousOutcome;
+  recordScheduledAcknowledgement?: typeof recordStoredScheduledAcknowledgement;
+  recordRejected?: typeof recordStoredRejectedOutcome;
   backfill: (
     pageId: string,
-    result: PublishReadyPostResponse,
+    result: Omit<PublishReadyPostResponse, 'shareUrl'> & { shareUrl?: string },
     publishedAt?: string,
   ) => Promise<void>;
 }
@@ -112,71 +119,14 @@ const resultDependencies: ResultDependencies = {
   fail: failStoredLocalPublishJob,
   prepareVerification: prepareStoredLocalPublishVerification,
   completeReconciliation: completeStoredLocalPublishReconciliation,
+  recordAcknowledged: recordStoredAcknowledgedPublication,
+  recordAmbiguous: recordStoredAmbiguousOutcome,
+  recordScheduledAcknowledgement: recordStoredScheduledAcknowledgement,
+  recordRejected: recordStoredRejectedOutcome,
   backfill: markXhsPostPublished,
 };
 
 const READY_X3_MAX_LATE_MS = 30 * 60 * 1_000;
-
-async function createLinkedAttempt(
-  snapshot: LocalPublishSnapshot,
-  idempotencyKey: string,
-  workspaceId: string,
-  localJobId: string,
-  readyX3Action?: 'schedule' | 'post_now',
-) {
-  const requestedAt = new Date().toISOString();
-  const timingMode = readyX3Action ??
-    (snapshot.publishAt ? 'schedule' as const : 'post_now' as const);
-  const browserPayload = {
-    sourcePostId: snapshot.notionPageId,
-    title: snapshot.title,
-    caption: snapshot.caption,
-    tags: snapshot.tags,
-    scheduledDate: snapshot.publishAt ?? null,
-    targetPublishAt: timingMode === 'post_now'
-      ? requestedAt
-      : snapshot.publishAt ?? requestedAt,
-    timingMode: timingMode === 'schedule' ? 'scheduled' as const : 'post_now' as const,
-    visibility: 'public' as const,
-    publishMode: snapshot.mediaType,
-    mediaAssets: [{
-      assetId: `${snapshot.mediaType}-${snapshot.mediaIndex}`,
-      deliveryUrl: snapshot.mediaUrl,
-      sha256: createHash('sha256').update(snapshot.mediaUrl).digest('hex'),
-      mediaType: snapshot.mediaType,
-      role: 'content' as const,
-    }],
-    ...(snapshot.mediaType === 'video' && snapshot.thumbnailUrl
-      ? {
-          coverAsset: {
-            assetId: 'video-cover',
-            deliveryUrl: snapshot.thumbnailUrl,
-            sha256: createHash('sha256').update(snapshot.thumbnailUrl).digest('hex'),
-            mediaType: 'image' as const,
-            role: 'cover' as const,
-          },
-        }
-      : {}),
-  };
-  const payload = {
-    contractRevision: REDNOTE_PUBLISHING_CONTRACT_REVISION,
-    sourceNotionPageId: snapshot.notionPageId,
-    sourceLocalPublishJobId: localJobId,
-    payloadRevision: snapshot.notionLastEditedTime,
-    payloadDigest: '',
-    requestedAt,
-    executor: { type: 'worker' as const, kind: 'playwright' as const, id: 'local-publish-worker' },
-    browserPayload,
-  } as unknown as FrozenRednoteAttemptPayload;
-  payload.payloadDigest = frozenPayloadDigest(payload);
-  return createRednotePublishAttempt({
-    workspaceId,
-    idempotencyKey,
-    payload,
-    approve: Boolean(readyX3Action),
-    readyX3: Boolean(readyX3Action),
-  });
-}
 
 function cleanResultText(value: unknown, field: string, maxLength: number) {
   if (typeof value !== 'string') {
@@ -222,6 +172,30 @@ function assertExactKeys(value: Record<string, unknown>, expected: string[]) {
 }
 
 export type LocalPublishWorkerResult =
+  | {
+      contractVersion: 'rednote-worker-result/v2';
+      outcome: 'acknowledged';
+      noteId: string;
+      acknowledgedAt: string;
+      authenticatedAccount: AuthenticatedAccountEvidence;
+      xsecAccess?: XsecAccessEvidence;
+      publicIndex?: PublicIndexEvidence;
+    }
+  | {
+      contractVersion: 'rednote-worker-result/v2';
+      outcome: 'scheduled';
+      acknowledgedAt: string;
+      scheduledFor: string;
+      authenticatedAccount: AuthenticatedAccountEvidence;
+      noteId?: string;
+    }
+  | {
+      contractVersion: 'rednote-worker-result/v2';
+      outcome: 'ambiguous' | 'rejected';
+      code: string;
+      message: string;
+      occurredAt: string;
+    }
   | { status: 'staged' }
   | { status: 'submitted' | 'scheduled'; noteId: string; shareUrl: string }
   | {
@@ -260,6 +234,7 @@ function publicationIdentifiers(body: Record<string, unknown>) {
       400,
     );
   }
+
   const suppliedShareUrl = cleanResultText(body.shareUrl, 'shareUrl', 500);
   const shareUrl = normalizeRednoteShareUrl(noteId, suppliedShareUrl);
   if (!shareUrl) {
@@ -272,11 +247,197 @@ function publicationIdentifiers(body: Record<string, unknown>) {
   return { noteId, shareUrl };
 }
 
+function cleanTimestamp(value: unknown, field: string) {
+  const raw = cleanResultText(value, field, 64);
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new LocalPublishJobError(
+      `${field} must be an ISO timestamp`,
+      'VALIDATION_ERROR',
+      400,
+    );
+  }
+  return parsed.toISOString();
+}
+
+function optionalPublicIndex(value: unknown): PublicIndexEvidence | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new LocalPublishJobError('publicIndex must be an object', 'VALIDATION_ERROR', 400);
+  }
+  const body = value as Record<string, unknown>;
+  const expected = body.publicUrl === undefined
+    ? ['checkedAt', 'status']
+    : ['checkedAt', 'publicUrl', 'status'];
+  assertExactKeys(body, expected);
+  if (!['indexed', 'pending', 'not_found'].includes(String(body.status))) {
+    throw new LocalPublishJobError(
+      'publicIndex.status must be indexed, pending, or not_found',
+      'VALIDATION_ERROR',
+      400,
+    );
+  }
+  const status = body.status as PublicIndexEvidence['status'];
+  const checkedAt = cleanTimestamp(body.checkedAt, 'publicIndex.checkedAt');
+  if (body.publicUrl === undefined) return { status, checkedAt };
+  const publicUrl = cleanResultText(body.publicUrl, 'publicIndex.publicUrl', 500);
+  if (status !== 'indexed') {
+    throw new LocalPublishJobError(
+      'publicIndex.publicUrl is only valid for indexed evidence',
+      'VALIDATION_ERROR',
+      400,
+    );
+  }
+  return { status, checkedAt, publicUrl };
+}
+
+function optionalXsecAccess(value: unknown): XsecAccessEvidence | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new LocalPublishJobError('xsecAccess must be an object', 'VALIDATION_ERROR', 400);
+  }
+  const body = value as Record<string, unknown>;
+  assertExactKeys(body, ['accessible', 'capturedAt']);
+  if (body.accessible !== true) {
+    throw new LocalPublishJobError(
+      'xsecAccess.accessible must be true',
+      'VALIDATION_ERROR',
+      400,
+    );
+  }
+  return {
+    accessible: true,
+    capturedAt: cleanTimestamp(body.capturedAt, 'xsecAccess.capturedAt'),
+  };
+}
+
+function authenticatedAccount(value: unknown): AuthenticatedAccountEvidence {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new LocalPublishJobError(
+      'authenticatedAccount must be an object',
+      'VALIDATION_ERROR',
+      400,
+    );
+  }
+  const body = value as Record<string, unknown>;
+  assertExactKeys(body, ['accountId', 'capturedAt', 'ownership']);
+  if (!['owned', 'account_mismatch'].includes(String(body.ownership))) {
+    throw new LocalPublishJobError(
+      'authenticatedAccount.ownership must be owned or account_mismatch',
+      'VALIDATION_ERROR',
+      400,
+    );
+  }
+  return {
+    accountId: cleanResultText(body.accountId, 'authenticatedAccount.accountId', 200),
+    capturedAt: cleanTimestamp(body.capturedAt, 'authenticatedAccount.capturedAt'),
+    ownership: body.ownership as AuthenticatedAccountEvidence['ownership'],
+  };
+}
+
 export function parseLocalPublishWorkerResult(value: unknown): LocalPublishWorkerResult {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new LocalPublishJobError('Result body must be a JSON object', 'VALIDATION_ERROR', 400);
   }
   const body = value as Record<string, unknown>;
+  if (body.contractVersion === 'rednote-worker-result/v2') {
+    if (body.outcome === 'acknowledged') {
+      const expected = ['acknowledgedAt', 'authenticatedAccount', 'contractVersion', 'noteId', 'outcome'];
+      if (body.xsecAccess !== undefined) expected.push('xsecAccess');
+      if (body.publicIndex !== undefined) expected.push('publicIndex');
+      assertExactKeys(body, expected.sort());
+      const noteId = cleanResultText(body.noteId, 'noteId', 128);
+      if (!isRednoteNoteId(noteId)) {
+        throw new LocalPublishJobError(
+          'noteId contains unsupported characters',
+          'INVALID_SUCCESS_RESULT',
+          400,
+        );
+      }
+      const publicIndex = optionalPublicIndex(body.publicIndex);
+      const account = authenticatedAccount(body.authenticatedAccount);
+      if (account.ownership !== 'owned') {
+        throw new LocalPublishJobError(
+          'Worker authenticatedAccount.ownership must be owned',
+          'VALIDATION_ERROR',
+          400,
+        );
+      }
+      if (
+        publicIndex?.publicUrl
+        && normalizeRednoteShareUrl(noteId, publicIndex.publicUrl) !== publicIndex.publicUrl
+      ) {
+        throw new LocalPublishJobError(
+          'publicIndex.publicUrl must match noteId',
+          'INVALID_SUCCESS_RESULT',
+          400,
+        );
+      }
+      return {
+        contractVersion: 'rednote-worker-result/v2',
+        outcome: 'acknowledged',
+        noteId,
+        acknowledgedAt: cleanTimestamp(body.acknowledgedAt, 'acknowledgedAt'),
+        authenticatedAccount: account,
+        ...(optionalXsecAccess(body.xsecAccess)
+          ? { xsecAccess: optionalXsecAccess(body.xsecAccess) }
+          : {}),
+        ...(publicIndex ? { publicIndex } : {}),
+      };
+    }
+    if (body.outcome === 'scheduled') {
+      const expected = [
+        'acknowledgedAt',
+        'authenticatedAccount',
+        'contractVersion',
+        'outcome',
+        'scheduledFor',
+      ];
+      if (body.noteId !== undefined) expected.push('noteId');
+      assertExactKeys(body, expected.sort());
+      const noteId = body.noteId === undefined
+        ? undefined
+        : cleanResultText(body.noteId, 'noteId', 128);
+      if (noteId !== undefined && !isRednoteNoteId(noteId)) {
+        throw new LocalPublishJobError(
+          'noteId contains unsupported characters',
+          'INVALID_SUCCESS_RESULT',
+          400,
+        );
+      }
+      const account = authenticatedAccount(body.authenticatedAccount);
+      if (account.ownership !== 'owned') {
+        throw new LocalPublishJobError(
+          'Worker authenticatedAccount.ownership must be owned',
+          'VALIDATION_ERROR',
+          400,
+        );
+      }
+      return {
+        contractVersion: 'rednote-worker-result/v2',
+        outcome: 'scheduled',
+        acknowledgedAt: cleanTimestamp(body.acknowledgedAt, 'acknowledgedAt'),
+        scheduledFor: cleanTimestamp(body.scheduledFor, 'scheduledFor'),
+        authenticatedAccount: account,
+        ...(noteId ? { noteId } : {}),
+      };
+    }
+    if (body.outcome === 'ambiguous' || body.outcome === 'rejected') {
+      assertExactKeys(body, ['code', 'contractVersion', 'message', 'occurredAt', 'outcome']);
+      return {
+        contractVersion: 'rednote-worker-result/v2',
+        outcome: body.outcome,
+        code: cleanCode(body.code),
+        message: cleanFailureMessage(body.message),
+        occurredAt: cleanTimestamp(body.occurredAt, 'occurredAt'),
+      };
+    }
+    throw new LocalPublishJobError(
+      'outcome must be acknowledged, scheduled, ambiguous, or rejected',
+      'VALIDATION_ERROR',
+      400,
+    );
+  }
   if (body.status === 'staged') {
     assertExactKeys(body, ['status']);
     return { status: 'staged' };
@@ -390,7 +551,7 @@ export async function queueLocalPublishJob(
           409,
         );
       }
-      const repaired = await createLinkedAttempt(
+      const repaired = await createLinkedRednotePublishAttempt(
         existing.snapshot,
         idempotencyKey,
         workspaceId,
@@ -398,6 +559,7 @@ export async function queueLocalPublishJob(
         storedReadyX3Consent
           ? input.mode === 'publish' ? 'post_now' : 'schedule'
           : undefined,
+        createRednotePublishAttempt,
       );
       return {
         job: jobSummary(existing),
@@ -432,9 +594,19 @@ export async function queueLocalPublishJob(
   }
   const post = await dependencies.getPost(input.notionPageId);
   const builtSnapshot = buildLocalPublishSnapshot(post, input);
-  const snapshot: LocalPublishSnapshot = input.consent === 'ready_x3'
-    ? { ...builtSnapshot, automationConsent: 'ready_x3' }
-    : builtSnapshot;
+  const configuredAccountId = process.env.REDNOTE_EXPECTED_ACCOUNT_ID?.trim();
+  if (typeof workspaceOrDependencies === 'string' && !configuredAccountId) {
+    throw new LocalPublishJobError(
+      'REDNOTE_EXPECTED_ACCOUNT_ID is required before issuing publishing claims',
+      'EXPECTED_ACCOUNT_NOT_CONFIGURED',
+      503,
+    );
+  }
+  const snapshot: LocalPublishSnapshot = {
+    ...builtSnapshot,
+    ...(input.consent === 'ready_x3' ? { automationConsent: 'ready_x3' as const } : {}),
+    ...(configuredAccountId ? { expectedAccountId: configuredAccountId } : {}),
+  };
   const readyX3Action = input.consent === 'ready_x3'
     ? input.mode === 'publish' ? 'post_now' as const : 'schedule' as const
     : undefined;
@@ -461,12 +633,13 @@ export async function queueLocalPublishJob(
     if (typeof workspaceOrDependencies !== 'string') {
       return { job: jobSummary(result.job), created: result.created };
     }
-    const attempt = await createLinkedAttempt(
+    const attempt = await createLinkedRednotePublishAttempt(
       snapshot,
       idempotencyKey,
       workspaceId,
       result.job.id,
       readyX3Action,
+      createRednotePublishAttempt,
     );
     return { job: jobSummary(result.job), attempt: attempt.attempt, created: result.created };
   };
@@ -587,17 +760,25 @@ export async function claimNextLocalPublishJob(
 }
 
 function readyX3AuthorizationFor(job: (
-  { snapshot: { publishAt?: string; mediaUrl: string; mediaType: 'image' | 'video'; platform: 'RedNote'; notionLastEditedTime: string } }
-  | { publishAt?: string; mediaUrl: string; mediaType: 'image' | 'video'; platform: 'RedNote'; notionLastEditedTime: string; batchAuthorization?: { snapshotRevision: string } }
+  { snapshot: LocalPublishSnapshot }
+  | (Omit<LocalPublishSnapshot, 'expectedAccountId'> & {
+      expectedAccountId: string;
+      batchAuthorization?: { snapshotRevision: string };
+    })
 ), attempt: Record<string, unknown>): ReadyX3Authorization | undefined {
   const authorization = attempt.readyX3Authorization as ReadyX3Authorization | undefined;
   if (!authorization) return undefined;
   const snapshot = 'snapshot' in job ? job.snapshot : job;
+  const payload = attempt.payload as
+    | FrozenRednoteAttemptPayload['browserPayload']
+    | undefined;
   const revision = snapshot.notionLastEditedTime;
   if (snapshot.platform !== 'RedNote' || !snapshot.publishAt ||
+    !snapshot.expectedAccountId ||
+    payload?.expectedAccountId !== snapshot.expectedAccountId ||
     authorization.packetRevision !== revision ||
     authorization.publishAt !== new Date(snapshot.publishAt).toISOString() ||
-    authorization.media.identity !== rednoteMediaIdentity({ type: snapshot.mediaType, url: snapshot.mediaUrl }) ||
+    !isDeepStrictEqual(authorization.media, snapshotPublishMedia(snapshot)) ||
     authorization.lateFallback.maxLateMinutes !== 30) {
     throw new LocalPublishJobError('Ready x3 authorization does not match the frozen local snapshot', 'INVALID_READY_X3_AUTHORIZATION', 409);
   }
@@ -616,6 +797,8 @@ type ReadyX3Claim = {
   mediaType: 'image' | 'video';
   mediaIndex: number;
   mediaUrl: string;
+  media: ReturnType<typeof snapshotPublishMedia>;
+  expectedAccountId: string;
   thumbnailUrl?: string;
   publishAt?: string;
   notionLastEditedTime: string;
@@ -632,6 +815,7 @@ async function assertReadyX3SourceCurrent(
     title?: unknown;
     caption?: unknown;
     tags?: unknown;
+    expectedAccountId?: unknown;
   },
 ) {
   try {
@@ -678,17 +862,14 @@ async function assertReadyX3SourceCurrent(
       current.mediaType === job.mediaType &&
       current.mediaIndex === job.mediaIndex &&
       current.mediaUrl === job.mediaUrl &&
+      isDeepStrictEqual(current.media, job.media) &&
       current.thumbnailUrl === job.thumbnailUrl &&
       publishAt === job.publishAt &&
+      frozenBrowserPayload?.expectedAccountId === job.expectedAccountId &&
       authorization.packetRevision === job.notionLastEditedTime &&
       authorization.platform === 'RedNote' &&
       authorization.publishAt === job.publishAt &&
-      authorization.media.url === job.mediaUrl &&
-      authorization.media.type === job.mediaType &&
-      authorization.media.identity === rednoteMediaIdentity({
-        type: job.mediaType,
-        url: job.mediaUrl,
-      })
+      isDeepStrictEqual(authorization.media, job.media)
     ) return hydratedJob;
   } catch (error) {
     // An upstream outage must close the dispatch path but must not revoke consent.
@@ -715,9 +896,10 @@ async function assertReadyX3SourceCurrent(
 
 async function batchSourceMatches(job: Awaited<ReturnType<typeof authorizeStoredLocalPublishJob>>) {
   if (!job.batchAuthorization) return true;
+  if (!isDeepStrictEqual(job.batchAuthorization.media, job.media)) return false;
   try {
     const post = await getReadyXhsPost(job.notionPageId);
-    const current = buildBatchSnapshot(post);
+    const current = buildBatchSnapshot(post, job.expectedAccountId);
     return Boolean(
       current &&
         manifestHash(current) === job.batchAuthorization.itemHash &&
@@ -732,6 +914,8 @@ async function batchSourceMatches(job: Awaited<ReturnType<typeof authorizeStored
           mediaType: job.mediaType,
           mediaIndex: current.mediaIndex,
           mediaUrl: job.mediaUrl,
+          media: job.media,
+          expectedAccountId: job.expectedAccountId,
           ...(job.thumbnailUrl ? { thumbnailUrl: job.thumbnailUrl } : {}),
           publishAt: job.publishAt,
           notionLastEditedTime: job.batchAuthorization.snapshotRevision,
@@ -805,10 +989,27 @@ export async function authorizeLocalPublishJob(id: string, claimToken: string, w
 
 export async function heartbeatLocalPublishJob(id: string, claimToken: string, workspaceId: string) {
   const job = await heartbeatStoredLocalPublishJob(id, claimToken, workspaceId, leaseSeconds());
-  if (job.claimExpiresAt) {
+  if (job.claimExpiresAt && shouldHeartbeatLinkedAttempt(job.status)) {
     await heartbeatLinkedAttempt(workspaceId, id, claimToken, job.claimExpiresAt);
   }
   return job;
+}
+
+export function shouldHeartbeatLinkedAttempt(status: StoredLocalPublishJob['status']) {
+  return status === 'claimed' || status === 'staged';
+}
+
+export function assertScheduledAcknowledgementMatches(
+  scheduledFor: string,
+  frozenTargetPublishAt: string,
+) {
+  if (new Date(scheduledFor).getTime() !== new Date(frozenTargetPublishAt).getTime()) {
+    throw new LocalPublishJobError(
+      'RedNote scheduled the post for a different time than the frozen publishing packet',
+      'SCHEDULE_READBACK_MISMATCH',
+      409,
+    );
+  }
 }
 
 export async function getLocalPublishJobSummaries(workspaceId: string) {
@@ -830,6 +1031,226 @@ export async function submitLocalPublishJobResult(
     : workspaceOrDependencies;
   const durableAttempt = typeof workspaceOrDependencies === 'string';
   const result = parseLocalPublishWorkerResult(rawResult);
+  if ('contractVersion' in result) {
+    if (result.outcome === 'scheduled') {
+      let accountMatches = false;
+      if (durableAttempt) {
+        const attempt = await getLinkedRednotePublishAttempt(workspaceId, id);
+        try {
+          assertScheduledAcknowledgementMatches(
+            result.scheduledFor,
+            attempt.payload.targetPublishAt,
+          );
+        } catch {
+          await recordLinkedAttemptOutcome({
+            workspaceId,
+            localJobId: id,
+            claimToken,
+            outcome: 'outcome_unknown',
+            ...(result.noteId
+              ? {
+                  receipt: {
+                    rednoteNoteId: result.noteId,
+                    platformPublishTime: result.acknowledgedAt,
+                    provenance: {
+                      kind: 'rednote_worker_result_v2_scheduled',
+                      scheduledFor: result.scheduledFor,
+                      authenticatedAccountId: result.authenticatedAccount.accountId,
+                      authenticatedAccountCapturedAt:
+                        result.authenticatedAccount.capturedAt,
+                    },
+                  },
+                }
+              : {}),
+          });
+          const mismatch = await (
+            dependencies.recordScheduledAcknowledgement
+              ?? recordStoredScheduledAcknowledgement
+          )(
+            id,
+            claimToken,
+            {
+              acknowledgedAt: result.acknowledgedAt,
+              scheduledFor: result.scheduledFor,
+              accountId: result.authenticatedAccount.accountId,
+              accountCapturedAt: result.authenticatedAccount.capturedAt,
+              ownership: result.authenticatedAccount.ownership,
+              ...(result.noteId ? { noteId: result.noteId } : {}),
+            },
+            workspaceId,
+            false,
+          );
+          return jobSummary(mismatch);
+        }
+        accountMatches = (
+          result.authenticatedAccount.ownership === 'owned'
+          && result.authenticatedAccount.accountId
+            === attempt.payload.expectedAccountId
+        );
+        await recordLinkedAttemptOutcome({
+          workspaceId,
+          localJobId: id,
+          claimToken,
+          outcome: accountMatches ? 'accepted' : 'outcome_unknown',
+          ...(result.noteId
+            ? {
+                receipt: {
+                  rednoteNoteId: result.noteId,
+                  platformPublishTime: result.acknowledgedAt,
+                  provenance: {
+                    kind: 'rednote_worker_result_v2_scheduled',
+                    scheduledFor: result.scheduledFor,
+                    authenticatedAccountId: result.authenticatedAccount.accountId,
+                    authenticatedAccountCapturedAt:
+                      result.authenticatedAccount.capturedAt,
+                  },
+                },
+              }
+            : {}),
+        });
+      }
+      const scheduled = await (
+        dependencies.recordScheduledAcknowledgement
+          ?? recordStoredScheduledAcknowledgement
+      )(
+        id,
+        claimToken,
+        {
+          acknowledgedAt: result.acknowledgedAt,
+          scheduledFor: result.scheduledFor,
+          accountId: result.authenticatedAccount.accountId,
+          accountCapturedAt: result.authenticatedAccount.capturedAt,
+          ownership: result.authenticatedAccount.ownership,
+          ...(result.noteId ? { noteId: result.noteId } : {}),
+        },
+        workspaceId,
+      );
+      return jobSummary(scheduled);
+    }
+    if (result.outcome === 'ambiguous') {
+      if (durableAttempt) {
+        await recordLinkedAttemptOutcome({
+          workspaceId,
+          localJobId: id,
+          claimToken,
+          outcome: 'outcome_unknown',
+        });
+      }
+      const ambiguous = await (
+        dependencies.recordAmbiguous ?? recordStoredAmbiguousOutcome
+      )(
+        id,
+        claimToken,
+        result.occurredAt,
+        result.code,
+        result.message,
+        workspaceId,
+      );
+      return jobSummary(ambiguous);
+    }
+    if (result.outcome === 'rejected') {
+      if (durableAttempt) {
+        await recordLinkedAttemptOutcome({
+          workspaceId,
+          localJobId: id,
+          claimToken,
+          outcome: 'known_failed',
+        });
+      }
+      const rejected = await (
+        dependencies.recordRejected ?? recordStoredRejectedOutcome
+      )(
+        id,
+        claimToken,
+        result.occurredAt,
+        result.code,
+        result.message,
+        workspaceId,
+      );
+      return jobSummary(rejected);
+    }
+
+    const acknowledged = result as Extract<
+      LocalPublishWorkerResult,
+      { outcome: 'acknowledged' }
+    >;
+    if (durableAttempt) {
+      await recordLinkedAttemptOutcome({
+        workspaceId,
+        localJobId: id,
+        claimToken,
+        outcome: 'accepted',
+        receipt: {
+          rednoteNoteId: acknowledged.noteId,
+          ...(acknowledged.publicIndex?.publicUrl
+            ? { rednoteUrl: acknowledged.publicIndex.publicUrl }
+            : {}),
+          platformPublishTime: acknowledged.acknowledgedAt,
+          provenance: {
+            kind: 'rednote_worker_result_v2',
+            authenticatedAccountId: acknowledged.authenticatedAccount.accountId,
+            authenticatedAccountCapturedAt: acknowledged.authenticatedAccount.capturedAt,
+          },
+        },
+      });
+    }
+    const prepared = await (
+      dependencies.recordAcknowledged ?? recordStoredAcknowledgedPublication
+    )(
+      id,
+      claimToken,
+      {
+        noteId: acknowledged.noteId,
+        acknowledgedAt: acknowledged.acknowledgedAt,
+        accountId: acknowledged.authenticatedAccount.accountId,
+        accountCapturedAt: acknowledged.authenticatedAccount.capturedAt,
+        ownership: acknowledged.authenticatedAccount.ownership,
+        ...(acknowledged.xsecAccess
+          ? { xsecCapturedAt: acknowledged.xsecAccess.capturedAt }
+          : {}),
+        ...(acknowledged.publicIndex
+          ? {
+              publicIndexStatus: acknowledged.publicIndex.status,
+              publicIndexCheckedAt: acknowledged.publicIndex.checkedAt,
+              ...(acknowledged.publicIndex.publicUrl
+                ? { publicUrl: acknowledged.publicIndex.publicUrl }
+                : {}),
+            }
+          : {}),
+      },
+      workspaceId,
+    );
+    if (prepared.status === 'verification_pending') {
+      return jobSummary(prepared);
+    }
+    if (prepared.status === 'reconciled') return jobSummary(prepared);
+    try {
+      await dependencies.backfill(prepared.notionPageId, {
+        status: 'success',
+        noteId: acknowledged.noteId,
+        ...(acknowledged.publicIndex?.publicUrl
+          ? { shareUrl: acknowledged.publicIndex.publicUrl }
+          : {}),
+      }, prepared.verifiedAt);
+    } catch (error) {
+      console.error('Acknowledged RedNote result could not be backfilled to Notion', {
+        jobId: id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw new LocalPublishJobError(
+        'RedNote acknowledged publication, but Notion backfill is incomplete. Do not publish again; retry this result.',
+        'NOTION_BACKFILL_FAILED',
+        502,
+      );
+    }
+    return jobSummary(await dependencies.completeReconciliation(
+      id,
+      claimToken,
+      acknowledged.noteId,
+      acknowledged.publicIndex?.publicUrl,
+      workspaceId,
+    ));
+  }
   if (result.status === 'staged') {
     return jobSummary(await dependencies.stage(id, claimToken, workspaceId));
   }
@@ -959,3 +1380,4 @@ export function normalizeLocalPublishJobError(error: unknown) {
 }
 
 export type { StoredLocalPublishJob };
+export { parseQueueLocalPublishInput };

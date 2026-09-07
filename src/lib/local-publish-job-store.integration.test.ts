@@ -30,6 +30,7 @@ import {
   listLocalPublishJobs,
   releaseExpiredStoredLocalPublishClaims,
 } from '@/lib/local-publish-job-store';
+import { rednoteMediaIdentity } from '@/lib/rednote-publish-authorization';
 
 const scheduledJobId = '11111111-1111-4111-8111-111111111111';
 const attestedJobId = '22222222-2222-4222-8222-222222222222';
@@ -38,10 +39,23 @@ const attestationId = '44444444-4444-4444-8444-444444444444';
 const claimToken = '55555555-5555-4555-8555-555555555555';
 const batchId = '77777777-7777-4777-8777-777777777777';
 const batchItemId = '88888888-8888-4888-8888-888888888888';
+const attemptId = '99999999-9999-4999-8999-999999999999';
 const manifestHash = 'a'.repeat(64);
 const itemHash = 'b'.repeat(64);
 
+const media = [
+  {
+    type: 'image' as const,
+    url: 'https://images.xhs.justlikekatie.com/post.png',
+  },
+  {
+    type: 'image' as const,
+    url: 'https://images.xhs.justlikekatie.com/post-2.png',
+  },
+].map((item) => ({ ...item, identity: rednoteMediaIdentity(item) }));
+
 const snapshot = {
+  expectedAccountId: 'creator-account-1',
   notionPageId: '66666666-6666-4666-8666-666666666666',
   headline: 'Headline',
   title: 'Title',
@@ -50,7 +64,8 @@ const snapshot = {
   platform: 'RedNote',
   mediaType: 'image',
   mediaIndex: 0,
-  mediaUrl: 'https://images.xhs.justlikekatie.com/post.png',
+  mediaUrl: media[0].url,
+  media,
   publishAt: '2026-08-05T15:00:00.000Z',
   notionLastEditedTime: '2026-08-05T12:00:00.000Z',
 };
@@ -184,6 +199,7 @@ describe('local publish job PostgreSQL execution', () => {
     await database.exec(`
       CREATE TABLE local_publish_jobs (
         id uuid PRIMARY KEY,
+        workspace_id text NOT NULL DEFAULT 'legacy-local-publish',
         notion_page_id text NOT NULL,
         snapshot jsonb NOT NULL,
         status text NOT NULL,
@@ -244,6 +260,30 @@ describe('local publish job PostgreSQL execution', () => {
       CREATE TABLE local_publish_job_success_attestation_release_acks (
         success_attestation_id uuid PRIMARY KEY
       );
+      CREATE TABLE rednote_publish_attempts (
+        id uuid PRIMARY KEY,
+        workspace_id text NOT NULL DEFAULT 'legacy-local-publish',
+        source_local_publish_job_id uuid,
+        executor_type text,
+        active boolean NOT NULL DEFAULT false,
+        approved_at timestamptz,
+        terminal_outcome text,
+        receipt_lookup_state text NOT NULL DEFAULT 'pending',
+        dispatch_authorized_at timestamptz,
+        superseded_by_attempt_id uuid,
+        claim_token uuid,
+        claim_expires_at timestamptz,
+        authorization_kind text,
+        frozen_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+        created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE rednote_publish_attempt_receipts (
+        attempt_id uuid PRIMARY KEY REFERENCES rednote_publish_attempts(id),
+        rednote_url text,
+        rednote_note_id text NOT NULL,
+        platform_publish_time timestamptz NOT NULL,
+        provenance jsonb NOT NULL
+      );
     `);
   });
 
@@ -258,6 +298,7 @@ describe('local publish job PostgreSQL execution', () => {
       TRUNCATE local_publish_job_success_attestation_release_acks;
       TRUNCATE rednote_publish_batch_items;
       TRUNCATE rednote_publish_batches CASCADE;
+      TRUNCATE rednote_publish_attempts CASCADE;
     `);
   });
 
@@ -306,8 +347,12 @@ describe('local publish job PostgreSQL execution', () => {
       tags: snapshot.tags,
       platform: snapshot.platform,
       mediaType: snapshot.mediaType,
+      mediaIndex: snapshot.mediaIndex,
       mediaUrl: snapshot.mediaUrl,
+      media,
+      expectedAccountId: snapshot.expectedAccountId,
       publishAt: snapshot.publishAt,
+      notionLastEditedTime: snapshot.notionLastEditedTime,
       claimToken: expect.any(String),
       claimExpiresAt: expect.any(String),
       verificationAttempts: 0,
@@ -319,11 +364,7 @@ describe('local publish job PostgreSQL execution', () => {
         snapshotRevision: snapshot.notionLastEditedTime,
         approvedState: 'approved',
         approvedAt: expect.any(String),
-        media: {
-          url: snapshot.mediaUrl,
-          type: snapshot.mediaType,
-          identity: expect.any(String),
-        },
+        media,
         publishAt: snapshot.publishAt,
         lateAction: 'schedule',
       },
@@ -687,5 +728,57 @@ describe('local publish job PostgreSQL execution', () => {
     expect(new Date(result.nextVerificationAt!).getTime()).toBeGreaterThan(
       Date.now() + 3_500_000,
     );
+  });
+
+  it('recovers an expired claim with a durable receipt into verification', async () => {
+    await insertJob({
+      id: scheduledJobId,
+      status: 'staged',
+      dueOffset: '-1 day',
+      claimed: true,
+    });
+    await database.query(
+      `UPDATE local_publish_jobs
+       SET claim_expires_at = CURRENT_TIMESTAMP - INTERVAL '1 minute'
+       WHERE id = $1::uuid`,
+      [scheduledJobId],
+    );
+    await database.query(
+      `INSERT INTO rednote_publish_attempts(
+         id, workspace_id, source_local_publish_job_id, executor_type,
+         terminal_outcome, receipt_lookup_state
+       ) VALUES (
+         $1::uuid, 'legacy-local-publish', $2::uuid, 'worker',
+         'accepted', 'found'
+       )`,
+      [attemptId, scheduledJobId],
+    );
+    await database.query(
+      `INSERT INTO rednote_publish_attempt_receipts(
+         attempt_id, rednote_note_id, platform_publish_time, provenance
+       ) VALUES (
+         $1::uuid, 'note_receipt_recovery', CURRENT_TIMESTAMP, '{}'::jsonb
+       )`,
+      [attemptId],
+    );
+
+    await expect(releaseExpiredStoredLocalPublishClaims())
+      .resolves.toEqual([scheduledJobId]);
+    await expect(database.query<{
+      status: string;
+      claim_token: string | null;
+      error_code: string;
+    }>(
+      `SELECT status, claim_token, error_code
+       FROM local_publish_jobs
+       WHERE id = $1::uuid`,
+      [scheduledJobId],
+    )).resolves.toMatchObject({
+      rows: [{
+        status: 'verification_pending',
+        claim_token: null,
+        error_code: 'RECEIPT_RECONCILIATION_REQUIRED',
+      }],
+    });
   });
 });

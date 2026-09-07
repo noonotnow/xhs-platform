@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  assertScheduledAcknowledgementMatches,
   parseLocalPublishWorkerResult,
   parseQueueLocalPublishInput,
   queueLocalPublishJob,
+  shouldHeartbeatLinkedAttempt,
   submitLocalPublishJobResult,
   type StoredLocalPublishJob,
 } from '@/lib/local-publish-jobs';
@@ -10,6 +12,7 @@ import type { LocalPublishSnapshot } from '@/types/local-publish-job';
 import type { ReadyXhsPost } from '@/types/ready-post';
 
 const snapshot: LocalPublishSnapshot = {
+  expectedAccountId: 'creator-account-1',
   notionPageId: '11111111-1111-4111-8111-111111111111',
   headline: 'Headline',
   title: 'Final title',
@@ -26,6 +29,7 @@ const snapshot: LocalPublishSnapshot = {
 function stored(status: StoredLocalPublishJob['status']): StoredLocalPublishJob {
   return {
     id: '22222222-2222-4222-8222-222222222222',
+    workspaceId: 'legacy-local-publish',
     notionPageId: snapshot.notionPageId,
     snapshot,
     status,
@@ -90,6 +94,24 @@ describe('local publish job orchestration', () => {
       .toThrow('consent must be ready_x3');
   });
 
+  it('heartbeats linked attempts only while dispatch is active', () => {
+    expect(shouldHeartbeatLinkedAttempt('claimed')).toBe(true);
+    expect(shouldHeartbeatLinkedAttempt('staged')).toBe(true);
+    expect(shouldHeartbeatLinkedAttempt('scheduled')).toBe(false);
+    expect(shouldHeartbeatLinkedAttempt('verification_pending')).toBe(false);
+  });
+
+  it('rejects a scheduled acknowledgement that differs from the frozen target', () => {
+    expect(() => assertScheduledAcknowledgementMatches(
+      '2026-08-04T13:31:00.000Z',
+      snapshot.publishAt!,
+    )).toThrow(expect.objectContaining({ code: 'SCHEDULE_READBACK_MISMATCH' }));
+    expect(() => assertScheduledAcknowledgementMatches(
+      '2026-08-04T09:30:00-04:00',
+      snapshot.publishAt!,
+    )).not.toThrow();
+  });
+
   it('passes the same idempotency key through repeat queue requests', async () => {
     const getPost = vi.fn().mockResolvedValue(readyPost());
     const findByIdempotencyKey = vi.fn()
@@ -104,7 +126,7 @@ describe('local publish job orchestration', () => {
     await expect(queueLocalPublishJob(queueBody, key, dependencies))
       .resolves.toMatchObject({ created: false });
     expect(insert).toHaveBeenCalledOnce();
-    expect(insert).toHaveBeenCalledWith(expect.any(Object), key);
+    expect(insert).toHaveBeenCalledWith(expect.any(Object), key, 'legacy-local-publish');
     expect(getPost).toHaveBeenCalledOnce();
   });
 
@@ -208,6 +230,283 @@ describe('local publish job orchestration', () => {
       noteId: 'note_123',
       shareUrl: 'https://www.rednote.com/explore/note_123',
     })).toMatchObject({ status: 'verified' });
+  });
+
+  it('parses explicit v2 outcomes without requiring a public URL', () => {
+      expect(parseLocalPublishWorkerResult({
+        contractVersion: 'rednote-worker-result/v2',
+        outcome: 'acknowledged',
+        noteId: 'note_123',
+        acknowledgedAt: '2026-08-01T12:00:00Z',
+        authenticatedAccount: {
+          accountId: 'creator-account-1',
+          capturedAt: '2026-08-01T12:00:01Z',
+          ownership: 'owned',
+        },
+        xsecAccess: {
+          accessible: true,
+          capturedAt: '2026-08-01T12:00:02Z',
+        },
+        publicIndex: {
+          status: 'pending',
+          checkedAt: '2026-08-01T12:00:03Z',
+        },
+      })).toEqual({
+        contractVersion: 'rednote-worker-result/v2',
+        outcome: 'acknowledged',
+        noteId: 'note_123',
+        acknowledgedAt: '2026-08-01T12:00:00.000Z',
+        authenticatedAccount: {
+          accountId: 'creator-account-1',
+          capturedAt: '2026-08-01T12:00:01.000Z',
+          ownership: 'owned',
+        },
+        xsecAccess: {
+          accessible: true,
+          capturedAt: '2026-08-01T12:00:02.000Z',
+        },
+        publicIndex: {
+          status: 'pending',
+          checkedAt: '2026-08-01T12:00:03.000Z',
+        },
+      });
+      expect(parseLocalPublishWorkerResult({
+        contractVersion: 'rednote-worker-result/v2',
+        outcome: 'scheduled',
+        acknowledgedAt: '2026-08-01T12:00:00Z',
+        scheduledFor: '2026-08-02T12:00:00Z',
+        authenticatedAccount: {
+          accountId: 'creator-account-1',
+          capturedAt: '2026-08-01T11:59:00Z',
+          ownership: 'owned',
+        },
+        noteId: 'scheduled_note_123',
+      })).toEqual({
+        contractVersion: 'rednote-worker-result/v2',
+        outcome: 'scheduled',
+        acknowledgedAt: '2026-08-01T12:00:00.000Z',
+        scheduledFor: '2026-08-02T12:00:00.000Z',
+        authenticatedAccount: {
+          accountId: 'creator-account-1',
+          capturedAt: '2026-08-01T11:59:00.000Z',
+          ownership: 'owned',
+        },
+        noteId: 'scheduled_note_123',
+      });
+      expect(parseLocalPublishWorkerResult({
+        contractVersion: 'rednote-worker-result/v2',
+        outcome: 'scheduled',
+        acknowledgedAt: '2026-08-01T12:00:00Z',
+        scheduledFor: '2026-08-02T12:00:00Z',
+        authenticatedAccount: {
+          accountId: 'creator-account-1',
+          capturedAt: '2026-08-01T11:59:00Z',
+          ownership: 'owned',
+        },
+      })).not.toHaveProperty('noteId');
+      expect(parseLocalPublishWorkerResult({
+        contractVersion: 'rednote-worker-result/v2',
+        outcome: 'ambiguous',
+        code: 'POST_CLICK_TIMEOUT',
+        message: 'Publication outcome is unknown',
+        occurredAt: '2026-08-01T12:00:00Z',
+      })).toMatchObject({ outcome: 'ambiguous' });
+      expect(parseLocalPublishWorkerResult({
+        contractVersion: 'rednote-worker-result/v2',
+        outcome: 'rejected',
+        code: 'ACCOUNT_MISMATCH',
+        message: 'Authenticated account did not match',
+        occurredAt: '2026-08-01T12:00:00Z',
+      })).toMatchObject({ outcome: 'rejected' });
+  });
+
+  it('rejects secret-bearing and inconsistent v2 evidence', () => {
+      expect(() => parseLocalPublishWorkerResult({
+        contractVersion: 'rednote-worker-result/v2',
+        outcome: 'acknowledged',
+        noteId: 'note_123',
+        acknowledgedAt: '2026-08-01T12:00:00Z',
+        authenticatedAccount: {
+          accountId: 'creator-account-1',
+          capturedAt: '2026-08-01T12:00:00Z',
+          ownership: 'owned',
+        },
+        xsecAccess: {
+          accessible: true,
+          capturedAt: '2026-08-01T12:00:00Z',
+          xsecToken: 'secret',
+        },
+      })).toThrow('unsupported fields');
+      expect(() => parseLocalPublishWorkerResult({
+        contractVersion: 'rednote-worker-result/v2',
+        outcome: 'acknowledged',
+        noteId: 'note_123',
+        acknowledgedAt: '2026-08-01T12:00:00Z',
+        authenticatedAccount: {
+          accountId: 'creator-account-1',
+          capturedAt: '2026-08-01T12:00:00Z',
+          ownership: 'owned',
+        },
+        publicIndex: {
+          status: 'indexed',
+          checkedAt: '2026-08-01T12:00:00Z',
+          publicUrl: 'https://www.rednote.com/explore/different-note',
+        },
+      })).toThrow('must match noteId');
+  });
+
+  it('publishes an acknowledged v2 result from Note ID and account evidence alone', async () => {
+      const prepared = {
+        ...stored('verified'),
+        shareUrl: undefined,
+        verifiedAt: '2026-08-01T12:00:01.000Z',
+      };
+      const dependencies = {
+        stage: vi.fn(),
+        recordDispatch: vi.fn(),
+        deferVerification: vi.fn(),
+        fail: vi.fn(),
+        prepareVerification: vi.fn(),
+        recordAcknowledged: vi.fn().mockResolvedValue(prepared),
+        completeReconciliation: vi.fn().mockResolvedValue({
+          ...stored('reconciled'),
+          shareUrl: undefined,
+        }),
+        backfill: vi.fn(),
+      };
+      const result = {
+        contractVersion: 'rednote-worker-result/v2',
+        outcome: 'acknowledged',
+        noteId: 'note_123',
+        acknowledgedAt: '2026-08-01T12:00:00Z',
+        authenticatedAccount: {
+          accountId: 'creator-account-1',
+          capturedAt: '2026-08-01T12:00:01Z',
+          ownership: 'owned',
+        },
+      };
+
+      await expect(submitLocalPublishJobResult(
+        stored('claimed').id,
+        stored('claimed').claimToken!,
+        result,
+        dependencies,
+      )).resolves.toMatchObject({ status: 'reconciled', noteId: 'note_123' });
+      expect(dependencies.backfill).toHaveBeenCalledWith(snapshot.notionPageId, {
+        status: 'success',
+        noteId: 'note_123',
+      }, prepared.verifiedAt);
+      expect(dependencies.completeReconciliation).toHaveBeenCalledWith(
+        stored('claimed').id,
+        stored('claimed').claimToken,
+        'note_123',
+        undefined,
+        'legacy-local-publish',
+      );
+  });
+
+  it.each([
+      ['scheduled', 'recordScheduledAcknowledgement', 'scheduled'],
+      ['ambiguous', 'recordAmbiguous', 'verification_pending'],
+      ['rejected', 'recordRejected', 'failed'],
+    ] as const)('routes a v2 %s outcome to its durable transition', async (
+      outcome,
+      dependencyName,
+      status,
+    ) => {
+      const dependencies = {
+        stage: vi.fn(),
+        recordDispatch: vi.fn(),
+        deferVerification: vi.fn(),
+        fail: vi.fn(),
+        prepareVerification: vi.fn(),
+        completeReconciliation: vi.fn(),
+        backfill: vi.fn(),
+        recordScheduledAcknowledgement: vi.fn().mockResolvedValue(stored('scheduled')),
+        recordAmbiguous: vi.fn().mockResolvedValue(stored('verification_pending')),
+        recordRejected: vi.fn().mockResolvedValue(stored('failed')),
+      };
+      const result = outcome === 'scheduled'
+        ? {
+            contractVersion: 'rednote-worker-result/v2',
+            outcome,
+            acknowledgedAt: '2026-08-01T12:00:00Z',
+            scheduledFor: '2026-08-02T12:00:00Z',
+            authenticatedAccount: {
+              accountId: 'creator-account-1',
+              capturedAt: '2026-08-01T11:59:00Z',
+              ownership: 'owned',
+            },
+          }
+        : {
+            contractVersion: 'rednote-worker-result/v2',
+            outcome,
+            code: outcome === 'ambiguous' ? 'POST_CLICK_TIMEOUT' : 'UPSTREAM_REJECTED',
+            message: outcome === 'ambiguous'
+              ? 'Publication outcome is unknown'
+              : 'RedNote rejected publication',
+            occurredAt: '2026-08-01T12:00:00Z',
+          };
+      await expect(submitLocalPublishJobResult(
+        stored('claimed').id,
+        stored('claimed').claimToken!,
+        result,
+        dependencies,
+      )).resolves.toMatchObject({ status });
+      expect(dependencies[dependencyName]).toHaveBeenCalledOnce();
+      if (outcome === 'scheduled') {
+        expect(dependencies.recordScheduledAcknowledgement).toHaveBeenCalledWith(
+          stored('claimed').id,
+          stored('claimed').claimToken,
+          {
+            acknowledgedAt: '2026-08-01T12:00:00.000Z',
+            scheduledFor: '2026-08-02T12:00:00.000Z',
+            accountId: 'creator-account-1',
+            accountCapturedAt: '2026-08-01T11:59:00.000Z',
+            ownership: 'owned',
+          },
+          'legacy-local-publish',
+        );
+      }
+      expect(dependencies.backfill).not.toHaveBeenCalled();
+  });
+
+  it('quarantines an acknowledged account mismatch without Notion publication', async () => {
+      const dependencies = {
+        stage: vi.fn(),
+        recordDispatch: vi.fn(),
+        deferVerification: vi.fn(),
+        fail: vi.fn(),
+        prepareVerification: vi.fn(),
+        recordAcknowledged: vi.fn().mockResolvedValue({
+          ...stored('verification_pending'),
+          receiptOutcome: 'acknowledged' as const,
+          errorCode: 'ACCOUNT_MISMATCH',
+        }),
+        completeReconciliation: vi.fn(),
+        backfill: vi.fn(),
+      };
+      await expect(submitLocalPublishJobResult(
+        stored('claimed').id,
+        stored('claimed').claimToken!,
+        {
+          contractVersion: 'rednote-worker-result/v2',
+          outcome: 'acknowledged',
+          noteId: 'note_123',
+          acknowledgedAt: '2026-08-01T12:00:00Z',
+          authenticatedAccount: {
+            accountId: 'wrong-account',
+            capturedAt: '2026-08-01T12:00:01Z',
+            ownership: 'owned',
+          },
+        },
+        dependencies,
+      )).resolves.toMatchObject({
+        status: 'verification_pending',
+        errorCode: 'ACCOUNT_MISMATCH',
+      });
+      expect(dependencies.backfill).not.toHaveBeenCalled();
+      expect(dependencies.completeReconciliation).not.toHaveBeenCalled();
   });
 
   it('rejects credential-like failure details before persistence', () => {
@@ -417,6 +716,7 @@ describe('local publish job orchestration', () => {
       'REDNOTE_300031',
       'RedNote is still processing the public post',
       [900, 3_600, 21_600, 86_400],
+      'legacy-local-publish',
     );
     expect(dependencies.backfill).not.toHaveBeenCalled();
   });

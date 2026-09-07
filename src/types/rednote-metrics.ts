@@ -9,8 +9,13 @@ export interface RednoteMetrics {
 export interface ClaimedRednoteMetricPost {
   notionPageId: string;
   noteId: string;
-  shareUrl: string;
+  shareUrl?: string;
   publishedAt: string;
+  authenticatedAccount: {
+    accountId: string;
+    capturedAt: string;
+  };
+  xsecAccessibleAt?: string;
   claimToken: string;
   claimExpiresAt: string;
   previousMetrics?: RednoteMetrics;

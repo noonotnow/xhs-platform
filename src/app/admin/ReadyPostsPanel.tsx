@@ -235,11 +235,11 @@ function jobStatusCopy(
         ? 'Scheduled in RedNote Creator'
         : 'Submitted to RedNote',
       detail: job.nextVerificationAt
-        ? `Stable identifiers are saved. Public verification is due ${new Intl.DateTimeFormat(
+        ? `The publish receipt is saved. Ownership verification is due ${new Intl.DateTimeFormat(
             undefined,
             { dateStyle: 'medium', timeStyle: 'short' },
           ).format(new Date(job.nextVerificationAt))}. Do not publish again.`
-        : 'Stable identifiers are saved. Public verification is pending; do not publish again.',
+        : 'The publish receipt is saved. Verify the existing post; do not publish again.',
     };
   }
   if (job.status === 'operator_attested') {
@@ -260,7 +260,7 @@ function jobStatusCopy(
             `The immutable assertion records ${attestedTime} ET at source revision ` +
             `${job.successAttestation.snapshotRevision}, but the current Notion ScheduledDate ` +
             'or Post revision no longer matches. Dispatch remains closed; review the evidence ' +
-            'and reconcile by public URL rather than rewriting the assertion.',
+            'and reconcile the existing receipt rather than rewriting the assertion.',
         };
       }
       return {
@@ -268,37 +268,37 @@ function jobStatusCopy(
         title: 'Scheduled · receipt pending',
         detail:
           `Manual scheduling is recorded for ${attestedTime} ET and the exact frozen packet. ` +
-          'Dispatch is closed. Add the public URL later to verify identity, backfill Published, ' +
-          'and reconcile metrics.',
+          'Dispatch is closed. Verify the resulting note ID and authenticated account later to ' +
+          'backfill Published. Public indexing may arrive afterward.',
       };
     }
     return {
       tone: 'warning',
       title: 'Scheduled · receipt pending',
       detail:
-        'Dispatch and recovery are permanently closed. Add the public URL after it is live so the existing post can be verified.',
+        'Dispatch and recovery are permanently closed. Verify the existing post by note ID and authenticated account; a public URL is optional.',
     };
   }
   if (job.status === 'verification_pending') {
     return {
       tone: 'warning',
-      title: `Public verification pending${job.errorCode ? ` (${job.errorCode})` : ''}`,
+      title: `Verify receipt${job.errorCode ? ` (${job.errorCode})` : ''}`,
       detail: job.nextVerificationAt
-        ? `${job.errorMessage || 'RedNote is still processing or indexing the post.'} Retry is due ${
+        ? `${job.errorMessage || 'The scheduled, ambiguous, or account evidence needs reconciliation.'} Verification is due ${
             new Intl.DateTimeFormat(undefined, {
               dateStyle: 'medium',
               timeStyle: 'short',
             }).format(new Date(job.nextVerificationAt))
           }. Do not publish again.`
-        : `${job.errorMessage || 'RedNote is still processing or indexing the post.'} Do not publish again.`,
+        : `${job.errorMessage || 'The scheduled, ambiguous, or account evidence needs reconciliation.'} Do not publish again.`,
     };
   }
   if (job.status === 'verified') {
     return {
       tone: 'warning',
-      title: 'Public post verified; Notion reconciliation pending',
+      title: 'Publication acknowledged; Notion reconciliation pending',
       detail:
-        'The query-free public post is visible. Do not publish again; retry the same verified report to finish Notion backfill.',
+        'RedNote issued the note ID and the authenticated account owns it. Do not publish again; retry the same receipt to finish Notion backfill.',
     };
   }
   if (job.status === 'failed') {
@@ -310,8 +310,8 @@ function jobStatusCopy(
   }
   return {
     tone: 'success',
-    title: 'Verified and reconciled',
-    detail: 'The exact public RedNote post was verified before Notion was marked Published.',
+    title: 'Published and reconciled',
+    detail: 'The durable note ID and authenticated ownership were verified before Notion was marked Published. Public indexing is tracked separately.',
   };
 }
 
@@ -362,9 +362,9 @@ function manualReconciliationStatusCopy(
   }
   return {
     tone: 'success',
-    title: 'Existing post verified and reconciled',
+    title: 'Existing post reconciled',
     detail:
-      'The exact public RedNote post was verified and the canonical Notion row was marked Published.',
+      'The durable RedNote identity was verified and the canonical Notion row was marked Published.',
   };
 }
 
@@ -1236,10 +1236,11 @@ export default function ReadyPostsPanel() {
           aria-labelledby="receipt-reconciliation-heading"
         >
           <div>
-            <h3 id="receipt-reconciliation-heading">Add public URL</h3>
+            <h3 id="receipt-reconciliation-heading">Verify receipt</h3>
             <p>
-              These exact attempts were scheduled successfully but still lack a verified public
-              receipt. A Posts status of Published is only a cue and does not complete this step.
+              These exact attempts were scheduled successfully but still need durable receipt
+              identity. Current workers report the note ID and authenticated ownership directly;
+              this manual path also accepts a clean public URL when one is available.
             </p>
           </div>
           {receiptPendingJobs.map((job) => {
@@ -1263,8 +1264,8 @@ export default function ReadyPostsPanel() {
                   </p>
                 ) : reconciliation ? (
                   <p className={styles.receiptProgress}>
-                    Public receipt verification: {reconciliation.status.replace('_', ' ')}.
-                    The worker verifies identity and content before Published Complete.
+                    Receipt verification: {reconciliation.status.replace('_', ' ')}.
+                    The worker verifies note identity and authenticated ownership before Published.
                   </p>
                 ) : (
                   <>
@@ -1283,7 +1284,7 @@ export default function ReadyPostsPanel() {
                       />
                       <small>
                         Query and fragment data, including xsec_token, is discarded by the server.
-                        Only the canonical public note identity is retained.
+                        The note ID is durable; the clean public URL is derived metadata.
                       </small>
                       {inputError && (
                         <small className={styles.inlineError} role="alert">{inputError}</small>
@@ -1300,8 +1301,8 @@ export default function ReadyPostsPanel() {
                         disabled={isBusy}
                       />
                       <span>
-                        I confirm this exact post is public and should be verified, not published
-                        again.
+                        I confirm this is the exact existing post and should be verified, not
+                        published again.
                       </span>
                     </label>
                     <button
@@ -1315,7 +1316,7 @@ export default function ReadyPostsPanel() {
                         Boolean(inputError)
                       }
                     >
-                      {isBusy ? 'Queueing verification…' : 'Add public URL'}
+                      {isBusy ? 'Queueing verification…' : 'Verify existing post'}
                     </button>
                   </>
                 )}
@@ -1737,8 +1738,8 @@ export default function ReadyPostsPanel() {
                         <p>
                           First set this exact time in RedNote Creator, then copy the same instant
                           into Notion ScheduledDate. Only then close dispatch for this frozen
-                          packet. Notion stays unchanged until a public URL is independently
-                          verified.
+                          packet. Notion stays unchanged until the note ID and authenticated
+                          ownership are independently verified.
                         </p>
                         <small>
                           Packet <code>{manualSchedulingCandidate.itemHash}</code>
@@ -2147,9 +2148,10 @@ export default function ReadyPostsPanel() {
                   </a>
                 </div>
                 <p className={styles.backfillNotice}>
-                  Leave Notion Approved until the exact public URL and note ID are verified.
-                  Successful verification backfills the receipt and moves the canonical row to
-                  Published without rewriting packet, copy, media, or needs flags.
+                  Leave Notion Approved until the note ID and authenticated account ownership are
+                  verified. Successful verification moves the canonical row to Published without
+                  rewriting packet, copy, media, or needs flags. Public indexing is a later,
+                  non-blocking audit attribute.
                 </p>
               </section>
 

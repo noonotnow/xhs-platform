@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@/lib/db', () => ({
   getPool: () => ({
+    query: mocks.query,
     connect: vi.fn().mockResolvedValue({
       query: mocks.query,
       release: mocks.release,
@@ -17,6 +18,7 @@ vi.mock('@/lib/db', () => ({
 import {
   createRednotePublishAttempt,
   frozenPayloadDigest,
+  recordLinkedAttemptOutcome,
   requeueReadyX3InvalidClaimFailure,
   requeueReadyX3NotLoggedInFailure,
   requeueReadyX3ScheduleReadbackMismatch,
@@ -24,7 +26,10 @@ import {
   supersedeUnclaimedReadyX3Schedule,
   withReadyX3SourceLock,
 } from '@/lib/rednote-publishing-attempt-store';
-import { REDNOTE_PUBLISHING_CONTRACT_REVISION } from '@/lib/rednote-publishing-contract-v1';
+import {
+  REDNOTE_PUBLISHING_CONTRACT_REVISION,
+  type FrozenRednoteAttemptPayload,
+} from '@/lib/rednote-publishing-contract-v1';
 
 const input = {
   workspaceId: 'workspace-1',
@@ -161,6 +166,139 @@ describe('Ready x3 source serialization', () => {
     mocks.release.mockReset();
   });
 
+  describe('linked attempt receipt reconciliation', () => {
+    beforeEach(() => {
+      mocks.query.mockReset();
+      mocks.release.mockReset();
+    });
+
+    it('attaches a Note ID receipt to the existing scheduled attempt under a new verification claim', async () => {
+      const attempt = {
+        id: input.attemptId,
+        workspace_id: input.workspaceId,
+        source_notion_page_id: input.sourceNotionPageId,
+        source_local_publish_job_id: input.jobId,
+        payload_digest: 'a'.repeat(64),
+        payload_revision: input.revision,
+        executor_type: 'worker',
+        executor_kind: 'playwright',
+        executor_id: 'worker-1',
+        requested_at: '2026-08-31T15:00:00.000Z',
+        created_at: '2026-08-31T15:00:00.000Z',
+        approved_at: '2026-08-31T15:01:00.000Z',
+        terminal_outcome: 'accepted',
+        terminal_at: '2026-08-31T15:02:00.000Z',
+        receipt_lookup_state: 'identity_pending',
+        receipt_lookup_updated_at: '2026-08-31T15:02:00.000Z',
+        active: false,
+        supersedes_attempt_id: null,
+        superseded_by_attempt_id: null,
+        authorization_kind: null,
+      };
+      mocks.query.mockImplementation(async (statement: string) => {
+        if (statement.includes('SELECT rednote_url, rednote_note_id')) {
+          return {
+            rows: [{ rednote_url: null, rednote_note_id: 'note_123' }],
+            rowCount: 1,
+          };
+        }
+        if (statement.includes('SELECT * FROM rednote_publish_attempts')) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (statement.includes('JOIN local_publish_jobs job')) {
+          return { rows: [attempt], rowCount: 1 };
+        }
+        if (statement.includes('UPDATE rednote_publish_attempts SET receipt_lookup_state')) {
+          return {
+            rows: [{ ...attempt, receipt_lookup_state: 'found' }],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 1 };
+      });
+
+      await expect(recordLinkedAttemptOutcome({
+        workspaceId: input.workspaceId,
+        localJobId: input.jobId,
+        claimToken: '33333333-3333-4333-8333-333333333333',
+        outcome: 'accepted',
+        receipt: {
+          rednoteNoteId: 'note_123',
+          platformPublishTime: '2026-08-31T15:10:00.000Z',
+          provenance: { kind: 'rednote_worker_result_v2' },
+        },
+      })).resolves.toMatchObject({
+        id: input.attemptId,
+        terminalOutcome: 'accepted',
+        receiptLookupState: 'found',
+      });
+
+      const event = mocks.query.mock.calls.find(([statement]) =>
+        String(statement).includes("'receipt_lookup'"));
+      expect(event?.[1]).toEqual([input.attemptId, 'worker', 'worker-1']);
+      expect(mocks.query.mock.calls.some(([statement]) =>
+        String(statement).includes('INSERT INTO rednote_publish_attempt_receipts'))).toBe(true);
+    });
+
+    it('rejects a replay that conflicts with the immutable receipt identity', async () => {
+      const attempt = {
+        id: input.attemptId,
+        workspace_id: input.workspaceId,
+        source_notion_page_id: input.sourceNotionPageId,
+        source_local_publish_job_id: input.jobId,
+        payload_digest: 'a'.repeat(64),
+        payload_revision: input.revision,
+        executor_type: 'worker',
+        executor_kind: 'playwright',
+        executor_id: 'worker-1',
+        requested_at: '2026-08-31T15:00:00.000Z',
+        created_at: '2026-08-31T15:00:00.000Z',
+        approved_at: '2026-08-31T15:01:00.000Z',
+        terminal_outcome: 'accepted',
+        terminal_at: '2026-08-31T15:02:00.000Z',
+        receipt_lookup_state: 'found',
+        receipt_lookup_updated_at: '2026-08-31T15:02:00.000Z',
+        active: false,
+        supersedes_attempt_id: null,
+        superseded_by_attempt_id: null,
+        authorization_kind: null,
+      };
+      mocks.query.mockImplementation(async (statement: string) => {
+        if (statement.includes('SELECT * FROM rednote_publish_attempts')) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (statement.includes('JOIN local_publish_jobs job')) {
+          return { rows: [attempt], rowCount: 1 };
+        }
+        if (statement.includes('SELECT rednote_url, rednote_note_id')) {
+          return {
+            rows: [{
+              rednote_url: 'https://www.rednote.com/explore/note_original',
+              rednote_note_id: 'note_original',
+            }],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 1 };
+      });
+
+      await expect(recordLinkedAttemptOutcome({
+        workspaceId: input.workspaceId,
+        localJobId: input.jobId,
+        claimToken: '33333333-3333-4333-8333-333333333333',
+        outcome: 'accepted',
+        receipt: {
+          rednoteNoteId: 'note_different',
+          platformPublishTime: '2026-08-31T15:10:00.000Z',
+          provenance: { kind: 'rednote_worker_result_v2' },
+        },
+      })).rejects.toMatchObject({
+        code: 'ATTEMPT_RECEIPT_CONFLICT',
+        status: 409,
+      });
+    });
+  });
+
   it('holds one transaction-scoped advisory lock for the source operation', async () => {
     mocks.query.mockResolvedValue({ rows: [], rowCount: 0 });
     const operation = vi.fn().mockResolvedValue('created');
@@ -179,7 +317,7 @@ describe('Ready x3 source serialization', () => {
 
   it('does not reacquire the same source lock while creating the linked attempt', async () => {
     const requestedAt = '2026-08-31T18:00:00.000Z';
-    const payload = {
+    const payload: FrozenRednoteAttemptPayload = {
       contractRevision: REDNOTE_PUBLISHING_CONTRACT_REVISION,
       sourceNotionPageId: 'notion-page-1',
       sourceLocalPublishJobId: '11111111-1111-4111-8111-111111111111',
@@ -189,6 +327,7 @@ describe('Ready x3 source serialization', () => {
       executor: { type: 'worker' as const, kind: 'playwright' as const, id: 'worker-1' },
       browserPayload: {
         sourcePostId: 'notion-page-1',
+        expectedAccountId: 'creator-account-1',
         title: 'Title',
         caption: 'Caption',
         tags: ['Tag'],
