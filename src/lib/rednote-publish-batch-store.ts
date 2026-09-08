@@ -100,7 +100,12 @@ function isAfter(value: Date | string | null | undefined, earlier: Date | string
   return Boolean(value && earlier && new Date(value).getTime() > new Date(earlier).getTime());
 }
 
-function storedManifestHash(items: PublishBatchItem[]) {
+export function storedManifestHash(
+  items: ReadonlyArray<Pick<
+    PublishBatchItem,
+    'notionPageId' | 'itemHash' | 'dispatchMode' | 'lateBySeconds'
+  >>,
+) {
   const manifest = items.map((item) => ({
     notionPageId: item.notionPageId,
     itemHash: item.itemHash,

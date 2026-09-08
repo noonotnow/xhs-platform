@@ -33,6 +33,7 @@ import {
   REDNOTE_PUBLISHING_CONTRACT_REVISION,
   type FrozenRednoteAttemptPayload,
 } from '@/lib/rednote-publishing-contract-v1';
+import { storedManifestHash } from '@/lib/rednote-publish-batch-store';
 import { rednoteMediaIdentity } from '@/lib/rednote-publish-authorization';
 
 const input = {
@@ -55,10 +56,6 @@ function stableDigest(value: unknown): string {
     return JSON.stringify(item);
   };
   return createHash('sha256').update(stable(value)).digest('hex');
-}
-
-function storedBatchManifestDigest(value: unknown): string {
-  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 
 function mockEligibleRecovery(eligible: boolean) {
@@ -241,7 +238,7 @@ describe('Ready x3 pre-provider failure recovery', () => {
               batch_snapshot: batchSnapshot,
               dispatch_mode: 'scheduled',
               item_hash: itemHash,
-              manifest_hash: storedBatchManifestDigest(batchManifest),
+              manifest_hash: storedManifestHash(batchManifest),
               batch_manifest: batchManifest,
             }],
           };
@@ -332,7 +329,7 @@ describe('Ready x3 pre-provider failure recovery', () => {
               batch_snapshot: batchSnapshot,
               dispatch_mode: 'scheduled',
               item_hash: itemHash,
-              manifest_hash: storedBatchManifestDigest(batchManifest),
+              manifest_hash: storedManifestHash(batchManifest),
               batch_manifest: batchManifest,
             }],
           };
@@ -377,7 +374,7 @@ describe('Ready x3 pre-provider failure recovery', () => {
                 item_hash: invalidDigest === 'item' ? 'f'.repeat(64) : itemHash,
                 manifest_hash: invalidDigest === 'manifest'
                   ? 'f'.repeat(64)
-                  : storedBatchManifestDigest(batchManifest),
+                  : storedManifestHash(batchManifest),
                 batch_manifest: batchManifest,
               }],
             };

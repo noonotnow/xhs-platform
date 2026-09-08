@@ -8,6 +8,7 @@ import {
   rednotePublishMedia,
   snapshotPublishMedia,
 } from '@/lib/rednote-publish-authorization';
+import { storedManifestHash } from '@/lib/rednote-publish-batch-store';
 import type { ReadyX3Authorization } from '@/types/local-publish-job';
 import type { LocalPublishSnapshot } from '@/types/local-publish-job';
 import {
@@ -158,10 +159,6 @@ export function frozenPayloadDigest(payload: FrozenRednoteAttemptPayload) {
 
 function stableDigest(value: unknown) {
   return createHash('sha256').update(stable(value)).digest('hex');
-}
-
-function storedBatchManifestDigest(value: unknown) {
-  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 
 export async function createLinkedRednotePublishAttempt(
@@ -1517,7 +1514,7 @@ export async function requeueExpiredMisclassifiedBatchClaim(input: {
       !row ||
       !isDeepStrictEqual(row.job_snapshot, row.batch_snapshot) ||
       stableDigest(row.batch_snapshot) !== row.item_hash ||
-      storedBatchManifestDigest(row.batch_manifest) !== row.manifest_hash ||
+      storedManifestHash(row.batch_manifest) !== row.manifest_hash ||
       payload.payloadDigest !== row.payload_digest ||
       payload.payloadRevision !== row.payload_revision ||
       payload.sourceNotionPageId !== input.sourceNotionPageId ||
