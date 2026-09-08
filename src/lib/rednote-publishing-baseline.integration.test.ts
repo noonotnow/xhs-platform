@@ -1,8 +1,9 @@
 import { readFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { storedManifestHash } from '@/lib/rednote-publish-batch-store';
 
 const migrationFiles = [
   '002_xhs_publish_receipts.sql',
@@ -36,6 +37,21 @@ const migrationFiles = [
   '028_legacy_ready_x3_batch_fallback_reclassification.sql',
   '029_terminal_expired_batch_claim_reclassification.sql',
 ] as const;
+
+function stable(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stable(item)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function stableDigest(value: unknown) {
+  return createHash('sha256').update(stable(value)).digest('hex');
+}
 
 describe('canonical local publishing migration chain', () => {
   let database: PGlite;
@@ -122,6 +138,8 @@ describe('canonical local publishing migration chain', () => {
     fallback?: Record<string, unknown>;
     errorMessage?: string;
     addExecutionEvidence?: boolean;
+    receiptLookupUpdatedAt?: string;
+    frozenSourcePageId?: string;
   } = {}) {
     const batchId = randomUUID();
     const itemId = randomUUID();
@@ -135,17 +153,76 @@ describe('canonical local publishing migration chain', () => {
       action: 'post_now',
       maxLateMinutes: 30,
     };
+    const revision = '2026-09-08T16:37:00.000Z';
+    const mediaUrl = 'https://images.xhs.justlikekatie.com/day-16.png';
+    const mediaIdentity = stableDigest({ type: 'image', url: mediaUrl });
+    const snapshot = {
+      notionPageId: pageId,
+      headline: 'Day 16',
+      title: 'Day 16',
+      caption: 'Caption',
+      tags: ['Tag'],
+      platform: 'RedNote',
+      mediaType: 'image',
+      mediaIndex: 0,
+      mediaUrl,
+      media: [{ type: 'image', url: mediaUrl, identity: mediaIdentity }],
+      publishAt: '2026-09-08T23:20:00.000Z',
+      notionLastEditedTime: revision,
+      expectedAccountId: '678ba3b5000000000a03ecd2',
+    };
+    const browserPayload = {
+      sourcePostId: pageId,
+      expectedAccountId: snapshot.expectedAccountId,
+      title: snapshot.title,
+      caption: snapshot.caption,
+      tags: snapshot.tags,
+      scheduledDate: snapshot.publishAt,
+      targetPublishAt: snapshot.publishAt,
+      timingMode: 'scheduled',
+      visibility: 'public',
+      publishMode: 'image',
+      mediaAssets: [{
+        assetId: 'image-0',
+        deliveryUrl: mediaUrl,
+        sha256: 'a'.repeat(64),
+        mediaType: 'image',
+        role: 'content',
+      }],
+    };
+    const payloadDigest = stableDigest(browserPayload);
+    const frozenPayload = {
+      contractRevision: 'rednote-publishing/v1',
+      sourceNotionPageId: options.frozenSourcePageId ?? pageId,
+      sourceLocalPublishJobId: jobId,
+      payloadRevision: revision,
+      payloadDigest,
+      requestedAt: approval,
+      executor: {
+        type: 'worker',
+        kind: 'playwright',
+        id: 'worker-test',
+      },
+      browserPayload,
+    };
+    const itemHash = stableDigest(snapshot);
+    const manifestHash = storedManifestHash([{
+      notionPageId: pageId,
+      itemHash,
+      dispatchMode: 'scheduled',
+      lateBySeconds: 0,
+    }]);
     await database.query(
       `INSERT INTO rednote_publish_batches(
          id, kind, status, manifest_hash, approved_at
        ) VALUES ($1, 'bootstrap', 'approved', $2, $3)`,
-      [batchId, 'a'.repeat(64), approval],
+      [batchId, manifestHash, approval],
     );
     await database.query(
       `INSERT INTO rednote_publish_batch_items(
          id, batch_id, notion_page_id, snapshot, item_hash, state, dispatch_mode
-       ) VALUES ($1, $2, $3, '{}'::jsonb, $4, 'queued', 'scheduled')`,
-      [itemId, batchId, pageId, 'b'.repeat(64)],
+       ) VALUES ($1, $2, $3, $4::jsonb, $5, 'queued', 'scheduled')`,
+      [itemId, batchId, pageId, JSON.stringify(snapshot), itemHash],
     );
     await database.query(
       `INSERT INTO local_publish_jobs(
@@ -153,12 +230,13 @@ describe('canonical local publishing migration chain', () => {
          batch_item_id, claim_attempts, claimed_at, claim_expires_at,
          completed_at, error_code, error_message
        ) VALUES (
-         $1, $2, '{}'::jsonb, 'failed', $3, 'workspace-1', $4, 1,
-         '2026-09-08T19:15:12.818Z', $5, $5, 'CLAIM_LEASE_EXPIRED', $6
+         $1, $2, $3::jsonb, 'failed', $4, 'workspace-1', $5, 1,
+         '2026-09-08T19:15:12.818Z', $6, $6, 'CLAIM_LEASE_EXPIRED', $7
        )`,
       [
         jobId,
         pageId,
+        JSON.stringify(snapshot),
         randomUUID(),
         itemId,
         terminal,
@@ -184,18 +262,21 @@ describe('canonical local publishing migration chain', () => {
          late_fallback_policy
        ) VALUES (
          $1, 'workspace-1', $2, 'rednote-publishing/v1',
-         $3, $4, '{}'::jsonb, $5, 'batch-revision',
+         $3, $4, $5::jsonb, $6, $7,
          'worker', 'playwright', 'worker-test', '2026-09-08T23:20:00Z',
-         $6, 'not_required', $7, false, $6, 'known_failed', $7,
-         $8, $7, 'ready_x3', $9::jsonb
+         $8, 'not_required', $9, false, $8, 'known_failed', $10,
+         $11, $10, 'ready_x3', $12::jsonb
        )`,
       [
         attemptId,
         randomUUID(),
         pageId,
         jobId,
-        'c'.repeat(64),
+        JSON.stringify(frozenPayload),
+        payloadDigest,
+        revision,
         approval,
+        options.receiptLookupUpdatedAt ?? terminal,
         terminal,
         claimToken,
         JSON.stringify(fallback),
@@ -218,7 +299,43 @@ describe('canonical local publishing migration chain', () => {
         [attemptId, terminal],
       );
     }
-    return { attemptId, approvedAt: approval };
+    return {
+      attemptId,
+      approvedAt: approval,
+      batchId,
+      itemId,
+      jobId,
+      pageId,
+      itemHash,
+      manifestHash,
+      revision,
+    };
+  }
+
+  async function expectTerminalReclassificationRejected(attemptId: string) {
+    await database.exec('BEGIN');
+    try {
+      await database.exec(
+        `SELECT set_config('app.ready_x3_invalid_claim_recovery', 'on', true);
+         SELECT set_config(
+           'app.terminal_expired_batch_claim_reclassification',
+           'on',
+           true
+         )`,
+      );
+      await expect(database.query(
+        `UPDATE rednote_publish_attempts
+         SET authorization_kind=NULL,late_fallback_policy=NULL,
+             active=true,terminal_outcome=NULL,terminal_at=NULL,
+             receipt_lookup_state='pending',
+             receipt_lookup_updated_at=CURRENT_TIMESTAMP,
+             claim_token=NULL,claim_expires_at=NULL
+         WHERE id=$1`,
+        [attemptId],
+      )).rejects.toThrow(/Ready x3 authorization is immutable/);
+    } finally {
+      await database.exec('ROLLBACK');
+    }
   }
 
   it('installs every baseline and RedNote worker table in order', async () => {
@@ -739,35 +856,184 @@ describe('canonical local publishing migration chain', () => {
     }
   });
 
-  it.each([
-    ['altered fallback', { fallback: { action: 'schedule', maxLateMinutes: 30 } }],
-    ['altered lease error', { errorMessage: 'Different lease failure' }],
-    ['execution evidence', { addExecutionEvidence: true }],
-  ])('rejects terminal lease-expiry reclassification with %s', async (_, options) => {
-    const { attemptId } = await insertTerminalExpiredBatchClaim(options);
+  it('rejects terminal lease-expiry reset without authorization reclassification', async () => {
+    const { attemptId } = await insertTerminalExpiredBatchClaim();
     await database.exec('BEGIN');
     try {
       await database.exec(
-        `SELECT set_config('app.ready_x3_invalid_claim_recovery', 'on', true);
-         SELECT set_config(
-           'app.terminal_expired_batch_claim_reclassification',
-           'on',
-           true
-         )`,
+        `SELECT set_config('app.ready_x3_invalid_claim_recovery', 'on', true)`,
       );
       await expect(database.query(
         `UPDATE rednote_publish_attempts
-         SET authorization_kind=NULL,late_fallback_policy=NULL,
-             active=true,terminal_outcome=NULL,terminal_at=NULL,
+         SET active=true,terminal_outcome=NULL,terminal_at=NULL,
              receipt_lookup_state='pending',
              receipt_lookup_updated_at=CURRENT_TIMESTAMP,
              claim_token=NULL,claim_expires_at=NULL
          WHERE id=$1`,
         [attemptId],
-      )).rejects.toThrow(/Ready x3 authorization is immutable/);
+      )).rejects.toThrow(
+        /terminal expired batch claim reset requires exact authorization reclassification/,
+      );
     } finally {
       await database.exec('ROLLBACK');
     }
+  });
+
+  it.each([
+    ['altered fallback', { fallback: { action: 'schedule', maxLateMinutes: 30 } }],
+    ['altered lease error', { errorMessage: 'Different lease failure' }],
+    ['execution evidence', { addExecutionEvidence: true }],
+    ['altered receipt timestamp', {
+      receiptLookupUpdatedAt: '2026-09-08T20:19:52.817Z',
+    }],
+    ['altered frozen source page', { frozenSourcePageId: 'other-page' }],
+  ])('rejects terminal lease-expiry reclassification with %s', async (_, options) => {
+    const { attemptId } = await insertTerminalExpiredBatchClaim(options);
+    await expectTerminalReclassificationRejected(attemptId);
+  });
+
+  it.each([
+    [
+      'job page mismatch',
+      async (fixture: Awaited<ReturnType<typeof insertTerminalExpiredBatchClaim>>) => {
+        await database.query(
+          `UPDATE local_publish_jobs SET notion_page_id='other-page' WHERE id=$1`,
+          [fixture.jobId],
+        );
+      },
+    ],
+    [
+      'snapshot revision mismatch',
+      async (fixture: Awaited<ReturnType<typeof insertTerminalExpiredBatchClaim>>) => {
+        await database.query(
+          `UPDATE rednote_publish_batch_items
+           SET snapshot=jsonb_set(snapshot, '{notionLastEditedTime}', '"other-revision"')
+           WHERE id=$1`,
+          [fixture.itemId],
+        );
+        await database.query(
+          `UPDATE local_publish_jobs
+           SET snapshot=jsonb_set(snapshot, '{notionLastEditedTime}', '"other-revision"')
+           WHERE id=$1`,
+          [fixture.jobId],
+        );
+      },
+    ],
+    [
+      'item digest mismatch',
+      async (fixture: Awaited<ReturnType<typeof insertTerminalExpiredBatchClaim>>) => {
+        await database.query(
+          `UPDATE rednote_publish_batch_items SET item_hash=$2 WHERE id=$1`,
+          [fixture.itemId, 'd'.repeat(64)],
+        );
+      },
+    ],
+    [
+      'manifest digest mismatch',
+      async (fixture: Awaited<ReturnType<typeof insertTerminalExpiredBatchClaim>>) => {
+        await database.query(
+          `UPDATE rednote_publish_batches SET manifest_hash=$2 WHERE id=$1`,
+          [fixture.batchId, 'e'.repeat(64)],
+        );
+      },
+    ],
+    [
+      'success attestation',
+      async (fixture: Awaited<ReturnType<typeof insertTerminalExpiredBatchClaim>>) => {
+        await database.query(
+          `INSERT INTO local_publish_job_success_attestations(
+             idempotency_key,local_publish_job_id,notion_page_id,batch_id,
+             batch_item_id,manifest_hash,item_hash,snapshot_revision,
+             snapshot_digest,contract_revision,prior_claim_token_digest,
+             expected_outcome,requested_publish_at,prior_job_status,
+             prior_claim_attempts,prior_completed_at,attested_by
+           ) VALUES(
+             $1,$2,$3,$4,$5,$6,$7,$8,$7,
+             'operator-success-attestation/v1',$9,'success',
+             '2026-09-08T23:20:00Z','failed',1,
+             '2026-09-08T20:19:53.817Z','operator@example.com'
+           )`,
+          [
+            randomUUID(),
+            fixture.jobId,
+            fixture.pageId,
+            fixture.batchId,
+            fixture.itemId,
+            fixture.manifestHash,
+            fixture.itemHash,
+            fixture.revision,
+            'f'.repeat(64),
+          ],
+        );
+      },
+    ],
+    [
+      'prior recovery',
+      async (fixture: Awaited<ReturnType<typeof insertTerminalExpiredBatchClaim>>) => {
+        await database.query(
+          `INSERT INTO rednote_publish_job_recoveries(
+             local_publish_job_id,batch_item_id,batch_id,manifest_hash,item_hash,
+             snapshot_revision,prior_error_code,prior_claim_attempts,
+             prior_completed_at,recovered_by
+           ) VALUES(
+             $1,$2,$3,$4,$5,$6,'BOUNDED_BATCH_BYPASS_DISABLED',1,
+             '2026-09-08T20:19:53.817Z','operator@example.com'
+           )`,
+          [
+            fixture.jobId,
+            fixture.itemId,
+            fixture.batchId,
+            fixture.manifestHash,
+            fixture.itemHash,
+            fixture.revision,
+          ],
+        );
+      },
+    ],
+    [
+      'queue quarantine',
+      async (fixture: Awaited<ReturnType<typeof insertTerminalExpiredBatchClaim>>) => {
+        const quarantineId = randomUUID();
+        await database.query(
+          `INSERT INTO local_publish_queue_quarantines(
+             id,idempotency_key,cutoff_at,job_count,active_claim_count,
+             dispatch_evidence_count,prior_status_counts
+           ) VALUES($1,$2,CURRENT_TIMESTAMP,1,0,0,'{"failed":1}'::jsonb)`,
+          [quarantineId, randomUUID()],
+        );
+        await database.query(
+          `INSERT INTO local_publish_queue_quarantine_items(
+             quarantine_id,local_publish_job_id,workspace_id,prior_status,
+             had_dispatch_evidence
+           ) VALUES($1,$2,'workspace-1','failed',false)`,
+          [quarantineId, fixture.jobId],
+        );
+      },
+    ],
+    [
+      'duplicate linked attempt',
+      async (fixture: Awaited<ReturnType<typeof insertTerminalExpiredBatchClaim>>) => {
+        await database.query(
+          `INSERT INTO rednote_publish_attempts(
+             id,workspace_id,idempotency_key,contract_revision,
+             source_notion_page_id,source_local_publish_job_id,frozen_payload,
+             payload_digest,payload_revision,executor_type,executor_kind,
+             executor_id,target_publish_at,requested_at,receipt_lookup_state,
+             active
+           )
+           SELECT $2,workspace_id,$3,contract_revision,source_notion_page_id,
+             source_local_publish_job_id,frozen_payload,payload_digest,
+             payload_revision,executor_type,executor_kind,executor_id,
+             target_publish_at,requested_at,'pending',false
+           FROM rednote_publish_attempts WHERE id=$1`,
+          [fixture.attemptId, randomUUID(), randomUUID()],
+        );
+      },
+    ],
+  ])('rejects terminal reclassification with persisted %s', async (_, alter) => {
+    const fixture = await insertTerminalExpiredBatchClaim();
+    await alter(fixture);
+    await expectTerminalReclassificationRejected(fixture.attemptId);
   });
 
   it('supports Note ID-only receipts and append-only renewable evidence', async () => {

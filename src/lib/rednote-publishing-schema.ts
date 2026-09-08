@@ -131,7 +131,9 @@ const READINESS_SQL = `
       ('026', 'routine', NULL, 'batch_authorization_reclassification_guard_revision'),
       ('027', 'routine', NULL, 'expired_batch_claim_reclassification_guard_revision'),
       ('028', 'routine', NULL, 'legacy_ready_x3_batch_fallback_reclassification_guard_revision'),
-      ('029', 'routine', NULL, 'terminal_expired_batch_claim_reclassification_guard_revision')
+      ('029', 'routine', NULL, 'terminal_expired_batch_claim_reclassification_guard_revision'),
+      ('029', 'routine', NULL, 'guard_terminal_expired_batch_claim_reset'),
+      ('029', 'trigger', 'rednote_publish_attempts', 'terminal_expired_batch_claim_reset')
   )
   SELECT
     migration,
