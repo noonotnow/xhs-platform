@@ -265,6 +265,7 @@ export function buildBatchCandidateAccounting(
 export async function createPublishBatch(
   kind: PublishBatchKind,
   notionPageIds: string[],
+  workspaceId: string,
   now = new Date(),
 ) {
   const expectedAccountId = process.env.REDNOTE_EXPECTED_ACCOUNT_ID?.trim();
@@ -279,7 +280,10 @@ export async function createPublishBatch(
     selectedPosts.map((post) => post.id),
   );
   const dispatchablePosts = selectedPosts.filter((post) => !handled.has(post.id));
-  const jobs = await listPublishOwningLocalJobs(dispatchablePosts.map((post) => post.id));
+  const jobs = await listPublishOwningLocalJobs(
+    dispatchablePosts.map((post) => post.id),
+    workspaceId,
+  );
   const { items, blockedCandidates } = buildBatchCandidateAccounting(
     dispatchablePosts,
     kind,
@@ -304,12 +308,13 @@ export async function createPublishBatch(
 
 async function materializeApprovedBatchAttempts(
   batch: Awaited<ReturnType<typeof listStoredPublishBatches>>[number],
+  workspaceId: string,
 ) {
   await Promise.all(batch.items.map(async (item) => {
     if (!item.localPublishJobId || item.state !== 'queued') return;
     try {
       const existing = await getLinkedRednotePublishAttempt(
-        'legacy-local-publish',
+        workspaceId,
         item.localPublishJobId,
       );
       if (
@@ -332,7 +337,7 @@ async function materializeApprovedBatchAttempts(
     await createLinkedRednotePublishAttempt(
       item.snapshot,
       item.localPublishJobId,
-      'legacy-local-publish',
+      workspaceId,
       item.localPublishJobId,
       item.dispatchMode === 'post_now' ? 'post_now' : 'schedule',
     );
@@ -343,6 +348,7 @@ export async function approvePublishBatch(
   batchId: string,
   expectedManifestHash: string,
   approvedBy: string,
+  workspaceId: string,
 ) {
   const batch = (await listStoredPublishBatches(batchId))[0];
   if (!batch || batch.manifestHash !== expectedManifestHash) {
@@ -369,7 +375,7 @@ export async function approvePublishBatch(
     );
   }
   if (batch.status !== 'pending_approval') {
-    await materializeApprovedBatchAttempts(batch);
+    await materializeApprovedBatchAttempts(batch, workspaceId);
     return (await listStoredPublishBatches(batchId))[0];
   }
   const decisions = await Promise.all(batch.items.map(async (item) => {
@@ -400,7 +406,7 @@ export async function approvePublishBatch(
     approvedBy,
     decisions,
   );
-  await materializeApprovedBatchAttempts(approved);
+  await materializeApprovedBatchAttempts(approved, workspaceId);
   return (await listStoredPublishBatches(batchId))[0];
 }
 

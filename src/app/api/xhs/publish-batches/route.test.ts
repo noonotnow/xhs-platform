@@ -18,10 +18,12 @@ vi.mock('@/lib/rednote-publish-batches', () => ({
 
 import { POST } from '@/app/api/xhs/publish-batches/route';
 
-function request(body: unknown) {
+function request(body: unknown, workspaceId: string | null = 'legacy-local-publish') {
+  const headers = new Headers({ 'Content-Type': 'application/json' });
+  if (workspaceId) headers.set('X-Workspace-Id', workspaceId);
   return new NextRequest('https://xhs.justlikekatie.com/api/xhs/publish-batches', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(body),
   });
 }
@@ -32,6 +34,20 @@ describe('publish batch route', () => {
     mocks.validateAccess.mockResolvedValue({ email: 'operator@example.com' });
     mocks.create.mockResolvedValue({ id: 'batch' });
     mocks.approve.mockResolvedValue({ id: 'batch', status: 'approved' });
+  });
+
+  it('rejects a selected-card batch request without a workspace header', async () => {
+    const response = await POST(request({
+      action: 'create',
+      kind: 'bootstrap',
+      notionPageIds: ['day-16-page-id'],
+    }, null));
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: 'X-Workspace-Id is required and must be a safe workspace identifier',
+    });
+    expect(mocks.create).not.toHaveBeenCalled();
   });
 
   it('builds the Day 16 bootstrap batch from only the explicitly selected card', async () => {
@@ -45,7 +61,11 @@ describe('publish batch route', () => {
       notionPageIds: ['day-16-page-id'],
     }));
     expect(selected.status).toBe(201);
-    expect(mocks.create).toHaveBeenCalledWith('bootstrap', ['day-16-page-id']);
+    expect(mocks.create).toHaveBeenCalledWith(
+      'bootstrap',
+      ['day-16-page-id'],
+      'legacy-local-publish',
+    );
     expect(mocks.approve).not.toHaveBeenCalled();
   });
 
@@ -70,6 +90,7 @@ describe('publish batch route', () => {
       'batch-id',
       'frozen-manifest-hash',
       'operator@example.com',
+      'legacy-local-publish',
     );
   });
 });

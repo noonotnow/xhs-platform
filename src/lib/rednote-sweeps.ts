@@ -4,6 +4,7 @@ import {
   createPublishBatch,
   dueSweepKinds,
 } from '@/lib/rednote-publish-batches';
+import { LEGACY_LOCAL_PUBLISH_WORKSPACE_ID } from '@/lib/workspace-id';
 import { releaseExpiredStoredLocalPublishClaims } from '@/lib/local-publish-job-store';
 
 function localDate(now: Date) {
@@ -74,6 +75,7 @@ export async function runDueRednoteSweeps(now = new Date()) {
       const batch = await createPublishBatch(
         cadence === 'weekly' ? 'weekly' : 'catch_up',
         [],
+        LEGACY_LOCAL_PUBLISH_WORKSPACE_ID,
         now,
       );
       await sql`

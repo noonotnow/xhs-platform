@@ -1,6 +1,7 @@
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
 
 const WORKSPACE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+export const LEGACY_LOCAL_PUBLISH_WORKSPACE_ID = 'legacy-local-publish';
 
 export function parseWorkspaceId(value: string | null): string {
   const workspaceId = value?.trim();
