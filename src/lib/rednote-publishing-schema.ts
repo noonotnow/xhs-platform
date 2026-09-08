@@ -13,6 +13,7 @@ export const REDNOTE_SCHEMA_MIGRATIONS = [
   '025',
   '026',
   '027',
+  '028',
 ] as const;
 export type RednoteSchemaMigration = (typeof REDNOTE_SCHEMA_MIGRATIONS)[number];
 export type RednoteSchemaReadiness = Record<RednoteSchemaMigration, boolean>;
@@ -72,6 +73,7 @@ const migrationFiles: Record<RednoteSchemaMigration, readonly string[]> = {
   '025': ['025_late_rednote_terminal_results.sql'],
   '026': ['026_batch_authorization_reclassification.sql'],
   '027': ['027_expired_batch_claim_reclassification.sql'],
+  '028': ['028_legacy_ready_x3_batch_fallback_reclassification.sql'],
 };
 
 const READINESS_SQL = `
@@ -125,7 +127,8 @@ const READINESS_SQL = `
       ('024', 'constraint_value', 'rednote_publish_attempt_events', 'queue_quarantined'),
       ('025', 'routine', NULL, 'rednote_late_terminal_refinement_revision'),
       ('026', 'routine', NULL, 'batch_authorization_reclassification_guard_revision'),
-      ('027', 'routine', NULL, 'expired_batch_claim_reclassification_guard_revision')
+      ('027', 'routine', NULL, 'expired_batch_claim_reclassification_guard_revision'),
+      ('028', 'routine', NULL, 'legacy_ready_x3_batch_fallback_reclassification_guard_revision')
   )
   SELECT
     migration,

@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -32,6 +33,7 @@ const migrationFiles = [
   '025_late_rednote_terminal_results.sql',
   '026_batch_authorization_reclassification.sql',
   '027_expired_batch_claim_reclassification.sql',
+  '028_legacy_ready_x3_batch_fallback_reclassification.sql',
 ] as const;
 
 describe('canonical local publishing migration chain', () => {
@@ -48,6 +50,72 @@ describe('canonical local publishing migration chain', () => {
   afterAll(async () => {
     await database.close();
   });
+
+  async function insertExpiredClaimWithFallback(
+    lateFallbackPolicy: Record<string, unknown>,
+  ) {
+    const batchId = randomUUID();
+    const itemId = randomUUID();
+    const jobId = randomUUID();
+    const attemptId = randomUUID();
+    const claimToken = randomUUID();
+    const pageId = `expired-fallback-${attemptId}`;
+    await database.query(
+      `INSERT INTO rednote_publish_batches(
+         id, kind, status, manifest_hash, approved_at
+       ) VALUES ($1, 'bootstrap', 'approved', $2, CURRENT_TIMESTAMP)`,
+      [batchId, 'a'.repeat(64)],
+    );
+    await database.query(
+      `INSERT INTO rednote_publish_batch_items(
+         id, batch_id, notion_page_id, snapshot, item_hash, state, dispatch_mode
+       ) VALUES ($1, $2, $3, '{}'::jsonb, $4, 'claimed', 'scheduled')`,
+      [itemId, batchId, pageId, 'b'.repeat(64)],
+    );
+    await database.query(
+      `INSERT INTO local_publish_jobs(
+         id, notion_page_id, snapshot, status, idempotency_key, workspace_id,
+         batch_item_id, claim_token, claimed_at, claim_expires_at
+       ) VALUES (
+         $1, $2, '{}'::jsonb, 'claimed', $3, 'workspace-1', $4, $5,
+         CURRENT_TIMESTAMP - INTERVAL '2 minutes', '2026-01-01T00:00:00Z'
+       )`,
+      [jobId, pageId, randomUUID(), itemId, claimToken],
+    );
+    await database.query(
+      `INSERT INTO rednote_publish_attempts(
+         id, workspace_id, idempotency_key, contract_revision,
+         source_notion_page_id, source_local_publish_job_id,
+         frozen_payload, payload_digest, payload_revision,
+         executor_type, executor_kind, executor_id, target_publish_at,
+         requested_at, receipt_lookup_state, active, approved_at,
+         claim_token, claim_expires_at, authorization_kind,
+         late_fallback_policy
+       ) VALUES (
+         $1, 'workspace-1', $2, 'rednote-publishing/v1',
+         $3, $4, '{}'::jsonb, $5, 'batch-revision',
+         'worker', 'playwright', 'worker-test', CURRENT_TIMESTAMP + INTERVAL '1 day',
+         CURRENT_TIMESTAMP, 'pending', true, CURRENT_TIMESTAMP,
+         $6, '2026-01-01T00:00:00Z', 'ready_x3', $7::jsonb
+       )`,
+      [
+        attemptId,
+        randomUUID(),
+        pageId,
+        jobId,
+        'c'.repeat(64),
+        claimToken,
+        JSON.stringify(lateFallbackPolicy),
+      ],
+    );
+    await database.query(
+      `INSERT INTO rednote_publish_attempt_events(
+         attempt_id, event_type, occurred_at, actor_type, actor_id
+       ) VALUES ($1, 'worker_claimed', CURRENT_TIMESTAMP, 'worker', 'worker-test')`,
+      [attemptId],
+    );
+    return attemptId;
+  }
 
   it('installs every baseline and RedNote worker table in order', async () => {
     const result = await database.query<{ table_name: string }>(
@@ -133,7 +201,7 @@ describe('canonical local publishing migration chain', () => {
          CURRENT_TIMESTAMP + INTERVAL '1 day', CURRENT_TIMESTAMP,
          'known_failed', CURRENT_TIMESTAMP, 'not_required',
          false, CURRENT_TIMESTAMP, 'ready_x3',
-         '{"action":"schedule","maxLateMinutes":30}'::jsonb
+         '{"action":"post_now","maxLateMinutes":30}'::jsonb
        )`,
       ['a'.repeat(64)],
     );
@@ -214,7 +282,7 @@ describe('canonical local publishing migration chain', () => {
          'worker', 'playwright', 'worker-test', CURRENT_TIMESTAMP + INTERVAL '1 day',
          CURRENT_TIMESTAMP, 'known_failed', CURRENT_TIMESTAMP, 'not_required',
          false, CURRENT_TIMESTAMP, 'ready_x3',
-         '{"action":"schedule","maxLateMinutes":30}'::jsonb
+         '{"action":"post_now","maxLateMinutes":30}'::jsonb
        )`,
       [
         attemptId,
@@ -275,7 +343,11 @@ describe('canonical local publishing migration chain', () => {
     await database.query(
       `INSERT INTO rednote_publish_batch_items(
          id, batch_id, notion_page_id, snapshot, item_hash, state, dispatch_mode
-       ) VALUES ($1, $2, 'expired-claim-page', '{}'::jsonb, $3, 'approved', 'scheduled')`,
+       ) VALUES (
+         $1, $2, 'expired-claim-page',
+         '{"notionPageId":"expired-claim-page","notionLastEditedTime":"batch-revision","publishAt":"2026-09-08T23:20:00.000Z"}'::jsonb,
+         $3, 'approved', 'scheduled'
+       )`,
       [itemId, batchId, 'f'.repeat(64)],
     );
     await database.query(
@@ -283,7 +355,9 @@ describe('canonical local publishing migration chain', () => {
          id, notion_page_id, snapshot, status, idempotency_key, workspace_id,
          batch_item_id, claim_token, claimed_at, claim_expires_at
        ) VALUES (
-         $1, 'expired-claim-page', '{}'::jsonb, 'claimed', $2,
+       $1, 'expired-claim-page',
+       '{"notionPageId":"expired-claim-page","notionLastEditedTime":"batch-revision","publishAt":"2026-09-08T23:20:00.000Z"}'::jsonb,
+       'claimed', $2,
          'workspace-1', $3, $4, CURRENT_TIMESTAMP - INTERVAL '2 minutes',
          '2026-01-01T00:00:00Z'
        )`,
@@ -305,11 +379,13 @@ describe('canonical local publishing migration chain', () => {
          late_fallback_policy
        ) VALUES (
          $1, 'workspace-1', $2, 'rednote-publishing/v1',
-         'expired-claim-page', $3, '{}'::jsonb, $4, 'batch-revision',
-         'worker', 'playwright', 'worker-test', CURRENT_TIMESTAMP + INTERVAL '1 day',
+         'expired-claim-page', $3,
+         '{"payloadRevision":"batch-revision","browserPayload":{"sourcePostId":"expired-claim-page","timingMode":"scheduled","scheduledDate":"2026-09-08T23:20:00.000Z","targetPublishAt":"2026-09-08T23:20:00.000Z"}}'::jsonb,
+         $4, 'batch-revision',
+         'worker', 'playwright', 'worker-test', '2026-09-08T23:20:00.000Z',
          CURRENT_TIMESTAMP, 'pending', true, '2026-08-31T14:00:00Z',
          $5, '2026-01-01T00:00:00Z', 'ready_x3',
-         '{"action":"schedule","maxLateMinutes":30}'::jsonb
+         '{"action":"post_now","maxLateMinutes":30}'::jsonb
        )`,
       [
         attemptId,
@@ -325,6 +401,33 @@ describe('canonical local publishing migration chain', () => {
        ) VALUES ($1, 'worker_claimed', CURRENT_TIMESTAMP, 'worker', 'worker-test')`,
       [attemptId],
     );
+
+    await expect(database.query(
+      `SELECT
+         attempt.late_fallback_policy =
+           '{"action":"post_now","maxLateMinutes":30}'::jsonb AS fallback_matches,
+         item.state AS item_state,
+         item.dispatch_mode,
+         item.local_publish_job_id = job.id AS item_job_matches,
+         job.status AS job_status,
+         job.claim_expires_at <= CURRENT_TIMESTAMP AS job_lease_expired,
+         attempt.claim_expires_at <= CURRENT_TIMESTAMP AS attempt_lease_expired
+       FROM rednote_publish_attempts attempt
+       JOIN local_publish_jobs job ON job.id = attempt.source_local_publish_job_id
+       JOIN rednote_publish_batch_items item ON item.id = job.batch_item_id
+       WHERE attempt.id = $1`,
+      [attemptId],
+    )).resolves.toMatchObject({
+      rows: [{
+        fallback_matches: true,
+        item_state: 'claimed',
+        dispatch_mode: 'scheduled',
+        item_job_matches: true,
+        job_status: 'claimed',
+        job_lease_expired: true,
+        attempt_lease_expired: true,
+      }],
+    });
 
     await database.exec(`
       BEGIN;
@@ -371,6 +474,38 @@ describe('canonical local publishing migration chain', () => {
     )).resolves.toMatchObject({ rows: [{ status: 'queued' }] });
   });
 
+  it('rejects expired-claim reclassification with a changed legacy fallback action', async () => {
+    const attemptId = await insertExpiredClaimWithFallback({
+      action: 'schedule',
+      maxLateMinutes: 30,
+    });
+    await database.exec('BEGIN');
+    try {
+      await database.exec(
+        `SELECT set_config('app.expired_batch_claim_reclassification', 'on', true)`,
+      );
+      await expect(database.query(
+        `UPDATE rednote_publish_attempts
+         SET authorization_kind = NULL,
+             late_fallback_policy = NULL,
+             claim_token = NULL,
+             claim_expires_at = NULL
+         WHERE id = $1`,
+        [attemptId],
+      )).rejects.toThrow(/Ready x3 authorization is immutable/);
+    } finally {
+      await database.exec('ROLLBACK');
+    }
+  });
+
+  it.each([
+    ['changed timeout', { action: 'post_now', maxLateMinutes: 31 }],
+    ['extra field', { action: 'post_now', maxLateMinutes: 30, revision: 'unexpected' }],
+  ])('rejects inserting a legacy fallback with a %s', async (_, lateFallbackPolicy) => {
+    await expect(insertExpiredClaimWithFallback(lateFallbackPolicy))
+      .rejects.toThrow(/rednote_publish_attempts_late_fallback_policy_check/);
+  });
+
   it('rejects expired-claim reclassification while the lease is still live', async () => {
     const batchId = '88888888-aaaa-4888-8888-888888888888';
     const itemId = '99999999-aaaa-4999-8999-999999999999';
@@ -415,7 +550,7 @@ describe('canonical local publishing migration chain', () => {
          'worker', 'playwright', 'worker-test', CURRENT_TIMESTAMP + INTERVAL '1 day',
          CURRENT_TIMESTAMP, 'pending', true, CURRENT_TIMESTAMP,
          $5, '2099-01-01T00:00:00Z', 'ready_x3',
-         '{"action":"schedule","maxLateMinutes":30}'::jsonb
+         '{"action":"post_now","maxLateMinutes":30}'::jsonb
        )`,
       [
         attemptId,
