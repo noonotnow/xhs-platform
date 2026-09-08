@@ -639,6 +639,17 @@ export async function releaseExpiredStoredLocalPublishClaims() {
                 AND attempt.source_local_publish_job_id = local_publish_jobs.id
                 AND attempt.receipt_lookup_state = 'found'
             ) THEN 'verification_pending'
+            WHEN dispatch_authorized_at IS NOT NULL
+              OR EXISTS (
+                SELECT 1
+                FROM rednote_publish_attempts AS attempt
+                WHERE attempt.workspace_id = local_publish_jobs.workspace_id
+                  AND attempt.source_local_publish_job_id = local_publish_jobs.id
+                  AND attempt.dispatch_authorized_at IS NOT NULL
+                  AND attempt.terminal_outcome IS NULL
+                  AND attempt.superseded_by_attempt_id IS NULL
+              )
+              THEN 'verification_pending'
             ELSE 'failed'
           END,
           claim_token = NULL,
@@ -654,6 +665,15 @@ export async function releaseExpiredStoredLocalPublishClaims() {
                 AND attempt.receipt_lookup_state = 'found'
             ) THEN 'RECEIPT_RECONCILIATION_REQUIRED'
             WHEN dispatch_authorized_at IS NOT NULL
+              OR EXISTS (
+                SELECT 1
+                FROM rednote_publish_attempts AS attempt
+                WHERE attempt.workspace_id = local_publish_jobs.workspace_id
+                  AND attempt.source_local_publish_job_id = local_publish_jobs.id
+                  AND attempt.dispatch_authorized_at IS NOT NULL
+                  AND attempt.terminal_outcome IS NULL
+                  AND attempt.superseded_by_attempt_id IS NULL
+              )
               THEN 'PUBLISH_ATTEMPT_OUTCOME_UNKNOWN'
             ELSE 'CLAIM_LEASE_EXPIRED'
           END,
@@ -668,6 +688,15 @@ export async function releaseExpiredStoredLocalPublishClaims() {
                 AND attempt.receipt_lookup_state = 'found'
             ) THEN 'A durable RedNote receipt was recorded before the claim expired. Verify and reconcile that receipt; do not publish again.'
             WHEN dispatch_authorized_at IS NOT NULL
+              OR EXISTS (
+                SELECT 1
+                FROM rednote_publish_attempts AS attempt
+                WHERE attempt.workspace_id = local_publish_jobs.workspace_id
+                  AND attempt.source_local_publish_job_id = local_publish_jobs.id
+                  AND attempt.dispatch_authorized_at IS NOT NULL
+                  AND attempt.terminal_outcome IS NULL
+                  AND attempt.superseded_by_attempt_id IS NULL
+              )
               THEN 'The publish lease expired after dispatch authorization. Automatic dispatch is permanently closed; reconcile the existing post or record operator handling.'
             ELSE 'The publish lease expired without a terminal result. Automatic dispatch is permanently closed; review the frozen attempt before operator handling or reconciliation.'
           END,
@@ -681,6 +710,17 @@ export async function releaseExpiredStoredLocalPublishClaims() {
                 AND attempt.source_local_publish_job_id = local_publish_jobs.id
                 AND attempt.receipt_lookup_state = 'found'
             ) THEN CURRENT_TIMESTAMP
+            WHEN dispatch_authorized_at IS NOT NULL
+              OR EXISTS (
+                SELECT 1
+                FROM rednote_publish_attempts AS attempt
+                WHERE attempt.workspace_id = local_publish_jobs.workspace_id
+                  AND attempt.source_local_publish_job_id = local_publish_jobs.id
+                  AND attempt.dispatch_authorized_at IS NOT NULL
+                  AND attempt.terminal_outcome IS NULL
+                  AND attempt.superseded_by_attempt_id IS NULL
+              )
+              THEN CURRENT_TIMESTAMP
             ELSE next_verification_at
           END,
           completed_at = CASE
@@ -693,6 +733,17 @@ export async function releaseExpiredStoredLocalPublishClaims() {
                 AND attempt.source_local_publish_job_id = local_publish_jobs.id
                 AND attempt.receipt_lookup_state = 'found'
             ) THEN completed_at
+            WHEN dispatch_authorized_at IS NOT NULL
+              OR EXISTS (
+                SELECT 1
+                FROM rednote_publish_attempts AS attempt
+                WHERE attempt.workspace_id = local_publish_jobs.workspace_id
+                  AND attempt.source_local_publish_job_id = local_publish_jobs.id
+                  AND attempt.dispatch_authorized_at IS NOT NULL
+                  AND attempt.terminal_outcome IS NULL
+                  AND attempt.superseded_by_attempt_id IS NULL
+              )
+              THEN completed_at
             ELSE COALESCE(completed_at, CURRENT_TIMESTAMP)
           END,
           updated_at = CURRENT_TIMESTAMP
@@ -705,16 +756,52 @@ export async function releaseExpiredStoredLocalPublishClaims() {
         AND reconciled_at IS NULL
         AND success_attestation_id IS NULL
         AND external_disposition_request_id IS NULL
-      RETURNING id, status
+      RETURNING id, workspace_id, status
+    ),
+    released_attempts AS (
+      UPDATE rednote_publish_attempts AS attempt
+      SET active = false,
+          terminal_outcome = CASE
+            WHEN released.status = 'verification_pending'
+              THEN 'outcome_unknown'
+            ELSE 'known_failed'
+          END,
+          terminal_at = CURRENT_TIMESTAMP,
+          receipt_lookup_state = CASE
+            WHEN EXISTS (
+              SELECT 1
+              FROM rednote_publish_attempt_receipts AS receipt
+              WHERE receipt.attempt_id = attempt.id
+            ) THEN 'found'
+            WHEN released.status = 'verification_pending'
+              THEN 'identity_pending'
+            ELSE 'not_required'
+          END,
+          receipt_lookup_updated_at = CURRENT_TIMESTAMP,
+          claim_expires_at = CURRENT_TIMESTAMP
+      FROM released
+      WHERE attempt.workspace_id = released.workspace_id
+        AND attempt.source_local_publish_job_id = released.id
+        AND attempt.terminal_outcome IS NULL
+        AND attempt.superseded_by_attempt_id IS NULL
+      RETURNING attempt.id, attempt.terminal_outcome
+    ),
+    attempt_events AS (
+      INSERT INTO rednote_publish_attempt_events(
+        attempt_id, event_type, occurred_at, actor_type, actor_id
+      )
+      SELECT id, 'terminal_outcome_recorded', CURRENT_TIMESTAMP, 'admin',
+        'local_publish_lease_recovery'
+      FROM released_attempts
+      RETURNING attempt_id
     ),
     released_items AS (
       UPDATE rednote_publish_batch_items
-      SET state = 'failed',
+      SET state = released.status,
           updated_at = CURRENT_TIMESTAMP
-      WHERE local_publish_job_id IN (
-        SELECT id FROM released WHERE status = 'failed'
-      )
-        AND state IN ('claimed', 'staged')
+      FROM released
+      WHERE rednote_publish_batch_items.local_publish_job_id = released.id
+        AND rednote_publish_batch_items.state IN ('claimed', 'staged')
       RETURNING local_publish_job_id
     )
     SELECT id FROM released
@@ -1117,6 +1204,7 @@ export async function recordStoredAcknowledgedPublication(
     publicUrl?: string;
   },
   workspaceId = 'legacy-local-publish',
+  immediateOutcomeAllowed = true,
 ) {
   const expectedAccountMatches = receipt.ownership === 'owned';
   const result = await sql<LocalPublishJobRow>`
@@ -1125,6 +1213,7 @@ export async function recordStoredAcknowledgedPublication(
       SET status = CASE
             WHEN snapshot->>'expectedAccountId' = ${receipt.accountId}
               AND ${expectedAccountMatches}
+              AND ${immediateOutcomeAllowed}
               THEN 'verified'
             ELSE 'verification_pending'
           END,
@@ -1134,18 +1223,21 @@ export async function recordStoredAcknowledgedPublication(
           verified_at = CASE
             WHEN snapshot->>'expectedAccountId' = ${receipt.accountId}
               AND ${expectedAccountMatches}
+              AND ${immediateOutcomeAllowed}
               THEN COALESCE(verified_at, ${receipt.accountCapturedAt}::timestamptz)
             ELSE verified_at
           END,
           verification_attempts = CASE
             WHEN snapshot->>'expectedAccountId' = ${receipt.accountId}
               AND ${expectedAccountMatches}
+              AND ${immediateOutcomeAllowed}
               THEN verification_attempts
             ELSE verification_attempts + 1
           END,
           next_verification_at = CASE
             WHEN snapshot->>'expectedAccountId' = ${receipt.accountId}
               AND ${expectedAccountMatches}
+              AND ${immediateOutcomeAllowed}
               THEN NULL
             ELSE CURRENT_TIMESTAMP + INTERVAL '15 minutes'
           END,
@@ -1158,12 +1250,16 @@ export async function recordStoredAcknowledgedPublication(
           public_index_status = ${receipt.publicIndexStatus ?? null},
           public_index_checked_at = ${receipt.publicIndexCheckedAt ?? null}::timestamptz,
           error_code = CASE
+            WHEN NOT ${immediateOutcomeAllowed}
+              THEN 'UNEXPECTED_IMMEDIATE_OUTCOME'
             WHEN snapshot->>'expectedAccountId' = ${receipt.accountId}
               AND ${expectedAccountMatches}
               THEN NULL
             ELSE 'ACCOUNT_MISMATCH'
           END,
           error_message = CASE
+            WHEN NOT ${immediateOutcomeAllowed}
+              THEN 'A schedule-authorized attempt returned an immediate publication receipt. Automatic dispatch is permanently closed; verify and reconcile the existing post.'
             WHEN snapshot->>'expectedAccountId' = ${receipt.accountId}
               AND ${expectedAccountMatches}
               THEN NULL
@@ -1172,6 +1268,7 @@ export async function recordStoredAcknowledgedPublication(
           claim_expires_at = CASE
             WHEN snapshot->>'expectedAccountId' = ${receipt.accountId}
               AND ${expectedAccountMatches}
+              AND ${immediateOutcomeAllowed}
               THEN claim_expires_at
             ELSE CURRENT_TIMESTAMP
           END,

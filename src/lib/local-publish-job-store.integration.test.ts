@@ -268,7 +268,9 @@ describe('local publish job PostgreSQL execution', () => {
         active boolean NOT NULL DEFAULT false,
         approved_at timestamptz,
         terminal_outcome text,
+        terminal_at timestamptz,
         receipt_lookup_state text NOT NULL DEFAULT 'pending',
+        receipt_lookup_updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
         dispatch_authorized_at timestamptz,
         superseded_by_attempt_id uuid,
         claim_token uuid,
@@ -283,6 +285,13 @@ describe('local publish job PostgreSQL execution', () => {
         rednote_note_id text NOT NULL,
         platform_publish_time timestamptz NOT NULL,
         provenance jsonb NOT NULL
+      );
+      CREATE TABLE rednote_publish_attempt_events (
+        attempt_id uuid NOT NULL REFERENCES rednote_publish_attempts(id),
+        event_type text NOT NULL,
+        occurred_at timestamptz NOT NULL,
+        actor_type text NOT NULL,
+        actor_id text NOT NULL
       );
     `);
   });
@@ -408,6 +417,16 @@ describe('local publish job PostgreSQL execution', () => {
        WHERE id = $2::uuid`,
       [scheduledJobId, batchItemId],
     );
+    await database.query(
+      `INSERT INTO rednote_publish_attempts(
+         id, workspace_id, source_local_publish_job_id, executor_type,
+         active, approved_at, claim_token, claim_expires_at
+       ) VALUES (
+         $1::uuid, 'legacy-local-publish', $2::uuid, 'worker',
+         true, CURRENT_TIMESTAMP, $3::uuid, CURRENT_TIMESTAMP - INTERVAL '1 minute'
+       )`,
+      [attemptId, scheduledJobId, claimToken],
+    );
 
     await expect(releaseExpiredStoredLocalPublishClaims())
       .resolves.toEqual([scheduledJobId]);
@@ -434,6 +453,100 @@ describe('local publish job PostgreSQL execution', () => {
        WHERE id = $1::uuid`,
       [batchItemId],
     )).resolves.toMatchObject({ rows: [{ state: 'failed' }] });
+    await expect(database.query<{
+      active: boolean;
+      terminal_outcome: string;
+      receipt_lookup_state: string;
+    }>(
+      `SELECT active, terminal_outcome, receipt_lookup_state
+       FROM rednote_publish_attempts
+       WHERE id = $1::uuid`,
+      [attemptId],
+    )).resolves.toMatchObject({
+      rows: [{
+        active: false,
+        terminal_outcome: 'known_failed',
+        receipt_lookup_state: 'not_required',
+      }],
+    });
+  });
+
+  it('recovers a split-write authorized stage as verify-only and never redispatches it', async () => {
+    await insertAttestedBatchAuthorization({ state: 'staged' });
+    await insertJob({
+      id: scheduledJobId,
+      status: 'staged',
+      dueOffset: '-1 day',
+      claimed: true,
+      batchItemId,
+    });
+    await database.query(
+      `UPDATE local_publish_jobs
+       SET claim_expires_at = CURRENT_TIMESTAMP - INTERVAL '1 minute'
+       WHERE id = $1::uuid`,
+      [scheduledJobId],
+    );
+    await database.query(
+      `UPDATE rednote_publish_batch_items
+       SET local_publish_job_id = $1::uuid
+       WHERE id = $2::uuid`,
+      [scheduledJobId, batchItemId],
+    );
+    await database.query(
+      `INSERT INTO rednote_publish_attempts(
+         id, workspace_id, source_local_publish_job_id, executor_type,
+         active, approved_at, dispatch_authorized_at, claim_token, claim_expires_at
+       ) VALUES (
+         $1::uuid, 'legacy-local-publish', $2::uuid, 'worker',
+         true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP - INTERVAL '2 minutes',
+         $3::uuid, CURRENT_TIMESTAMP - INTERVAL '1 minute'
+       )`,
+      [attemptId, scheduledJobId, claimToken],
+    );
+
+    await expect(releaseExpiredStoredLocalPublishClaims())
+      .resolves.toEqual([scheduledJobId]);
+
+    await expect(database.query<{
+      status: string;
+      claim_token: string | null;
+      error_code: string;
+    }>(
+      `SELECT status, claim_token, error_code
+       FROM local_publish_jobs
+       WHERE id = $1::uuid`,
+      [scheduledJobId],
+    )).resolves.toMatchObject({
+      rows: [{
+        status: 'verification_pending',
+        claim_token: null,
+        error_code: 'PUBLISH_ATTEMPT_OUTCOME_UNKNOWN',
+      }],
+    });
+    await expect(database.query<{ state: string }>(
+      `SELECT state
+       FROM rednote_publish_batch_items
+       WHERE id = $1::uuid`,
+      [batchItemId],
+    )).resolves.toMatchObject({ rows: [{ state: 'verification_pending' }] });
+    await expect(database.query<{
+      active: boolean;
+      terminal_outcome: string;
+      receipt_lookup_state: string;
+    }>(
+      `SELECT active, terminal_outcome, receipt_lookup_state
+       FROM rednote_publish_attempts
+       WHERE id = $1::uuid`,
+      [attemptId],
+    )).resolves.toMatchObject({
+      rows: [{
+        active: false,
+        terminal_outcome: 'outcome_unknown',
+        receipt_lookup_state: 'identity_pending',
+      }],
+    });
+    await expect(claimNextStoredLocalPublishJob(7_200, 'dispatch'))
+      .resolves.toBeNull();
   });
 
   it('rejects a targeted attested release with missing authorization without fallback', async () => {

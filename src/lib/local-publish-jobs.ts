@@ -25,6 +25,7 @@ import {
   recordStoredAmbiguousOutcome,
   recordStoredRejectedOutcome,
   recordStoredScheduledAcknowledgement,
+  releaseExpiredStoredLocalPublishClaims,
   stageStoredLocalPublishJob,
   type StoredLocalPublishJob,
   heartbeatStoredLocalPublishJob,
@@ -708,6 +709,7 @@ export async function claimNextLocalPublishJob(
   if (expectedJobId !== undefined) {
     validateExpectedVerificationJobId(lane, expectedJobId);
   }
+  await releaseExpiredStoredLocalPublishClaims();
   for (let attempt = 0; attempt < 10; attempt += 1) {
     const job = await claimNextStoredLocalPublishJob(
       leaseSeconds(),
@@ -999,6 +1001,10 @@ export function shouldHeartbeatLinkedAttempt(status: StoredLocalPublishJob['stat
   return status === 'claimed' || status === 'staged';
 }
 
+export function immediateWorkerOutcomeAllowed(timingMode: 'scheduled' | 'post_now') {
+  return timingMode === 'post_now';
+}
+
 export function assertScheduledAcknowledgementMatches(
   scheduledFor: string,
   frozenTargetPublishAt: string,
@@ -1174,12 +1180,18 @@ export async function submitLocalPublishJobResult(
       LocalPublishWorkerResult,
       { outcome: 'acknowledged' }
     >;
+    const attempt = durableAttempt
+      ? await getLinkedRednotePublishAttempt(workspaceId, id)
+      : null;
+    const immediateOutcomeAllowed = attempt
+      ? immediateWorkerOutcomeAllowed(attempt.payload.timingMode)
+      : true;
     if (durableAttempt) {
       await recordLinkedAttemptOutcome({
         workspaceId,
         localJobId: id,
         claimToken,
-        outcome: 'accepted',
+        outcome: immediateOutcomeAllowed ? 'accepted' : 'outcome_unknown',
         receipt: {
           rednoteNoteId: acknowledged.noteId,
           ...(acknowledged.publicIndex?.publicUrl
@@ -1219,6 +1231,7 @@ export async function submitLocalPublishJobResult(
           : {}),
       },
       workspaceId,
+      immediateOutcomeAllowed,
     );
     if (prepared.status === 'verification_pending') {
       return jobSummary(prepared);
