@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { QueryResultRow } from 'pg';
 
@@ -21,6 +22,7 @@ import {
   approveStoredPublishBatch,
   createStoredPublishBatch,
   listStoredPublishBatches,
+  storedManifestHash,
 } from '@/lib/rednote-publish-batch-store';
 import type {
   LocalPublishSnapshot,
@@ -69,6 +71,19 @@ describe('stored RedNote bootstrap replacement', () => {
     mocks.query.mockReset();
     mocks.release.mockReset();
     mocks.sql.mockReset();
+  });
+
+  it('uses the persisted batch-item manifest field order', () => {
+    const manifest = [{
+      notionPageId: snapshot.notionPageId,
+      itemHash: 'a'.repeat(64),
+      dispatchMode: 'scheduled' as const,
+      lateBySeconds: 0,
+    }];
+
+    expect(storedManifestHash(manifest)).toBe(
+      createHash('sha256').update(JSON.stringify(manifest)).digest('hex'),
+    );
   });
 
   it('atomically supersedes the old audit row and creates a replacement manifest', async () => {

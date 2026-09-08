@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 
 const mocks = vi.hoisted(() => ({
   query: vi.fn(),
@@ -19,6 +20,7 @@ import {
   createRednotePublishAttempt,
   frozenPayloadDigest,
   recordLinkedAttemptOutcome,
+  requeueExpiredMisclassifiedBatchClaim,
   requeueMisclassifiedBatchInvalidClaimFailure,
   requeueReadyX3InvalidClaimFailure,
   requeueReadyX3NotLoggedInFailure,
@@ -31,6 +33,7 @@ import {
   REDNOTE_PUBLISHING_CONTRACT_REVISION,
   type FrozenRednoteAttemptPayload,
 } from '@/lib/rednote-publishing-contract-v1';
+import { storedManifestHash } from '@/lib/rednote-publish-batch-store';
 import { rednoteMediaIdentity } from '@/lib/rednote-publish-authorization';
 
 const input = {
@@ -40,6 +43,20 @@ const input = {
   sourceNotionPageId: 'notion-page-1',
   revision: '2026-08-31T15:56:00.000Z',
 };
+
+function stableDigest(value: unknown): string {
+  const stable = (item: unknown): string => {
+    if (Array.isArray(item)) return `[${item.map(stable).join(',')}]`;
+    if (item && typeof item === 'object') {
+      return `{${Object.entries(item as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, nested]) => `${JSON.stringify(key)}:${stable(nested)}`)
+        .join(',')}}`;
+    }
+    return JSON.stringify(item);
+  };
+  return createHash('sha256').update(stable(value)).digest('hex');
+}
 
 function mockEligibleRecovery(eligible: boolean) {
   mocks.query.mockImplementation(async (statement: string) => {
@@ -195,6 +212,272 @@ describe('Ready x3 pre-provider failure recovery', () => {
         });
       expect(mocks.query.mock.calls.some(([statement]) =>
         String(statement).includes('SET authorization_kind=NULL'))).toBe(false);
+    });
+
+    it('reclassifies and requeues the same expired pre-validation batch claim', async () => {
+      const payload = recoveryPayload();
+      const itemHash = stableDigest(batchSnapshot);
+      const batchManifest = [{
+        notionPageId: input.sourceNotionPageId,
+        itemHash,
+        dispatchMode: 'scheduled' as const,
+        lateBySeconds: 0,
+      }];
+      mocks.query.mockImplementation(async (statement: string) => {
+        if (statement.includes('SELECT attempt.id,attempt.claim_token')) {
+          return {
+            rows: [{
+              id: input.attemptId,
+              claim_token: '33333333-3333-4333-8333-333333333333',
+              claim_expires_at: '2026-08-31T15:10:00.000Z',
+              payload_digest: payload.payloadDigest,
+              payload_revision: input.revision,
+              frozen_payload: payload,
+              approved_at: '2026-08-31T14:00:00.000Z',
+              job_snapshot: batchSnapshot,
+              batch_snapshot: batchSnapshot,
+              dispatch_mode: 'scheduled',
+              item_hash: itemHash,
+              manifest_hash: storedManifestHash(batchManifest),
+              batch_manifest: batchManifest,
+            }],
+          };
+        }
+        if (statement.includes('UPDATE rednote_publish_attempts')) {
+          return { rows: [{ id: input.attemptId }] };
+        }
+        if (statement.includes('UPDATE local_publish_jobs')) {
+          return { rows: [{ id: input.jobId }] };
+        }
+        return { rows: [], rowCount: 1 };
+      });
+
+      await expect(requeueExpiredMisclassifiedBatchClaim(input)).resolves.toEqual({
+        requeued: true,
+        reclassifiedAuthorization: 'batch',
+        jobId: input.jobId,
+        attemptId: input.attemptId,
+        publicationMayHaveStarted: false,
+      });
+
+      const statements = mocks.query.mock.calls.map(([statement]) => String(statement));
+      expect(statements).toContain(
+        "SELECT set_config('app.expired_batch_claim_reclassification', 'on', true)",
+      );
+      expect(statements.some((statement) =>
+        statement.includes('SET authorization_kind=NULL,late_fallback_policy=NULL'))).toBe(true);
+      expect(statements.some((statement) =>
+        statement.includes("SET status='queued'"))).toBe(true);
+      expect(statements.some((statement) =>
+        statement.includes('INSERT INTO local_publish_jobs'))).toBe(false);
+      expect(statements.some((statement) =>
+        statement.includes("'expired_batch_claim_authorization_reclassified'"))).toBe(true);
+    });
+
+    it('rejects an unexpired claim and every pre-browser evidence barrier', async () => {
+      mocks.query.mockResolvedValue({ rows: [], rowCount: 0 });
+
+      await expect(requeueExpiredMisclassifiedBatchClaim(input))
+        .rejects.toMatchObject({
+          code: 'EXPIRED_BATCH_CLAIM_RECOVERY_UNSAFE',
+          status: 409,
+        });
+
+      const lockSql = String(mocks.query.mock.calls.find(([statement]) =>
+        String(statement).includes('SELECT attempt.id,attempt.claim_token'))?.[0]);
+      for (const guard of [
+        'job.claim_expires_at<=CURRENT_TIMESTAMP',
+        'attempt.claim_expires_at<=CURRENT_TIMESTAMP',
+        'job.staged_at IS NULL',
+        'job.dispatch_authorized_at IS NULL',
+        'job.dispatched_at IS NULL',
+        'job.note_id IS NULL',
+        'job.share_url IS NULL',
+        'job.success_attestation_id IS NULL',
+        'job.external_disposition_request_id IS NULL',
+        "event.event_type='execution_started'",
+        'FROM rednote_publish_attempt_receipts receipt',
+        'FROM rednote_publication_evidence evidence',
+      ]) {
+        expect(lockSql).toContain(guard);
+      }
+      expect(mocks.query.mock.calls.some(([statement]) =>
+        String(statement).includes('SET authorization_kind=NULL'))).toBe(false);
+    });
+
+    it('fails closed when the expired claim digest does not match its frozen packet', async () => {
+      const payload = recoveryPayload();
+      const itemHash = stableDigest(batchSnapshot);
+      const batchManifest = [{
+        notionPageId: input.sourceNotionPageId,
+        itemHash,
+        dispatchMode: 'scheduled' as const,
+        lateBySeconds: 0,
+      }];
+      mocks.query.mockImplementation(async (statement: string) => {
+        if (statement.includes('SELECT attempt.id,attempt.claim_token')) {
+          return {
+            rows: [{
+              id: input.attemptId,
+              claim_token: '33333333-3333-4333-8333-333333333333',
+              claim_expires_at: '2026-08-31T15:10:00.000Z',
+              payload_digest: 'f'.repeat(64),
+              payload_revision: input.revision,
+              frozen_payload: payload,
+              approved_at: '2026-08-31T14:00:00.000Z',
+              job_snapshot: batchSnapshot,
+              batch_snapshot: batchSnapshot,
+              dispatch_mode: 'scheduled',
+              item_hash: itemHash,
+              manifest_hash: storedManifestHash(batchManifest),
+              batch_manifest: batchManifest,
+            }],
+          };
+        }
+        return { rows: [], rowCount: 1 };
+      });
+
+      await expect(requeueExpiredMisclassifiedBatchClaim(input))
+        .rejects.toMatchObject({
+          code: 'EXPIRED_BATCH_CLAIM_RECOVERY_UNSAFE',
+          status: 409,
+        });
+      expect(mocks.query.mock.calls.some(([statement]) =>
+        String(statement).includes('SET authorization_kind=NULL'))).toBe(false);
+    });
+
+    it.each(['item', 'manifest'] as const)(
+      'fails closed when the stored batch %s digest is invalid',
+      async (invalidDigest) => {
+        const payload = recoveryPayload();
+        const itemHash = stableDigest(batchSnapshot);
+        const batchManifest = [{
+          notionPageId: input.sourceNotionPageId,
+          itemHash,
+          dispatchMode: 'scheduled' as const,
+          lateBySeconds: 0,
+        }];
+        mocks.query.mockImplementation(async (statement: string) => {
+          if (statement.includes('SELECT attempt.id,attempt.claim_token')) {
+            return {
+              rows: [{
+                id: input.attemptId,
+                claim_token: '33333333-3333-4333-8333-333333333333',
+                claim_expires_at: '2026-08-31T15:10:00.000Z',
+                payload_digest: payload.payloadDigest,
+                payload_revision: input.revision,
+                frozen_payload: payload,
+                approved_at: '2026-08-31T14:00:00.000Z',
+                job_snapshot: batchSnapshot,
+                batch_snapshot: batchSnapshot,
+                dispatch_mode: 'scheduled',
+                item_hash: invalidDigest === 'item' ? 'f'.repeat(64) : itemHash,
+                manifest_hash: invalidDigest === 'manifest'
+                  ? 'f'.repeat(64)
+                  : storedManifestHash(batchManifest),
+                batch_manifest: batchManifest,
+              }],
+            };
+          }
+          return { rows: [], rowCount: 1 };
+        });
+
+        await expect(requeueExpiredMisclassifiedBatchClaim(input))
+          .rejects.toMatchObject({
+            code: 'EXPIRED_BATCH_CLAIM_RECOVERY_UNSAFE',
+            status: 409,
+          });
+      },
+    );
+
+    it('rejects a multi-item batch because its persisted insertion order cannot be reconstructed', async () => {
+      const payload = recoveryPayload();
+      const itemHash = stableDigest(batchSnapshot);
+      const batchManifest = [
+        {
+          notionPageId: input.sourceNotionPageId,
+          itemHash,
+          dispatchMode: 'scheduled' as const,
+          lateBySeconds: 0,
+        },
+        {
+          notionPageId: 'another-page',
+          itemHash: 'e'.repeat(64),
+          dispatchMode: 'scheduled' as const,
+          lateBySeconds: 0,
+        },
+      ];
+      mocks.query.mockImplementation(async (statement: string) => {
+        if (statement.includes('SELECT attempt.id,attempt.claim_token')) {
+          return {
+            rows: [{
+              id: input.attemptId,
+              claim_token: '33333333-3333-4333-8333-333333333333',
+              claim_expires_at: '2026-08-31T15:10:00.000Z',
+              payload_digest: payload.payloadDigest,
+              payload_revision: input.revision,
+              frozen_payload: payload,
+              approved_at: '2026-08-31T14:00:00.000Z',
+              job_snapshot: batchSnapshot,
+              batch_snapshot: batchSnapshot,
+              dispatch_mode: 'scheduled',
+              item_hash: itemHash,
+              manifest_hash: storedManifestHash(batchManifest),
+              batch_manifest: batchManifest,
+            }],
+          };
+        }
+        return { rows: [], rowCount: 1 };
+      });
+
+      await expect(requeueExpiredMisclassifiedBatchClaim(input))
+        .rejects.toMatchObject({
+          code: 'EXPIRED_BATCH_CLAIM_RECOVERY_UNSAFE',
+          status: 409,
+        });
+    });
+
+    it('rejects a batch snapshot revision that differs from the attempt and request', async () => {
+      const payload = recoveryPayload();
+      const mismatchedSnapshot = {
+        ...batchSnapshot,
+        notionLastEditedTime: '2026-08-31T13:59:59.000Z',
+      };
+      const itemHash = stableDigest(mismatchedSnapshot);
+      const batchManifest = [{
+        notionPageId: input.sourceNotionPageId,
+        itemHash,
+        dispatchMode: 'scheduled' as const,
+        lateBySeconds: 0,
+      }];
+      mocks.query.mockImplementation(async (statement: string) => {
+        if (statement.includes('SELECT attempt.id,attempt.claim_token')) {
+          return {
+            rows: [{
+              id: input.attemptId,
+              claim_token: '33333333-3333-4333-8333-333333333333',
+              claim_expires_at: '2026-08-31T15:10:00.000Z',
+              payload_digest: payload.payloadDigest,
+              payload_revision: input.revision,
+              frozen_payload: payload,
+              approved_at: '2026-08-31T14:00:00.000Z',
+              job_snapshot: mismatchedSnapshot,
+              batch_snapshot: mismatchedSnapshot,
+              dispatch_mode: 'scheduled',
+              item_hash: itemHash,
+              manifest_hash: storedManifestHash(batchManifest),
+              batch_manifest: batchManifest,
+            }],
+          };
+        }
+        return { rows: [], rowCount: 1 };
+      });
+
+      await expect(requeueExpiredMisclassifiedBatchClaim(input))
+        .rejects.toMatchObject({
+          code: 'EXPIRED_BATCH_CLAIM_RECOVERY_UNSAFE',
+          status: 409,
+        });
     });
   });
 
