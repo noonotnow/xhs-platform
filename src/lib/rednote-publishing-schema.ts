@@ -2,7 +2,15 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { PoolClient, QueryResultRow } from 'pg';
 
-export const REDNOTE_SCHEMA_MIGRATIONS = ['018', '019', '020', '021', '022', '023'] as const;
+export const REDNOTE_SCHEMA_MIGRATIONS = [
+  '018',
+  '019',
+  '020',
+  '021',
+  '022',
+  '023',
+  '024',
+] as const;
 export type RednoteSchemaMigration = (typeof REDNOTE_SCHEMA_MIGRATIONS)[number];
 export type RednoteSchemaReadiness = Record<RednoteSchemaMigration, boolean>;
 export const REDNOTE_SCHEMA_PREREQUISITES = [
@@ -57,6 +65,7 @@ const migrationFiles: Record<RednoteSchemaMigration, readonly string[]> = {
   '021': ['021_local_publish_worker_heartbeats.sql'],
   '022': ['022_ready_x3_invalid_claim_recovery.sql'],
   '023': ['023_rednote_worker_result_v2.sql'],
+  '024': ['024_local_publish_queue_quarantine.sql'],
 };
 
 const READINESS_SQL = `
@@ -102,7 +111,12 @@ const READINESS_SQL = `
       ('023', 'column', 'local_publish_jobs', 'authenticated_account_at'),
       ('023', 'nullable_column', 'rednote_publish_attempt_receipts', 'rednote_url'),
       ('023', 'table', NULL, 'rednote_publication_evidence'),
-      ('023', 'trigger', 'rednote_publication_evidence', 'rednote_publication_evidence_no_update')
+      ('023', 'trigger', 'rednote_publication_evidence', 'rednote_publication_evidence_no_update'),
+      ('024', 'table', NULL, 'local_publish_queue_quarantines'),
+      ('024', 'table', NULL, 'local_publish_queue_quarantine_items'),
+      ('024', 'trigger', 'local_publish_queue_quarantines', 'local_publish_queue_quarantines_immutable'),
+      ('024', 'trigger', 'local_publish_queue_quarantine_items', 'local_publish_queue_quarantine_items_immutable'),
+      ('024', 'constraint_value', 'rednote_publish_attempt_events', 'queue_quarantined')
   )
   SELECT
     migration,
@@ -135,6 +149,16 @@ const READINESS_SQL = `
             AND event_object_schema = 'public'
             AND event_object_table = required_objects.table_name
             AND trigger_name = object_name
+        )
+        WHEN 'constraint_value' THEN EXISTS (
+          SELECT 1
+          FROM pg_constraint
+          JOIN pg_class ON pg_class.oid = pg_constraint.conrelid
+          JOIN pg_namespace ON pg_namespace.oid = pg_class.relnamespace
+          WHERE pg_namespace.nspname = 'public'
+            AND pg_class.relname = required_objects.table_name
+            AND pg_get_constraintdef(pg_constraint.oid) LIKE
+              '%' || required_objects.object_name || '%'
         )
         ELSE false
       END
