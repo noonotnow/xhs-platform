@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
 import {
+  diagnoseExpiredMisclassifiedBatchClaim,
   diagnoseReadyX3StaleBrowserFrameRecovery,
   requeueExpiredMisclassifiedBatchClaim,
   requeueMisclassifiedBatchInvalidClaimFailure,
@@ -38,6 +39,7 @@ export async function POST(request: NextRequest) {
       body.confirm !== 'REQUEUE_EXACT_READY_X3_NOT_LOGGED_IN_FAILURE' &&
       body.confirm !== 'REQUEUE_EXACT_READY_X3_STALE_BROWSER_FRAME_FAILURE' &&
       body.confirm !== 'REQUEUE_EXACT_READY_X3_SCHEDULE_READBACK_MISMATCH' &&
+      body.confirm !== 'DIAGNOSE_EXACT_EXPIRED_MISCLASSIFIED_BATCH_CLAIM' &&
       body.confirm !== 'DIAGNOSE_EXACT_READY_X3_STALE_BROWSER_FRAME_RECOVERY'
     ) {
       throw new LocalPublishJobError(
@@ -54,7 +56,9 @@ export async function POST(request: NextRequest) {
       revision: String(body.revision ?? ''),
     };
     const result =
-      body.confirm === 'DIAGNOSE_EXACT_READY_X3_STALE_BROWSER_FRAME_RECOVERY'
+      body.confirm === 'DIAGNOSE_EXACT_EXPIRED_MISCLASSIFIED_BATCH_CLAIM'
+        ? await diagnoseExpiredMisclassifiedBatchClaim(recoveryInput)
+        : body.confirm === 'DIAGNOSE_EXACT_READY_X3_STALE_BROWSER_FRAME_RECOVERY'
         ? await diagnoseReadyX3StaleBrowserFrameRecovery(recoveryInput)
         : body.confirm === 'REQUEUE_EXACT_EXPIRED_MISCLASSIFIED_BATCH_CLAIM'
           ? await requeueExpiredMisclassifiedBatchClaim(recoveryInput)
@@ -71,6 +75,18 @@ export async function POST(request: NextRequest) {
           : await requeueReadyX3PrestageClaim(recoveryInput);
     return NextResponse.json(result, { headers: NO_STORE_HEADERS });
   } catch (error) {
+    if (
+      confirmation === 'DIAGNOSE_EXACT_EXPIRED_MISCLASSIFIED_BATCH_CLAIM' &&
+      !(error instanceof LocalPublishJobError)
+    ) {
+      return NextResponse.json(
+        {
+          error: 'Expired batch claim recovery diagnostic failed',
+          code: 'EXPIRED_BATCH_CLAIM_RECOVERY_DIAGNOSTIC_FAILED',
+        },
+        { status: 503, headers: NO_STORE_HEADERS },
+      );
+    }
     if (
       confirmation === 'DIAGNOSE_EXACT_READY_X3_STALE_BROWSER_FRAME_RECOVERY' &&
       !(error instanceof LocalPublishJobError)

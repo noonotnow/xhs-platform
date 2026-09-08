@@ -1190,6 +1190,227 @@ export async function requeueReadyX3InvalidClaimFailure(input: {
 const MISCLASSIFIED_BATCH_INVALID_CLAIM_MESSAGE =
   'readyX3Authorization: must exactly match the frozen packet revision, schedule, and media fields';
 
+const EXPIRED_BATCH_CLAIM_SQL_GUARDS = [
+  ['jobPageMatches', 'job.notion_page_id=$4'],
+  ['attemptPageMatches', 'attempt.source_notion_page_id=$4'],
+  ['attemptRevisionMatchesInput', 'attempt.payload_revision=$5'],
+  ['jobClaimed', "job.status='claimed'"],
+  ['jobErrorCodeAbsent', 'job.error_code IS NULL'],
+  ['jobErrorMessageAbsent', 'job.error_message IS NULL'],
+  ['jobClaimPresent', 'job.claim_token IS NOT NULL'],
+  ['jobClaimedAtPresent', 'job.claimed_at IS NOT NULL'],
+  ['jobLeaseExpired', 'job.claim_expires_at<=CURRENT_TIMESTAMP'],
+  ['jobStagedAbsent', 'job.staged_at IS NULL'],
+  ['jobDispatchAuthorizationAbsent', 'job.dispatch_authorized_at IS NULL'],
+  ['jobDispatchedAbsent', 'job.dispatched_at IS NULL'],
+  ['jobVerifiedAbsent', 'job.verified_at IS NULL'],
+  ['jobReconciledAbsent', 'job.reconciled_at IS NULL'],
+  ['jobCompletedAbsent', 'job.completed_at IS NULL'],
+  ['jobNoteIdAbsent', 'job.note_id IS NULL'],
+  ['jobShareUrlAbsent', 'job.share_url IS NULL'],
+  ['jobSuccessAttestationAbsent', 'job.success_attestation_id IS NULL'],
+  ['jobExternalDispositionAbsent', 'job.external_disposition_request_id IS NULL'],
+  ['jobReceiptContractAbsent', 'job.receipt_contract_version IS NULL'],
+  ['jobReceiptOutcomeAbsent', 'job.receipt_outcome IS NULL'],
+  ['jobReceiptAcknowledgementAbsent', 'job.receipt_acknowledged_at IS NULL'],
+  ['jobAuthenticatedAccountAbsent', 'job.authenticated_account_id IS NULL'],
+  ['jobAuthenticatedAccountTimeAbsent', 'job.authenticated_account_at IS NULL'],
+  ['jobXsecEvidenceAbsent', 'job.xsec_accessible_at IS NULL'],
+  ['jobPublicIndexStatusAbsent', 'job.public_index_status IS NULL'],
+  ['jobPublicIndexCheckAbsent', 'job.public_index_checked_at IS NULL'],
+  ['jobProviderRestrictionAbsent', 'job.provider_restriction_status IS NULL'],
+  ['jobProviderRestrictionReportAbsent', 'job.provider_restriction_reported_at IS NULL'],
+  ['batchItemLinked', 'item.id=job.batch_item_id AND item.local_publish_job_id=job.id'],
+  ['batchLinked', 'batch.id=item.batch_id'],
+  ['batchItemClaimed', "item.state='claimed'"],
+  ['batchApproved', "batch.status IN ('approved','partially_approved')"],
+  ['batchApprovalPresent', 'batch.approved_at IS NOT NULL'],
+  ['attemptRecordFound', 'attempt.id=$3::uuid'],
+  ['attemptLinked', 'attempt.source_local_publish_job_id=job.id'],
+  ['attemptWorkspaceMatches', 'attempt.workspace_id=job.workspace_id'],
+  ['attemptReadyX3', "attempt.authorization_kind='ready_x3'"],
+  ['batchDispatchScheduled', "item.dispatch_mode='scheduled'"],
+  ['legacyFallbackExact', 'attempt.late_fallback_policy=$6::jsonb'],
+  ['attemptActive', 'attempt.active'],
+  ['attemptApprovalPresent', 'attempt.approved_at IS NOT NULL'],
+  ['attemptTerminalOutcomeAbsent', 'attempt.terminal_outcome IS NULL'],
+  ['attemptTerminalTimeAbsent', 'attempt.terminal_at IS NULL'],
+  ['attemptReceiptPending', "attempt.receipt_lookup_state='pending'"],
+  ['attemptNotSuperseded', 'attempt.superseded_by_attempt_id IS NULL'],
+  ['attemptDispatchAuthorizationAbsent', 'attempt.dispatch_authorized_at IS NULL'],
+  ['workerRunAbsent', 'attempt.worker_run_id IS NULL'],
+  ['playwrightRunAbsent', 'attempt.playwright_run_id IS NULL'],
+  ['claimTokensMatch', 'attempt.claim_token=job.claim_token'],
+  ['claimExpiriesMatch', 'attempt.claim_expires_at=job.claim_expires_at'],
+  ['attemptLeaseExpired', 'attempt.claim_expires_at<=CURRENT_TIMESTAMP'],
+  ['workerClaimedEventPresent', `EXISTS (
+    SELECT 1 FROM rednote_publish_attempt_events event
+    WHERE event.attempt_id=attempt.id AND event.event_type='worker_claimed'
+  )`],
+  ['executionStartedAbsent', `NOT EXISTS (
+    SELECT 1 FROM rednote_publish_attempt_events event
+    WHERE event.attempt_id=attempt.id AND event.event_type='execution_started'
+  )`],
+  ['receiptAbsent', `NOT EXISTS (
+    SELECT 1 FROM rednote_publish_attempt_receipts receipt
+    WHERE receipt.attempt_id=attempt.id
+  )`],
+  ['publicationEvidenceAbsent', `NOT EXISTS (
+    SELECT 1 FROM rednote_publication_evidence evidence
+    WHERE evidence.workspace_id=job.workspace_id
+      AND evidence.local_publish_job_id=job.id
+  )`],
+] as const;
+
+type ExpiredBatchClaimSqlCheck = typeof EXPIRED_BATCH_CLAIM_SQL_GUARDS[number][0];
+type ExpiredBatchClaimChecks = Record<string, boolean>;
+
+type ExpiredBatchClaimCandidate = QueryResultRow & {
+  id: string;
+  claim_token: string;
+  claim_expires_at: Date | string;
+  payload_digest: string;
+  payload_revision: string;
+  frozen_payload: FrozenRednoteAttemptPayload;
+  approved_at: Date | string;
+  late_fallback_policy: unknown;
+  job_snapshot: LocalPublishSnapshot;
+  batch_snapshot: LocalPublishSnapshot;
+  dispatch_mode: 'scheduled' | 'post_now';
+  item_hash: string;
+  manifest_hash: string;
+  batch_manifest: Array<{
+    notionPageId: string;
+    itemHash: string;
+    dispatchMode: 'scheduled' | 'post_now';
+    lateBySeconds: number;
+  }>;
+  sql_checks?: Record<ExpiredBatchClaimSqlCheck, boolean>;
+};
+
+function expiredBatchClaimSqlWhere() {
+  return EXPIRED_BATCH_CLAIM_SQL_GUARDS.map(([, expression]) => `(${expression})`).join('\nAND ');
+}
+
+function expiredBatchClaimSqlChecks() {
+  const chunks = [];
+  for (let index = 0; index < EXPIRED_BATCH_CLAIM_SQL_GUARDS.length; index += 20) {
+    const entries = EXPIRED_BATCH_CLAIM_SQL_GUARDS.slice(index, index + 20)
+      .flatMap(([name, expression]) => [`'${name}'`, `COALESCE((${expression}),false)`]);
+    chunks.push(`jsonb_build_object(${entries.join(',')})`);
+  }
+  return chunks.join(' || ');
+}
+
+function evaluateExpiredBatchClaimCandidate(
+  row: ExpiredBatchClaimCandidate | undefined,
+  input: {
+    jobId: string;
+    sourceNotionPageId: string;
+    revision: string;
+  },
+) {
+  const payload = row?.frozen_payload;
+  const check = (test: () => boolean) => {
+    try {
+      return Boolean(row && test());
+    } catch {
+      return false;
+    }
+  };
+  const checks: ExpiredBatchClaimChecks = {
+    recordFound: Boolean(row),
+    ...Object.fromEntries(
+      EXPIRED_BATCH_CLAIM_SQL_GUARDS.map(([name]) => [name, Boolean(row)]),
+    ),
+    ...(row?.sql_checks ?? {}),
+    batchManifestSingleItem: check(() => row!.batch_manifest?.length === 1),
+    jobSnapshotMatchesBatchSnapshot: check(() =>
+      isDeepStrictEqual(row!.job_snapshot, row!.batch_snapshot)),
+    jobSnapshotRevisionMatches: check(() =>
+      row!.job_snapshot.notionLastEditedTime === input.revision),
+    batchSnapshotRevisionMatches: check(() =>
+      row!.batch_snapshot.notionLastEditedTime === input.revision),
+    legacyFallbackValueMatches: check(() =>
+      isDeepStrictEqual(row!.late_fallback_policy, LEGACY_READY_X3_LATE_FALLBACK_POLICY)),
+    batchItemDigestValid: check(() =>
+      stableDigest(row!.batch_snapshot) === row!.item_hash),
+    batchManifestDigestValid: check(() =>
+      storedManifestHash(row!.batch_manifest) === row!.manifest_hash),
+    attemptRevisionMatches: check(() => row!.payload_revision === input.revision),
+    frozenDigestFieldMatches: check(() => payload!.payloadDigest === row!.payload_digest),
+    frozenRevisionMatchesAttempt: check(() =>
+      payload!.payloadRevision === row!.payload_revision),
+    frozenRevisionMatchesInput: check(() => payload!.payloadRevision === input.revision),
+    frozenPageMatches: check(() =>
+      payload!.sourceNotionPageId === input.sourceNotionPageId),
+    frozenJobMatches: check(() => payload!.sourceLocalPublishJobId === input.jobId),
+    frozenTimingScheduled: check(() => payload!.browserPayload.timingMode === 'scheduled'),
+    frozenPayloadDigestValid: check(() =>
+      frozenPayloadDigest(payload!) === row!.payload_digest),
+    frozenPayloadMatchesApprovedBatch: check(() =>
+      attemptPayloadMatchesApprovedBatch(payload!.browserPayload, row!.batch_snapshot, 'schedule')),
+  };
+  const failedChecks = Object.entries(checks)
+    .filter(([, passed]) => !passed)
+    .map(([name]) => name);
+  return { eligible: failedChecks.length === 0, checks, failedChecks };
+}
+
+export async function diagnoseExpiredMisclassifiedBatchClaim(input: {
+  workspaceId: string;
+  jobId: string;
+  attemptId: string;
+  sourceNotionPageId: string;
+  revision: string;
+}) {
+  for (const [name, value] of Object.entries(input)) {
+    if (typeof value !== 'string' || !value.trim()) {
+      throw new LocalPublishJobError(`${name} is required`, 'VALIDATION_ERROR', 400);
+    }
+  }
+  const result = await getPool().query<ExpiredBatchClaimCandidate>(
+    `SELECT attempt.id,attempt.claim_token,attempt.claim_expires_at,
+        attempt.payload_digest,attempt.payload_revision,
+        attempt.frozen_payload,attempt.approved_at,
+        attempt.late_fallback_policy,
+        job.snapshot AS job_snapshot,item.snapshot AS batch_snapshot,
+        item.dispatch_mode,item.item_hash,batch.manifest_hash,
+        (
+          SELECT json_agg(
+            json_build_object(
+              'notionPageId',manifest_item.notion_page_id,
+              'itemHash',manifest_item.item_hash,
+              'dispatchMode',manifest_item.dispatch_mode,
+              'lateBySeconds',manifest_item.late_by_seconds
+            )
+            ORDER BY manifest_item.snapshot->>'publishAt' NULLS FIRST,
+              manifest_item.created_at
+          )
+          FROM rednote_publish_batch_items manifest_item
+          WHERE manifest_item.batch_id=batch.id
+        ) AS batch_manifest,
+        ${expiredBatchClaimSqlChecks()} AS sql_checks
+     FROM local_publish_jobs job
+     LEFT JOIN rednote_publish_batch_items item
+       ON item.id=job.batch_item_id
+     LEFT JOIN rednote_publish_batches batch
+       ON batch.id=item.batch_id
+     LEFT JOIN rednote_publish_attempts attempt
+       ON attempt.id=$3::uuid
+     WHERE job.workspace_id=$1 AND job.id=$2::uuid`,
+    [
+      input.workspaceId,
+      input.jobId,
+      input.attemptId,
+      input.sourceNotionPageId,
+      input.revision,
+      JSON.stringify(LEGACY_READY_X3_LATE_FALLBACK_POLICY),
+    ],
+  );
+  return evaluateExpiredBatchClaimCandidate(result.rows[0], input);
+}
+
 export async function requeueMisclassifiedBatchInvalidClaimFailure(input: {
   workspaceId: string;
   jobId: string;
@@ -1385,27 +1606,7 @@ export async function requeueExpiredMisclassifiedBatchClaim(input: {
     await client.query(
       `SELECT set_config('app.expired_batch_claim_reclassification', 'on', true)`,
     );
-    const locked = await client.query<{
-      id: string;
-      claim_token: string;
-      claim_expires_at: Date | string;
-      payload_digest: string;
-      payload_revision: string;
-      frozen_payload: FrozenRednoteAttemptPayload;
-      approved_at: Date | string;
-      late_fallback_policy: unknown;
-      job_snapshot: LocalPublishSnapshot;
-      batch_snapshot: LocalPublishSnapshot;
-      dispatch_mode: 'scheduled' | 'post_now';
-      item_hash: string;
-      manifest_hash: string;
-      batch_manifest: Array<{
-        notionPageId: string;
-        itemHash: string;
-        dispatchMode: 'scheduled' | 'post_now';
-        lateBySeconds: number;
-      }>;
-    }>(
+    const locked = await client.query<ExpiredBatchClaimCandidate>(
       `SELECT attempt.id,attempt.claim_token,attempt.claim_expires_at,
           attempt.payload_digest,attempt.payload_revision,
           attempt.frozen_payload,attempt.approved_at,
@@ -1436,69 +1637,7 @@ export async function requeueExpiredMisclassifiedBatchClaim(input: {
         AND attempt.workspace_id=job.workspace_id
        WHERE job.workspace_id=$1 AND job.id=$2::uuid
          AND attempt.id=$3::uuid
-         AND job.notion_page_id=$4
-         AND attempt.source_notion_page_id=$4
-         AND attempt.payload_revision=$5
-         AND job.status='claimed'
-         AND job.error_code IS NULL AND job.error_message IS NULL
-         AND job.claim_token IS NOT NULL
-         AND job.claimed_at IS NOT NULL
-         AND job.claim_expires_at<=CURRENT_TIMESTAMP
-         AND job.staged_at IS NULL
-         AND job.dispatch_authorized_at IS NULL
-         AND job.dispatched_at IS NULL
-         AND job.verified_at IS NULL AND job.reconciled_at IS NULL
-         AND job.completed_at IS NULL
-         AND job.note_id IS NULL AND job.share_url IS NULL
-         AND job.success_attestation_id IS NULL
-         AND job.external_disposition_request_id IS NULL
-         AND job.receipt_contract_version IS NULL
-         AND job.receipt_outcome IS NULL
-         AND job.receipt_acknowledged_at IS NULL
-         AND job.authenticated_account_id IS NULL
-         AND job.authenticated_account_at IS NULL
-         AND job.xsec_accessible_at IS NULL
-         AND job.public_index_status IS NULL
-         AND job.public_index_checked_at IS NULL
-         AND job.provider_restriction_status IS NULL
-         AND job.provider_restriction_reported_at IS NULL
-         AND item.state='claimed'
-         AND batch.status IN ('approved','partially_approved')
-         AND batch.approved_at IS NOT NULL
-         AND attempt.authorization_kind='ready_x3'
-         AND item.dispatch_mode='scheduled'
-         AND attempt.late_fallback_policy=$6::jsonb
-         AND attempt.active
-         AND attempt.approved_at IS NOT NULL
-         AND attempt.terminal_outcome IS NULL
-         AND attempt.terminal_at IS NULL
-         AND attempt.receipt_lookup_state='pending'
-         AND attempt.superseded_by_attempt_id IS NULL
-         AND attempt.dispatch_authorized_at IS NULL
-         AND attempt.worker_run_id IS NULL
-         AND attempt.playwright_run_id IS NULL
-         AND attempt.claim_token=job.claim_token
-         AND attempt.claim_expires_at=job.claim_expires_at
-         AND attempt.claim_expires_at<=CURRENT_TIMESTAMP
-         AND EXISTS (
-           SELECT 1 FROM rednote_publish_attempt_events event
-           WHERE event.attempt_id=attempt.id
-             AND event.event_type='worker_claimed'
-         )
-         AND NOT EXISTS (
-           SELECT 1 FROM rednote_publish_attempt_events event
-           WHERE event.attempt_id=attempt.id
-             AND event.event_type='execution_started'
-         )
-         AND NOT EXISTS (
-           SELECT 1 FROM rednote_publish_attempt_receipts receipt
-           WHERE receipt.attempt_id=attempt.id
-         )
-         AND NOT EXISTS (
-           SELECT 1 FROM rednote_publication_evidence evidence
-           WHERE evidence.workspace_id=job.workspace_id
-             AND evidence.local_publish_job_id=job.id
-         )
+         AND ${expiredBatchClaimSqlWhere()}
        FOR UPDATE OF job,item,batch,attempt`,
       [
         input.workspaceId,
@@ -1510,33 +1649,7 @@ export async function requeueExpiredMisclassifiedBatchClaim(input: {
       ],
     );
     const row = locked.rows[0];
-    const payload = row?.frozen_payload;
-    if (
-      !row ||
-      row.batch_manifest?.length !== 1 ||
-      !isDeepStrictEqual(row.job_snapshot, row.batch_snapshot) ||
-      row.job_snapshot.notionLastEditedTime !== input.revision ||
-      row.batch_snapshot.notionLastEditedTime !== input.revision ||
-      !isDeepStrictEqual(
-        row.late_fallback_policy,
-        LEGACY_READY_X3_LATE_FALLBACK_POLICY,
-      ) ||
-      stableDigest(row.batch_snapshot) !== row.item_hash ||
-      storedManifestHash(row.batch_manifest) !== row.manifest_hash ||
-      row.payload_revision !== input.revision ||
-      payload.payloadDigest !== row.payload_digest ||
-      payload.payloadRevision !== row.payload_revision ||
-      payload.payloadRevision !== input.revision ||
-      payload.sourceNotionPageId !== input.sourceNotionPageId ||
-      payload.sourceLocalPublishJobId !== input.jobId ||
-      payload.browserPayload.timingMode !== 'scheduled' ||
-      frozenPayloadDigest(payload) !== row.payload_digest ||
-      !attemptPayloadMatchesApprovedBatch(
-        payload.browserPayload,
-        row.batch_snapshot,
-        'schedule',
-      )
-    ) {
+    if (!evaluateExpiredBatchClaimCandidate(row, input).eligible) {
       throw new LocalPublishJobError(
         'The expired claim is not an exact unexecuted misclassified bounded-batch attempt',
         'EXPIRED_BATCH_CLAIM_RECOVERY_UNSAFE',

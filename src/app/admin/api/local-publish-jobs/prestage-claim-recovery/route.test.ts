@@ -3,6 +3,7 @@ import { NextRequest } from 'next/server';
 
 const mocks = vi.hoisted(() => ({
   requireOperator: vi.fn(),
+  diagnoseExpiredBatchClaim: vi.fn(),
   expiredBatchClaim: vi.fn(),
 }));
 
@@ -10,6 +11,7 @@ vi.mock('@/lib/xhs-operator-auth', () => ({
   requireXhsOperator: mocks.requireOperator,
 }));
 vi.mock('@/lib/rednote-publishing-attempt-store', () => ({
+  diagnoseExpiredMisclassifiedBatchClaim: mocks.diagnoseExpiredBatchClaim,
   diagnoseReadyX3StaleBrowserFrameRecovery: vi.fn(),
   requeueExpiredMisclassifiedBatchClaim: mocks.expiredBatchClaim,
   requeueMisclassifiedBatchInvalidClaimFailure: vi.fn(),
@@ -30,6 +32,11 @@ describe('expired misclassified batch claim recovery route', () => {
       requeued: true,
       reclassifiedAuthorization: 'batch',
       publicationMayHaveStarted: false,
+    });
+    mocks.diagnoseExpiredBatchClaim.mockResolvedValue({
+      eligible: false,
+      checks: { batchItemClaimed: false },
+      failedChecks: ['batchItemClaimed'],
     });
   });
 
@@ -61,5 +68,61 @@ describe('expired misclassified batch claim recovery route', () => {
       sourceNotionPageId: body.sourceNotionPageId,
       revision: body.revision,
     });
+  });
+
+  it('authenticates and forwards the exact read-only diagnostic request', async () => {
+    const body = {
+      confirm: 'DIAGNOSE_EXACT_EXPIRED_MISCLASSIFIED_BATCH_CLAIM',
+      jobId: 'a6cdfa8a-e840-4e48-9776-044a8cd2b093',
+      attemptId: 'ef4a1d51-01eb-4499-a596-4aefefb59de8',
+      sourceNotionPageId: '432411de-071a-498e-9833-ff7b6c238374',
+      revision: '2026-09-08T16:37:00.000Z',
+    };
+    const response = await POST(new NextRequest(
+      'https://xhs.justlikekatie.com/admin/api/local-publish-jobs/prestage-claim-recovery',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Workspace-Id': 'legacy-local-publish',
+        },
+        body: JSON.stringify(body),
+      },
+    ));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      eligible: false,
+      checks: { batchItemClaimed: false },
+      failedChecks: ['batchItemClaimed'],
+    });
+    expect(mocks.diagnoseExpiredBatchClaim).toHaveBeenCalledWith({
+      workspaceId: 'legacy-local-publish',
+      jobId: body.jobId,
+      attemptId: body.attemptId,
+      sourceNotionPageId: body.sourceNotionPageId,
+      revision: body.revision,
+    });
+    expect(mocks.expiredBatchClaim).not.toHaveBeenCalled();
+  });
+
+  it('does not diagnose when operator authentication fails', async () => {
+    mocks.requireOperator.mockResolvedValue(
+      new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 }),
+    );
+    const response = await POST(new NextRequest(
+      'https://xhs.justlikekatie.com/admin/api/local-publish-jobs/prestage-claim-recovery',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          confirm: 'DIAGNOSE_EXACT_EXPIRED_MISCLASSIFIED_BATCH_CLAIM',
+        }),
+      },
+    ));
+
+    expect(response.status).toBe(401);
+    expect(mocks.diagnoseExpiredBatchClaim).not.toHaveBeenCalled();
+    expect(mocks.expiredBatchClaim).not.toHaveBeenCalled();
   });
 });
