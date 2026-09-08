@@ -9,6 +9,7 @@ const sql = readFileSync(
   ),
   'utf8',
 );
+const compactSql = sql.replace(/\s+/g, ' ');
 
 describe('terminal expired batch claim migration', () => {
   it('accepts only the exact automatic lease-expiry terminal shape', () => {
@@ -64,6 +65,28 @@ describe('terminal expired batch claim migration', () => {
     expect(sql).toContain(
       'terminal expired batch claim reset requires exact authorization reclassification',
     );
+  });
+
+  it('treats every unset recovery setting as false', () => {
+    expect(compactSql).toContain(
+      "COALESCE( current_setting('app.batch_authorization_reclassification', true) = 'on', FALSE )",
+    );
+    expect(compactSql).toContain(
+      "COALESCE( current_setting('app.expired_batch_claim_reclassification', true) = 'on', FALSE )",
+    );
+    expect(compactSql.split(
+      "COALESCE( current_setting( 'app.terminal_expired_batch_claim_reclassification', true ) = 'on', FALSE )",
+    )).toHaveLength(3);
+    expect(compactSql).toContain(
+      "AND NOT COALESCE( COALESCE( current_setting( 'app.terminal_expired_batch_claim_reclassification', true ) = 'on', FALSE )",
+    );
+    for (const guard of [
+      'NOT COALESCE(batch_reclassification, FALSE)',
+      'NOT COALESCE(expired_claim_reclassification, FALSE)',
+      'NOT COALESCE(terminal_expired_claim_reclassification, FALSE)',
+    ]) {
+      expect(compactSql).toContain(guard);
+    }
   });
 
   it('publishes an independent readiness marker for migration 029', () => {

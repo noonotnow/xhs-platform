@@ -140,7 +140,8 @@ describe('canonical local publishing migration chain', () => {
     addExecutionEvidence?: boolean;
     receiptLookupUpdatedAt?: string;
     frozenSourcePageId?: string;
-  } = {}) {
+    authorizationKind?: 'ready_x3' | null;
+  } = {}, target = database) {
     const batchId = randomUUID();
     const itemId = randomUUID();
     const jobId = randomUUID();
@@ -212,19 +213,19 @@ describe('canonical local publishing migration chain', () => {
       dispatchMode: 'scheduled',
       lateBySeconds: 0,
     }]);
-    await database.query(
+    await target.query(
       `INSERT INTO rednote_publish_batches(
          id, kind, status, manifest_hash, approved_at
        ) VALUES ($1, 'bootstrap', 'approved', $2, $3)`,
       [batchId, manifestHash, approval],
     );
-    await database.query(
+    await target.query(
       `INSERT INTO rednote_publish_batch_items(
          id, batch_id, notion_page_id, snapshot, item_hash, state, dispatch_mode
        ) VALUES ($1, $2, $3, $4::jsonb, $5, 'queued', 'scheduled')`,
       [itemId, batchId, pageId, JSON.stringify(snapshot), itemHash],
     );
-    await database.query(
+    await target.query(
       `INSERT INTO local_publish_jobs(
          id, notion_page_id, snapshot, status, idempotency_key, workspace_id,
          batch_item_id, claim_attempts, claimed_at, claim_expires_at,
@@ -244,13 +245,13 @@ describe('canonical local publishing migration chain', () => {
           'The publish lease expired without a terminal result. Automatic dispatch is permanently closed; review the frozen attempt before operator handling or reconciliation.',
       ],
     );
-    await database.query(
+    await target.query(
       `UPDATE rednote_publish_batch_items
        SET local_publish_job_id=$1,state='queued'
        WHERE id=$2`,
       [jobId, itemId],
     );
-    await database.query(
+    await target.query(
       `INSERT INTO rednote_publish_attempts(
          id, workspace_id, idempotency_key, contract_revision,
          source_notion_page_id, source_local_publish_job_id,
@@ -265,7 +266,7 @@ describe('canonical local publishing migration chain', () => {
          $3, $4, $5::jsonb, $6, $7,
          'worker', 'playwright', 'worker-test', '2026-09-08T23:20:00Z',
          $8, 'not_required', $9, false, $8, 'known_failed', $10,
-         $11, $10, 'ready_x3', $12::jsonb
+         $11, $10, $12, $13::jsonb
        )`,
       [
         attemptId,
@@ -279,10 +280,13 @@ describe('canonical local publishing migration chain', () => {
         options.receiptLookupUpdatedAt ?? terminal,
         terminal,
         claimToken,
+        options.authorizationKind === undefined
+          ? 'ready_x3'
+          : options.authorizationKind,
         JSON.stringify(fallback),
       ],
     );
-    await database.query(
+    await target.query(
       `INSERT INTO rednote_publish_attempt_events(
          attempt_id, event_type, occurred_at, actor_type, actor_id
        ) VALUES
@@ -292,7 +296,7 @@ describe('canonical local publishing migration chain', () => {
       [attemptId, approval, terminal],
     );
     if (options.addExecutionEvidence) {
-      await database.query(
+      await target.query(
         `INSERT INTO rednote_publish_attempt_events(
            attempt_id, event_type, occurred_at, actor_type, actor_id
          ) VALUES ($1, 'execution_started', $2, 'worker', 'worker-test')`,
@@ -862,6 +866,103 @@ describe('canonical local publishing migration chain', () => {
     try {
       await database.exec(
         `SELECT set_config('app.ready_x3_invalid_claim_recovery', 'on', true)`,
+      );
+      await expect(database.query(
+        `UPDATE rednote_publish_attempts
+         SET active=true,terminal_outcome=NULL,terminal_at=NULL,
+             receipt_lookup_state='pending',
+             receipt_lookup_updated_at=CURRENT_TIMESTAMP,
+             claim_token=NULL,claim_expires_at=NULL
+         WHERE id=$1`,
+        [attemptId],
+      )).rejects.toThrow(
+        /terminal expired batch claim reset requires exact authorization reclassification/,
+      );
+    } finally {
+      await database.exec('ROLLBACK');
+    }
+  });
+
+  it('fails closed on a fresh connection when recovery settings are unset', async () => {
+    const freshDatabase = new PGlite();
+    try {
+      for (const file of migrationFiles) {
+        const sql = await readFile(path.join(process.cwd(), 'migrations', file), 'utf8');
+        await freshDatabase.exec(sql);
+      }
+      const settings = await freshDatabase.query<{
+        batch_setting: string | null;
+        expired_setting: string | null;
+        terminal_setting: string | null;
+      }>(
+        `SELECT
+           current_setting(
+             'app.batch_authorization_reclassification',
+             true
+           ) AS batch_setting,
+           current_setting(
+             'app.expired_batch_claim_reclassification',
+             true
+           ) AS expired_setting,
+           current_setting(
+             'app.terminal_expired_batch_claim_reclassification',
+             true
+           ) AS terminal_setting`,
+      );
+      expect(settings.rows[0]).toEqual({
+        batch_setting: null,
+        expired_setting: null,
+        terminal_setting: null,
+      });
+
+      const exactRecovery = await insertTerminalExpiredBatchClaim(
+        {},
+        freshDatabase,
+      );
+      await expect(freshDatabase.query(
+        `UPDATE rednote_publish_attempts
+         SET authorization_kind=NULL,late_fallback_policy=NULL,
+             active=true,terminal_outcome=NULL,terminal_at=NULL,
+             receipt_lookup_state='pending',
+             receipt_lookup_updated_at=CURRENT_TIMESTAMP,
+             claim_token=NULL,claim_expires_at=NULL
+         WHERE id=$1`,
+        [exactRecovery.attemptId],
+      )).rejects.toThrow(/Ready x3 authorization is immutable/);
+
+      const terminalReset = await insertTerminalExpiredBatchClaim(
+        {},
+        freshDatabase,
+      );
+      await expect(freshDatabase.query(
+        `UPDATE rednote_publish_attempts
+         SET active=true,terminal_outcome=NULL,terminal_at=NULL,
+             receipt_lookup_state='pending',
+             receipt_lookup_updated_at=CURRENT_TIMESTAMP,
+             claim_token=NULL,claim_expires_at=NULL
+         WHERE id=$1`,
+        [terminalReset.attemptId],
+      )).rejects.toThrow(
+        /terminal expired batch claim reset requires exact authorization reclassification/,
+      );
+    } finally {
+      await freshDatabase.close();
+    }
+  });
+
+  it('fails closed when the terminal setting is enabled but authorization is null', async () => {
+    const { attemptId } = await insertTerminalExpiredBatchClaim({
+      authorizationKind: null,
+    });
+    await database.exec('BEGIN');
+    try {
+      await database.exec(
+        `SELECT set_config('app.ready_x3_invalid_claim_recovery', 'on', true);
+         SELECT set_config(
+           'app.terminal_expired_batch_claim_reclassification',
+           'on',
+           true
+         )`,
       );
       await expect(database.query(
         `UPDATE rednote_publish_attempts

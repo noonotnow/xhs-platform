@@ -71,7 +71,10 @@ CREATE OR REPLACE FUNCTION guard_ready_x3_authorization_immutable()
 RETURNS trigger AS $$
 DECLARE
   batch_reclassification BOOLEAN :=
-    current_setting('app.batch_authorization_reclassification', true) = 'on'
+    COALESCE(
+      current_setting('app.batch_authorization_reclassification', true) = 'on',
+      FALSE
+    )
     AND OLD.authorization_kind = 'ready_x3'
     AND NEW.authorization_kind IS NULL
     AND OLD.late_fallback_policy IS NOT NULL
@@ -122,7 +125,10 @@ DECLARE
       WHERE receipt.attempt_id = OLD.id
     );
   expired_claim_reclassification BOOLEAN :=
-    current_setting('app.expired_batch_claim_reclassification', true) = 'on'
+    COALESCE(
+      current_setting('app.expired_batch_claim_reclassification', true) = 'on',
+      FALSE
+    )
     AND OLD.authorization_kind = 'ready_x3'
     AND NEW.authorization_kind IS NULL
     AND OLD.late_fallback_policy =
@@ -212,10 +218,13 @@ DECLARE
         AND evidence.local_publish_job_id = OLD.source_local_publish_job_id
     );
   terminal_expired_claim_reclassification BOOLEAN :=
-    current_setting(
-      'app.terminal_expired_batch_claim_reclassification',
-      true
-    ) = 'on'
+    COALESCE(
+      current_setting(
+        'app.terminal_expired_batch_claim_reclassification',
+        true
+      ) = 'on',
+      FALSE
+    )
     AND OLD.authorization_kind = 'ready_x3'
     AND NEW.authorization_kind IS NULL
     AND OLD.late_fallback_policy =
@@ -486,9 +495,9 @@ BEGIN
        NEW.authorization_kind IS DISTINCT FROM OLD.authorization_kind
        OR NEW.late_fallback_policy IS DISTINCT FROM OLD.late_fallback_policy
      )
-     AND NOT batch_reclassification
-     AND NOT expired_claim_reclassification
-     AND NOT terminal_expired_claim_reclassification THEN
+     AND NOT COALESCE(batch_reclassification, FALSE)
+     AND NOT COALESCE(expired_claim_reclassification, FALSE)
+     AND NOT COALESCE(terminal_expired_claim_reclassification, FALSE) THEN
     RAISE EXCEPTION 'Ready x3 authorization is immutable';
   END IF;
   RETURN NEW;
@@ -510,16 +519,20 @@ BEGIN
          AND job.error_message =
            'The publish lease expired without a terminal result. Automatic dispatch is permanently closed; review the frozen attempt before operator handling or reconciliation.'
      )
-     AND NOT (
-       current_setting(
-         'app.terminal_expired_batch_claim_reclassification',
-         true
-       ) = 'on'
+     AND NOT COALESCE(
+       COALESCE(
+         current_setting(
+           'app.terminal_expired_batch_claim_reclassification',
+           true
+         ) = 'on',
+         FALSE
+       )
        AND OLD.authorization_kind = 'ready_x3'
        AND NEW.authorization_kind IS NULL
        AND OLD.late_fallback_policy =
          '{"action":"post_now","maxLateMinutes":30}'::jsonb
-       AND NEW.late_fallback_policy IS NULL
+       AND NEW.late_fallback_policy IS NULL,
+       FALSE
      ) THEN
     RAISE EXCEPTION
       'terminal expired batch claim reset requires exact authorization reclassification';
