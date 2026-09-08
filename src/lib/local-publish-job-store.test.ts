@@ -107,6 +107,43 @@ describe('worker result v2 storage', () => {
     expect(query).toContain("'verification_pending'");
   });
 
+  it('quarantines an immediate receipt returned for a schedule authorization', async () => {
+    mocks.sql.mockResolvedValue({
+      rows: [{
+        ...claimedRow(),
+        status: 'verification_pending',
+        note_id: 'note_immediate',
+        receipt_contract_version: 'rednote-worker-result/v2',
+        receipt_outcome: 'acknowledged',
+        error_code: 'UNEXPECTED_IMMEDIATE_OUTCOME',
+      }],
+      rowCount: 1,
+    });
+
+    await expect(recordStoredAcknowledgedPublication(
+      claimedRow().id,
+      claimedRow().claim_token,
+      {
+        noteId: 'note_immediate',
+        acknowledgedAt: '2026-08-01T12:00:00Z',
+        accountId: snapshot.expectedAccountId!,
+        accountCapturedAt: '2026-08-01T12:00:01Z',
+        ownership: 'owned',
+      },
+      'legacy-local-publish',
+      false,
+    )).resolves.toMatchObject({
+      status: 'verification_pending',
+      receiptOutcome: 'acknowledged',
+      errorCode: 'UNEXPECTED_IMMEDIATE_OUTCOME',
+    });
+
+    const query = (mocks.sql.mock.calls[0][0] as TemplateStringsArray).join('?');
+    expect(query).toContain("'UNEXPECTED_IMMEDIATE_OUTCOME'");
+    expect(query).toContain("'verification_pending'");
+    expect(query).toContain('rednote_publication_evidence');
+  });
+
   it('stores scheduled and ambiguous outcomes as verification-only work', async () => {
     mocks.sql
       .mockResolvedValueOnce({
@@ -377,7 +414,10 @@ describe('local publish atomic claim storage', () => {
       claimExpiresAt: '2026-08-01T14:00:00.000Z',
       mediaUrl: snapshot.mediaUrl,
     });
-    expect(claimed).not.toHaveProperty('notionLastEditedTime');
+    expect(claimed).toHaveProperty(
+      'notionLastEditedTime',
+      snapshot.notionLastEditedTime,
+    );
     expect(claimed).not.toHaveProperty('snapshotRevision');
   });
 
@@ -398,8 +438,10 @@ describe('local publish atomic claim storage', () => {
     expect(query).toContain("'RECEIPT_RECONCILIATION_REQUIRED'");
     expect(query).toContain("THEN 'verification_pending'");
     expect(query).toContain('rednote_publish_attempt_receipts');
-    expect(query).toContain("SET state = 'failed'");
-    expect(query).toContain("WHERE status = 'failed'");
+    expect(query).toContain('SET state = released.status');
+    expect(query).toContain("THEN 'outcome_unknown'");
+    expect(query).toContain("ELSE 'known_failed'");
+    expect(query).toContain("'local_publish_lease_recovery'");
     expect(query).not.toContain("SET status = 'queued'");
     expect(query).not.toContain('gen_random_uuid()');
   });

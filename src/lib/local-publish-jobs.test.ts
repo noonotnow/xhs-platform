@@ -4,12 +4,29 @@ import {
   parseLocalPublishWorkerResult,
   parseQueueLocalPublishInput,
   queueLocalPublishJob,
+  immediateWorkerOutcomeAllowed,
   shouldHeartbeatLinkedAttempt,
   submitLocalPublishJobResult,
   type StoredLocalPublishJob,
 } from '@/lib/local-publish-jobs';
 import type { LocalPublishSnapshot } from '@/types/local-publish-job';
 import type { ReadyXhsPost } from '@/types/ready-post';
+
+const attemptMocks = vi.hoisted(() => ({
+  getLinked: vi.fn(),
+  recordOutcome: vi.fn(),
+}));
+
+vi.mock('@/lib/rednote-publishing-attempt-store', async (importOriginal) => {
+  const original = await importOriginal<
+    typeof import('@/lib/rednote-publishing-attempt-store')
+  >();
+  return {
+    ...original,
+    getLinkedRednotePublishAttempt: attemptMocks.getLinked,
+    recordLinkedAttemptOutcome: attemptMocks.recordOutcome,
+  };
+});
 
 const snapshot: LocalPublishSnapshot = {
   expectedAccountId: 'creator-account-1',
@@ -99,6 +116,11 @@ describe('local publish job orchestration', () => {
     expect(shouldHeartbeatLinkedAttempt('staged')).toBe(true);
     expect(shouldHeartbeatLinkedAttempt('scheduled')).toBe(false);
     expect(shouldHeartbeatLinkedAttempt('verification_pending')).toBe(false);
+  });
+
+  it('allows immediate worker outcomes only for an explicit post-now attempt', () => {
+    expect(immediateWorkerOutcomeAllowed('post_now')).toBe(true);
+    expect(immediateWorkerOutcomeAllowed('scheduled')).toBe(false);
   });
 
   it('rejects a scheduled acknowledgement that differs from the frozen target', () => {
@@ -403,6 +425,59 @@ describe('local publish job orchestration', () => {
         undefined,
         'legacy-local-publish',
       );
+  });
+
+  it('quarantines an immediate v2 result for a durable scheduled attempt', async () => {
+      attemptMocks.getLinked.mockResolvedValueOnce({
+        payload: { timingMode: 'scheduled' },
+      });
+      attemptMocks.recordOutcome.mockResolvedValueOnce(undefined);
+      const dependencies = {
+        stage: vi.fn(),
+        recordDispatch: vi.fn(),
+        deferVerification: vi.fn(),
+        fail: vi.fn(),
+        prepareVerification: vi.fn(),
+        recordAcknowledged: vi.fn().mockResolvedValue({
+          ...stored('verification_pending'),
+          errorCode: 'UNEXPECTED_IMMEDIATE_OUTCOME',
+        }),
+        completeReconciliation: vi.fn(),
+        backfill: vi.fn(),
+      };
+
+      await expect(submitLocalPublishJobResult(
+        stored('claimed').id,
+        stored('claimed').claimToken!,
+        {
+          contractVersion: 'rednote-worker-result/v2',
+          outcome: 'acknowledged',
+          noteId: 'note_123',
+          acknowledgedAt: '2026-08-01T12:00:00Z',
+          authenticatedAccount: {
+            accountId: 'creator-account-1',
+            capturedAt: '2026-08-01T12:00:01Z',
+            ownership: 'owned',
+          },
+        },
+        'legacy-local-publish',
+        dependencies,
+      )).resolves.toMatchObject({
+        status: 'verification_pending',
+        errorCode: 'UNEXPECTED_IMMEDIATE_OUTCOME',
+      });
+      expect(attemptMocks.recordOutcome).toHaveBeenCalledWith(
+        expect.objectContaining({ outcome: 'outcome_unknown' }),
+      );
+      expect(dependencies.recordAcknowledged).toHaveBeenCalledWith(
+        stored('claimed').id,
+        stored('claimed').claimToken,
+        expect.objectContaining({ noteId: 'note_123' }),
+        'legacy-local-publish',
+        false,
+      );
+      expect(dependencies.backfill).not.toHaveBeenCalled();
+      expect(dependencies.completeReconciliation).not.toHaveBeenCalled();
   });
 
   it.each([

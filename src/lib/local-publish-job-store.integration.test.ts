@@ -28,6 +28,7 @@ import {
   deferStoredLocalPublishVerification,
   deferStoredOperatorAttestedVerification,
   listLocalPublishJobs,
+  recordLateStoredWorkerTerminalResult,
   releaseExpiredStoredLocalPublishClaims,
 } from '@/lib/local-publish-job-store';
 import { rednoteMediaIdentity } from '@/lib/rednote-publish-authorization';
@@ -141,6 +142,62 @@ async function insertAttestedBatchAuthorization(input: {
   );
 }
 
+async function insertExpiredWorkerAttempt(input: {
+  authorized?: boolean;
+  batchState?: string;
+}) {
+  await insertAttestedBatchAuthorization({
+    state: input.batchState ?? 'staged',
+  });
+  await insertJob({
+    id: scheduledJobId,
+    status: 'staged',
+    dueOffset: '-1 day',
+    claimed: true,
+    batchItemId,
+  });
+  await database.query(
+    `UPDATE local_publish_jobs
+     SET claim_expires_at = CURRENT_TIMESTAMP - INTERVAL '1 minute'
+     WHERE id = $1::uuid`,
+    [scheduledJobId],
+  );
+  await database.query(
+    `UPDATE rednote_publish_batch_items
+     SET local_publish_job_id = $1::uuid
+     WHERE id = $2::uuid`,
+    [scheduledJobId, batchItemId],
+  );
+  await database.query(
+    `INSERT INTO rednote_publish_attempts(
+       id, workspace_id, source_local_publish_job_id, executor_type,
+       executor_id, active, approved_at, dispatch_authorized_at,
+       claim_token, claim_expires_at, target_publish_at, frozen_payload
+     ) VALUES (
+       $1::uuid, 'legacy-local-publish', $2::uuid, 'worker',
+       'worker-test', true, CURRENT_TIMESTAMP,
+       CASE WHEN $4::boolean THEN CURRENT_TIMESTAMP - INTERVAL '2 minutes'
+         ELSE NULL END,
+       $3::uuid, CURRENT_TIMESTAMP - INTERVAL '1 minute',
+       ($5::jsonb->'browserPayload'->>'targetPublishAt')::timestamptz,
+       $5::jsonb
+     )`,
+    [
+      attemptId,
+      scheduledJobId,
+      claimToken,
+      input.authorized ?? true,
+      JSON.stringify({
+        browserPayload: {
+          timingMode: 'scheduled',
+          targetPublishAt: snapshot.publishAt,
+          expectedAccountId: snapshot.expectedAccountId,
+        },
+      }),
+    ],
+  );
+}
+
 function successAttestation(overrides: Record<string, unknown> = {}) {
   const requestedPublishAt = snapshot.publishAt;
   return {
@@ -224,7 +281,17 @@ describe('local publish job PostgreSQL execution', () => {
         batch_item_id uuid,
         dispatch_authorized_at timestamptz,
         success_attestation_id uuid,
-        external_disposition_request_id uuid
+        external_disposition_request_id uuid,
+        receipt_contract_version text,
+        receipt_outcome text,
+        receipt_acknowledged_at timestamptz,
+        authenticated_account_id text,
+        authenticated_account_at timestamptz,
+        xsec_accessible_at timestamptz,
+        public_index_status text,
+        public_index_checked_at timestamptz,
+        provider_restriction_status text,
+        provider_restriction_reported_at timestamptz
       );
       CREATE TABLE rednote_publish_batches (
          id uuid PRIMARY KEY,
@@ -265,14 +332,18 @@ describe('local publish job PostgreSQL execution', () => {
         workspace_id text NOT NULL DEFAULT 'legacy-local-publish',
         source_local_publish_job_id uuid,
         executor_type text,
+        executor_id text NOT NULL DEFAULT 'worker-test',
         active boolean NOT NULL DEFAULT false,
         approved_at timestamptz,
         terminal_outcome text,
+        terminal_at timestamptz,
         receipt_lookup_state text NOT NULL DEFAULT 'pending',
+        receipt_lookup_updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
         dispatch_authorized_at timestamptz,
         superseded_by_attempt_id uuid,
         claim_token uuid,
         claim_expires_at timestamptz,
+        target_publish_at timestamptz,
         authorization_kind text,
         frozen_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
         created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -284,6 +355,76 @@ describe('local publish job PostgreSQL execution', () => {
         platform_publish_time timestamptz NOT NULL,
         provenance jsonb NOT NULL
       );
+      CREATE TABLE rednote_publish_attempt_events (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        attempt_id uuid NOT NULL REFERENCES rednote_publish_attempts(id),
+        event_type text NOT NULL,
+        occurred_at timestamptz NOT NULL,
+        actor_type text NOT NULL,
+        actor_id text NOT NULL,
+        diagnostics jsonb NOT NULL DEFAULT '{}'::jsonb,
+        created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE rednote_publication_evidence (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        workspace_id text NOT NULL,
+        local_publish_job_id uuid NOT NULL,
+        attempt_id uuid,
+        note_id text,
+        evidence_kind text NOT NULL,
+        captured_at timestamptz NOT NULL,
+        account_id text,
+        evidence_status text NOT NULL,
+        public_url text,
+        created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE FUNCTION guard_test_terminal_refinement()
+      RETURNS trigger AS $$
+      DECLARE
+        allowed boolean;
+      BEGIN
+        allowed :=
+          OLD.terminal_outcome = 'outcome_unknown'
+          AND NEW.terminal_outcome IN ('accepted', 'known_failed')
+          AND NOT OLD.active
+          AND NOT NEW.active
+          AND OLD.claim_token IS NOT NULL
+          AND NEW.claim_token IS NOT DISTINCT FROM OLD.claim_token
+          AND OLD.claim_expires_at <= CURRENT_TIMESTAMP
+          AND NEW.terminal_at IS NOT DISTINCT FROM OLD.terminal_at
+          AND OLD.receipt_lookup_state = 'identity_pending'
+          AND (
+            (NEW.terminal_outcome = 'accepted'
+             AND OLD.dispatch_authorized_at IS NOT NULL
+             AND OLD.target_publish_at IS NOT NULL
+             AND NEW.receipt_lookup_state IN ('identity_pending', 'found'))
+            OR
+            (NEW.terminal_outcome = 'known_failed'
+             AND NEW.receipt_lookup_state = 'not_required')
+          )
+          AND EXISTS (
+            SELECT 1 FROM local_publish_jobs AS job
+            WHERE job.id = OLD.source_local_publish_job_id
+              AND job.status = 'verification_pending'
+              AND job.claim_token IS NULL
+              AND job.claim_expires_at <= CURRENT_TIMESTAMP
+              AND job.receipt_outcome IS NULL
+          );
+        IF OLD.terminal_outcome IS NOT NULL
+           AND (
+             NEW.terminal_outcome IS DISTINCT FROM OLD.terminal_outcome
+             OR NEW.terminal_at IS DISTINCT FROM OLD.terminal_at
+           )
+           AND NOT allowed THEN
+          RAISE EXCEPTION
+            'rednote publish attempt terminal outcome is immutable once set';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+      CREATE TRIGGER rednote_publish_attempts_guard_test_terminal
+      BEFORE UPDATE ON rednote_publish_attempts
+      FOR EACH ROW EXECUTE FUNCTION guard_test_terminal_refinement();
     `);
   });
 
@@ -299,6 +440,7 @@ describe('local publish job PostgreSQL execution', () => {
       TRUNCATE rednote_publish_batch_items;
       TRUNCATE rednote_publish_batches CASCADE;
       TRUNCATE rednote_publish_attempts CASCADE;
+      TRUNCATE rednote_publication_evidence;
     `);
   });
 
@@ -408,6 +550,16 @@ describe('local publish job PostgreSQL execution', () => {
        WHERE id = $2::uuid`,
       [scheduledJobId, batchItemId],
     );
+    await database.query(
+      `INSERT INTO rednote_publish_attempts(
+         id, workspace_id, source_local_publish_job_id, executor_type,
+         active, approved_at, claim_token, claim_expires_at
+       ) VALUES (
+         $1::uuid, 'legacy-local-publish', $2::uuid, 'worker',
+         true, CURRENT_TIMESTAMP, $3::uuid, CURRENT_TIMESTAMP - INTERVAL '1 minute'
+       )`,
+      [attemptId, scheduledJobId, claimToken],
+    );
 
     await expect(releaseExpiredStoredLocalPublishClaims())
       .resolves.toEqual([scheduledJobId]);
@@ -434,6 +586,336 @@ describe('local publish job PostgreSQL execution', () => {
        WHERE id = $1::uuid`,
       [batchItemId],
     )).resolves.toMatchObject({ rows: [{ state: 'failed' }] });
+    await expect(database.query<{
+      active: boolean;
+      terminal_outcome: string;
+      receipt_lookup_state: string;
+    }>(
+      `SELECT active, terminal_outcome, receipt_lookup_state
+       FROM rednote_publish_attempts
+       WHERE id = $1::uuid`,
+      [attemptId],
+    )).resolves.toMatchObject({
+      rows: [{
+        active: false,
+        terminal_outcome: 'known_failed',
+        receipt_lookup_state: 'not_required',
+      }],
+    });
+  });
+
+  it('recovers a split-write authorized stage as verify-only and never redispatches it', async () => {
+    await insertAttestedBatchAuthorization({ state: 'staged' });
+    await insertJob({
+      id: scheduledJobId,
+      status: 'staged',
+      dueOffset: '-1 day',
+      claimed: true,
+      batchItemId,
+    });
+    await database.query(
+      `UPDATE local_publish_jobs
+       SET claim_expires_at = CURRENT_TIMESTAMP - INTERVAL '1 minute'
+       WHERE id = $1::uuid`,
+      [scheduledJobId],
+    );
+    await database.query(
+      `UPDATE rednote_publish_batch_items
+       SET local_publish_job_id = $1::uuid
+       WHERE id = $2::uuid`,
+      [scheduledJobId, batchItemId],
+    );
+    await database.query(
+      `INSERT INTO rednote_publish_attempts(
+         id, workspace_id, source_local_publish_job_id, executor_type,
+         active, approved_at, dispatch_authorized_at, claim_token, claim_expires_at
+       ) VALUES (
+         $1::uuid, 'legacy-local-publish', $2::uuid, 'worker',
+         true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP - INTERVAL '2 minutes',
+         $3::uuid, CURRENT_TIMESTAMP - INTERVAL '1 minute'
+       )`,
+      [attemptId, scheduledJobId, claimToken],
+    );
+
+    await expect(releaseExpiredStoredLocalPublishClaims())
+      .resolves.toEqual([scheduledJobId]);
+
+    await expect(database.query<{
+      status: string;
+      claim_token: string | null;
+      error_code: string;
+    }>(
+      `SELECT status, claim_token, error_code
+       FROM local_publish_jobs
+       WHERE id = $1::uuid`,
+      [scheduledJobId],
+    )).resolves.toMatchObject({
+      rows: [{
+        status: 'verification_pending',
+        claim_token: null,
+        error_code: 'PUBLISH_ATTEMPT_OUTCOME_UNKNOWN',
+      }],
+    });
+    await expect(database.query<{ state: string }>(
+      `SELECT state
+       FROM rednote_publish_batch_items
+       WHERE id = $1::uuid`,
+      [batchItemId],
+    )).resolves.toMatchObject({ rows: [{ state: 'verification_pending' }] });
+    await expect(database.query<{
+      active: boolean;
+      terminal_outcome: string;
+      receipt_lookup_state: string;
+    }>(
+      `SELECT active, terminal_outcome, receipt_lookup_state
+       FROM rednote_publish_attempts
+       WHERE id = $1::uuid`,
+      [attemptId],
+    )).resolves.toMatchObject({
+      rows: [{
+        active: false,
+        terminal_outcome: 'outcome_unknown',
+        receipt_lookup_state: 'identity_pending',
+      }],
+    });
+    await expect(claimNextStoredLocalPublishJob(7_200, 'dispatch'))
+      .resolves.toBeNull();
+  });
+
+  it('accepts and idempotently replays an exact late scheduled receipt without redispatch', async () => {
+    await insertExpiredWorkerAttempt({});
+    await releaseExpiredStoredLocalPublishClaims();
+    const result = {
+      contractVersion: 'rednote-worker-result/v2' as const,
+      outcome: 'scheduled' as const,
+      acknowledgedAt: '2026-08-05T12:30:00.000Z',
+      scheduledFor: snapshot.publishAt,
+      authenticatedAccount: {
+        accountId: snapshot.expectedAccountId,
+        capturedAt: '2026-08-05T12:29:59.000Z',
+        ownership: 'owned' as const,
+      },
+      noteId: 'scheduled_note_123',
+    };
+
+    await expect(recordLateStoredWorkerTerminalResult(
+      scheduledJobId,
+      claimToken,
+      result,
+    )).resolves.toMatchObject({
+      status: 'scheduled',
+      receiptOutcome: 'scheduled',
+      noteId: 'scheduled_note_123',
+    });
+    await expect(recordLateStoredWorkerTerminalResult(
+      scheduledJobId,
+      claimToken,
+      result,
+    )).resolves.toMatchObject({ status: 'scheduled' });
+
+    await expect(database.query<{
+      terminal_outcome: string;
+      receipt_lookup_state: string;
+    }>(
+      `SELECT terminal_outcome, receipt_lookup_state
+       FROM rednote_publish_attempts WHERE id = $1::uuid`,
+      [attemptId],
+    )).resolves.toMatchObject({
+      rows: [{
+        terminal_outcome: 'accepted',
+        receipt_lookup_state: 'found',
+      }],
+    });
+    await expect(database.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+       FROM rednote_publish_attempt_events
+       WHERE attempt_id = $1::uuid
+         AND diagnostics->>'kind' = 'late_terminal_result_accepted'`,
+      [attemptId],
+    )).resolves.toMatchObject({ rows: [{ count: '1' }] });
+    await expect(database.query<{ state: string }>(
+      `SELECT state FROM rednote_publish_batch_items WHERE id = $1::uuid`,
+      [batchItemId],
+    )).resolves.toMatchObject({ rows: [{ state: 'scheduled' }] });
+    await expect(database.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+       FROM rednote_publication_evidence
+       WHERE local_publish_job_id = $1::uuid`,
+      [scheduledJobId],
+    )).resolves.toMatchObject({ rows: [{ count: '1' }] });
+    await expect(claimNextStoredLocalPublishJob(7_200, 'dispatch'))
+      .resolves.toBeNull();
+  });
+
+  it('accepts a late definitive rejection only without dispatch evidence', async () => {
+    await insertExpiredWorkerAttempt({});
+    await releaseExpiredStoredLocalPublishClaims();
+
+    await expect(recordLateStoredWorkerTerminalResult(
+      scheduledJobId,
+      claimToken,
+      {
+        contractVersion: 'rednote-worker-result/v2',
+        outcome: 'rejected',
+        occurredAt: '2026-08-05T12:30:00.000Z',
+        code: 'SCHEDULE_CONTROL_REJECTED',
+        message: 'Creator rejected the native schedule before Publish',
+      },
+    )).resolves.toMatchObject({
+      status: 'failed',
+      receiptOutcome: 'rejected',
+      errorCode: 'SCHEDULE_CONTROL_REJECTED',
+    });
+    await expect(database.query<{
+      terminal_outcome: string;
+      receipt_lookup_state: string;
+    }>(
+      `SELECT terminal_outcome, receipt_lookup_state
+       FROM rednote_publish_attempts WHERE id = $1::uuid`,
+      [attemptId],
+    )).resolves.toMatchObject({
+      rows: [{
+        terminal_outcome: 'known_failed',
+        receipt_lookup_state: 'not_required',
+      }],
+    });
+    await expect(database.query<{ state: string }>(
+      `SELECT state FROM rednote_publish_batch_items WHERE id = $1::uuid`,
+      [batchItemId],
+    )).resolves.toMatchObject({ rows: [{ state: 'failed' }] });
+  });
+
+  it('keeps a late ambiguous result verify-only after expiry outcome_unknown', async () => {
+    await insertExpiredWorkerAttempt({});
+    await releaseExpiredStoredLocalPublishClaims();
+
+    await expect(recordLateStoredWorkerTerminalResult(
+      scheduledJobId,
+      claimToken,
+      {
+        contractVersion: 'rednote-worker-result/v2',
+        outcome: 'ambiguous',
+        occurredAt: '2026-08-05T12:30:00.000Z',
+        code: 'POST_CLICK_TIMEOUT',
+        message: 'Creator did not return a definitive submission result',
+      },
+    )).resolves.toMatchObject({
+      status: 'verification_pending',
+      receiptOutcome: 'ambiguous',
+      errorCode: 'POST_CLICK_TIMEOUT',
+    });
+    await expect(database.query<{
+      terminal_outcome: string;
+      active: boolean;
+    }>(
+      `SELECT terminal_outcome, active
+       FROM rednote_publish_attempts WHERE id = $1::uuid`,
+      [attemptId],
+    )).resolves.toMatchObject({
+      rows: [{ terminal_outcome: 'outcome_unknown', active: false }],
+    });
+    await expect(claimNextStoredLocalPublishJob(7_200, 'dispatch'))
+      .resolves.toBeNull();
+  });
+
+  it('rejects fresh tokens and conflicting terminal replays', async () => {
+    await insertExpiredWorkerAttempt({});
+    await releaseExpiredStoredLocalPublishClaims();
+    const scheduled = {
+      contractVersion: 'rednote-worker-result/v2' as const,
+      outcome: 'scheduled' as const,
+      acknowledgedAt: '2026-08-05T12:30:00.000Z',
+      scheduledFor: snapshot.publishAt,
+      authenticatedAccount: {
+        accountId: snapshot.expectedAccountId,
+        capturedAt: '2026-08-05T12:29:59.000Z',
+        ownership: 'owned' as const,
+      },
+    };
+
+    await expect(recordLateStoredWorkerTerminalResult(
+      scheduledJobId,
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      scheduled,
+    )).rejects.toMatchObject({ code: 'STALE_CLAIM' });
+    await recordLateStoredWorkerTerminalResult(
+      scheduledJobId,
+      claimToken,
+      scheduled,
+    );
+    await expect(recordLateStoredWorkerTerminalResult(
+      scheduledJobId,
+      claimToken,
+      {
+        contractVersion: 'rednote-worker-result/v2',
+        outcome: 'ambiguous',
+        occurredAt: '2026-08-05T12:31:00.000Z',
+        code: 'POST_CLICK_TIMEOUT',
+        message: 'Conflicting terminal result',
+      },
+    )).rejects.toMatchObject({ code: 'LATE_RESULT_CONFLICT' });
+  });
+
+  it('rejects a digestless replay with conflicting account ownership', async () => {
+    await insertExpiredWorkerAttempt({});
+    await releaseExpiredStoredLocalPublishClaims();
+    const scheduled = {
+      contractVersion: 'rednote-worker-result/v2' as const,
+      outcome: 'scheduled' as const,
+      acknowledgedAt: '2026-08-05T12:30:00.000Z',
+      scheduledFor: snapshot.publishAt,
+      authenticatedAccount: {
+        accountId: snapshot.expectedAccountId,
+        capturedAt: '2026-08-05T12:29:59.000Z',
+        ownership: 'owned' as const,
+      },
+    };
+    await recordLateStoredWorkerTerminalResult(
+      scheduledJobId,
+      claimToken,
+      scheduled,
+    );
+    await database.query(
+      `DELETE FROM rednote_publish_attempt_events
+       WHERE attempt_id = $1::uuid
+         AND diagnostics->>'kind' = 'late_terminal_result_accepted'`,
+      [attemptId],
+    );
+
+    await expect(recordLateStoredWorkerTerminalResult(
+      scheduledJobId,
+      claimToken,
+      {
+        ...scheduled,
+        authenticatedAccount: {
+          ...scheduled.authenticatedAccount,
+          ownership: 'account_mismatch',
+        },
+      },
+    )).rejects.toMatchObject({ code: 'LATE_RESULT_CONFLICT' });
+  });
+
+  it('rejects a late pre-click failure when durable dispatch evidence exists', async () => {
+    await insertExpiredWorkerAttempt({});
+    await releaseExpiredStoredLocalPublishClaims();
+    await database.query(
+      `UPDATE local_publish_jobs
+       SET dispatched_at = CURRENT_TIMESTAMP
+       WHERE id = $1::uuid`,
+      [scheduledJobId],
+    );
+
+    await expect(recordLateStoredWorkerTerminalResult(
+      scheduledJobId,
+      claimToken,
+      {
+        contractVersion: 'rednote-worker-result/v2',
+        outcome: 'rejected',
+        occurredAt: '2026-08-05T12:30:00.000Z',
+        code: 'PRE_CLICK_REJECTED',
+        message: 'Conflicting rejection',
+      },
+    )).rejects.toMatchObject({ code: 'LATE_RESULT_CONFLICT' });
   });
 
   it('rejects a targeted attested release with missing authorization without fallback', async () => {

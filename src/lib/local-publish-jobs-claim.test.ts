@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   claim: vi.fn(),
+  releaseExpiredClaims: vi.fn(),
 }));
 
 vi.mock('@/lib/local-publish-job-store', async (importOriginal) => {
@@ -9,6 +10,7 @@ vi.mock('@/lib/local-publish-job-store', async (importOriginal) => {
   return {
     ...original,
     claimNextStoredLocalPublishJob: mocks.claim,
+    releaseExpiredStoredLocalPublishClaims: mocks.releaseExpiredClaims,
   };
 });
 
@@ -35,6 +37,8 @@ describe('local publish exact claim service', () => {
       expect.any(Number),
       'verification',
       expectedJobId,
+      'legacy-local-publish',
+      undefined,
     );
   });
 

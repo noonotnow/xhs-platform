@@ -23,8 +23,10 @@ import {
   recordStoredLocalPublishDispatch,
   recordStoredAcknowledgedPublication,
   recordStoredAmbiguousOutcome,
+  recordLateStoredWorkerTerminalResult,
   recordStoredRejectedOutcome,
   recordStoredScheduledAcknowledgement,
+  releaseExpiredStoredLocalPublishClaims,
   stageStoredLocalPublishJob,
   type StoredLocalPublishJob,
   heartbeatStoredLocalPublishJob,
@@ -96,6 +98,7 @@ interface ResultDependencies {
   completeReconciliation: typeof completeStoredLocalPublishReconciliation;
   recordAcknowledged?: typeof recordStoredAcknowledgedPublication;
   recordAmbiguous?: typeof recordStoredAmbiguousOutcome;
+  recordLateTerminal?: typeof recordLateStoredWorkerTerminalResult;
   recordScheduledAcknowledgement?: typeof recordStoredScheduledAcknowledgement;
   recordRejected?: typeof recordStoredRejectedOutcome;
   backfill: (
@@ -121,6 +124,7 @@ const resultDependencies: ResultDependencies = {
   completeReconciliation: completeStoredLocalPublishReconciliation,
   recordAcknowledged: recordStoredAcknowledgedPublication,
   recordAmbiguous: recordStoredAmbiguousOutcome,
+  recordLateTerminal: recordLateStoredWorkerTerminalResult,
   recordScheduledAcknowledgement: recordStoredScheduledAcknowledgement,
   recordRejected: recordStoredRejectedOutcome,
   backfill: markXhsPostPublished,
@@ -708,6 +712,7 @@ export async function claimNextLocalPublishJob(
   if (expectedJobId !== undefined) {
     validateExpectedVerificationJobId(lane, expectedJobId);
   }
+  await releaseExpiredStoredLocalPublishClaims();
   for (let attempt = 0; attempt < 10; attempt += 1) {
     const job = await claimNextStoredLocalPublishJob(
       leaseSeconds(),
@@ -999,6 +1004,10 @@ export function shouldHeartbeatLinkedAttempt(status: StoredLocalPublishJob['stat
   return status === 'claimed' || status === 'staged';
 }
 
+export function immediateWorkerOutcomeAllowed(timingMode: 'scheduled' | 'post_now') {
+  return timingMode === 'post_now';
+}
+
 export function assertScheduledAcknowledgementMatches(
   scheduledFor: string,
   frozenTargetPublishAt: string,
@@ -1032,10 +1041,26 @@ export async function submitLocalPublishJobResult(
   const durableAttempt = typeof workspaceOrDependencies === 'string';
   const result = parseLocalPublishWorkerResult(rawResult);
   if ('contractVersion' in result) {
+    if (
+      durableAttempt
+      && result.outcome !== 'acknowledged'
+    ) {
+      const late = await (
+        dependencies.recordLateTerminal ?? recordLateStoredWorkerTerminalResult
+      )(id, claimToken, result, workspaceId);
+      if (late) return jobSummary(late);
+    }
     if (result.outcome === 'scheduled') {
       let accountMatches = false;
       if (durableAttempt) {
         const attempt = await getLinkedRednotePublishAttempt(workspaceId, id);
+        if (attempt.payload.timingMode !== 'scheduled') {
+          throw new LocalPublishJobError(
+            'A post-now publishing attempt cannot return a scheduled outcome',
+            'UNEXPECTED_SCHEDULED_OUTCOME',
+            409,
+          );
+        }
         try {
           assertScheduledAcknowledgementMatches(
             result.scheduledFor,
@@ -1174,12 +1199,18 @@ export async function submitLocalPublishJobResult(
       LocalPublishWorkerResult,
       { outcome: 'acknowledged' }
     >;
+    const attempt = durableAttempt
+      ? await getLinkedRednotePublishAttempt(workspaceId, id)
+      : null;
+    const immediateOutcomeAllowed = attempt
+      ? immediateWorkerOutcomeAllowed(attempt.payload.timingMode)
+      : true;
     if (durableAttempt) {
       await recordLinkedAttemptOutcome({
         workspaceId,
         localJobId: id,
         claimToken,
-        outcome: 'accepted',
+        outcome: immediateOutcomeAllowed ? 'accepted' : 'outcome_unknown',
         receipt: {
           rednoteNoteId: acknowledged.noteId,
           ...(acknowledged.publicIndex?.publicUrl
@@ -1219,6 +1250,7 @@ export async function submitLocalPublishJobResult(
           : {}),
       },
       workspaceId,
+      immediateOutcomeAllowed,
     );
     if (prepared.status === 'verification_pending') {
       return jobSummary(prepared);

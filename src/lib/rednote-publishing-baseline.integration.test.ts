@@ -28,6 +28,8 @@ const migrationFiles = [
   '021_local_publish_worker_heartbeats.sql',
   '022_ready_x3_invalid_claim_recovery.sql',
   '023_rednote_worker_result_v2.sql',
+  '024_local_publish_queue_quarantine.sql',
+  '025_late_rednote_terminal_results.sql',
 ] as const;
 
 describe('canonical local publishing migration chain', () => {
@@ -109,6 +111,59 @@ describe('canonical local publishing migration chain', () => {
       'authorization_kind',
       'stable_link_captured_at',
     ]);
+  });
+
+  it('preserves Ready x3 invalid-claim recovery after migration 025', async () => {
+    await database.query(
+      `INSERT INTO rednote_publish_attempts(
+         id, idempotency_key, contract_revision, source_notion_page_id,
+         frozen_payload, payload_digest, payload_revision,
+         executor_type, executor_kind, executor_id, target_publish_at,
+         requested_at,
+         terminal_outcome, terminal_at, receipt_lookup_state,
+         active, approved_at, authorization_kind, late_fallback_policy
+       ) VALUES (
+         '11111111-1111-4111-8111-111111111111',
+         '22222222-2222-4222-8222-222222222222',
+         'rednote-publishing/v1', 'ready-x3-recovery',
+         '{}'::jsonb, $1, 'test-revision',
+         'worker', 'playwright', 'worker-test',
+         CURRENT_TIMESTAMP + INTERVAL '1 day', CURRENT_TIMESTAMP,
+         'known_failed', CURRENT_TIMESTAMP, 'not_required',
+         false, CURRENT_TIMESTAMP, 'ready_x3',
+         '{"action":"schedule","maxLateMinutes":30}'::jsonb
+       )`,
+      ['a'.repeat(64)],
+    );
+    await database.exec(`
+      BEGIN;
+      SELECT set_config('app.ready_x3_invalid_claim_recovery', 'on', true);
+      UPDATE rednote_publish_attempts
+      SET active = true,
+          terminal_outcome = NULL,
+          terminal_at = NULL,
+          receipt_lookup_state = 'pending',
+          receipt_lookup_updated_at = CURRENT_TIMESTAMP,
+          claim_token = NULL,
+          claim_expires_at = NULL
+      WHERE id = '11111111-1111-4111-8111-111111111111';
+      COMMIT;
+    `);
+    await expect(database.query<{
+      active: boolean;
+      terminal_outcome: string | null;
+      receipt_lookup_state: string;
+    }>(
+      `SELECT active, terminal_outcome, receipt_lookup_state
+       FROM rednote_publish_attempts
+       WHERE id = '11111111-1111-4111-8111-111111111111'`,
+    )).resolves.toMatchObject({
+      rows: [{
+        active: true,
+        terminal_outcome: null,
+        receipt_lookup_state: 'pending',
+      }],
+    });
   });
 
   it('supports Note ID-only receipts and append-only renewable evidence', async () => {
