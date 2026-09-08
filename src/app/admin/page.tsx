@@ -13,6 +13,7 @@ import {
   creatorSessionStatusPresentation,
   sanitizeCreatorSessionResponse,
 } from '@/lib/xhs-creator-session';
+import { LEGACY_LOCAL_PUBLISH_WORKSPACE_ID } from '@/lib/workspace-id';
 
 const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const VIDEO_TYPES = ['video/mp4', 'video/quicktime', 'video/webm'];
@@ -449,7 +450,7 @@ export default function AdminPage() {
         </section>
       </details>
 
-      <ReadyPostsPanel />
+      <ReadyPostsPanel workspaceId={LEGACY_LOCAL_PUBLISH_WORKSPACE_ID} />
 
       <details style={{ marginBottom: 24, padding: 16, background: '#f7f7f5', borderRadius: 10, border: '1px solid #d8d8d3' }}>
         <summary style={{ cursor: 'pointer', fontWeight: 700 }}>

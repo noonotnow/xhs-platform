@@ -5,6 +5,7 @@ import {
   createPublishBatch,
   listPublishBatches,
 } from '@/lib/rednote-publish-batches';
+import { parseWorkspaceId } from '@/lib/workspace-id';
 import type { PublishBatchKind } from '@/types/local-publish-job';
 
 export const dynamic = 'force-dynamic';
@@ -15,6 +16,7 @@ const NO_STORE_HEADERS = { 'Cache-Control': 'private, no-store, max-age=0, must-
 export async function GET(request: NextRequest) {
   try {
     await validateCloudflareAccessRequest(request);
+    parseWorkspaceId(request.headers.get('x-workspace-id'));
     return NextResponse.json(
       { batches: await listPublishBatches(request.nextUrl.searchParams.get('id') ?? undefined) },
       { headers: NO_STORE_HEADERS },
@@ -30,6 +32,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const operator = await validateCloudflareAccessRequest(request);
+    const workspaceId = parseWorkspaceId(request.headers.get('x-workspace-id'));
     const body = await request.json() as Record<string, unknown>;
     if (body.action === 'create') {
       if (!['weekly', 'catch_up', 'bootstrap'].includes(String(body.kind))) {
@@ -46,6 +49,7 @@ export async function POST(request: NextRequest) {
       const batch = await createPublishBatch(
         body.kind as PublishBatchKind,
         body.notionPageIds as string[],
+        workspaceId,
       );
       return NextResponse.json({ batch }, { status: batch ? 201 : 200, headers: NO_STORE_HEADERS });
     }
@@ -56,7 +60,12 @@ export async function POST(request: NextRequest) {
       typeof body.manifestHash === 'string'
     ) {
       return NextResponse.json({
-        batch: await approvePublishBatch(body.batchId, body.manifestHash, operator.email),
+        batch: await approvePublishBatch(
+          body.batchId,
+          body.manifestHash,
+          operator.email,
+          workspaceId,
+        ),
       }, { headers: NO_STORE_HEADERS });
     }
     throw new Error('A valid create or confirmed approve action is required');

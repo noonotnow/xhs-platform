@@ -48,6 +48,7 @@ import {
 } from '@/lib/local-publish-job-display';
 import { manualSchedulingProvenanceMismatch } from '@/lib/manual-scheduling-provenance';
 import { READY_POSTS_PANEL_FEATURES } from '@/lib/ready-posts-panel-features';
+import { adminApiFetch } from '@/lib/admin-api-client';
 
 interface ApiError {
   error?: string;
@@ -367,7 +368,7 @@ function manualReconciliationStatusCopy(
   };
 }
 
-export default function ReadyPostsPanel() {
+export default function ReadyPostsPanel({ workspaceId }: { workspaceId: string }) {
   const [posts, setPosts] = useState<ReadyXhsPost[]>([]);
   const [jobs, setJobs] = useState<LocalPublishJobSummary[]>([]);
   const [successAttestationCandidates, setSuccessAttestationCandidates] = useState<
@@ -539,7 +540,7 @@ export default function ReadyPostsPanel() {
     setError('');
     try {
       const path = '/admin/api/ready-posts';
-      const response = await fetch(path, { cache: 'no-store' });
+      const response = await adminApiFetch(workspaceId, path, { cache: 'no-store' });
       const data = await responseJson<ReadyXhsPostsResponse & ApiError>(
         response,
         `GET ${path}`,
@@ -555,24 +556,24 @@ export default function ReadyPostsPanel() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [workspaceId]);
 
   const loadBatches = useCallback(async () => {
     try {
       const path = '/admin/api/publish-batches';
-      const response = await fetch(path, { cache: 'no-store' });
+      const response = await adminApiFetch(workspaceId, path, { cache: 'no-store' });
       const data = await responseJson<PublishBatchesResponse>(response, `GET ${path}`);
       if (!response.ok) throw new Error(data.error || 'Failed to load publish batches');
       setBatches(data.batches);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : 'Failed to load publish batches');
     }
-  }, []);
+  }, [workspaceId]);
 
   const loadJobs = useCallback(async (showError = false) => {
     try {
       const path = '/admin/api/local-publish-jobs';
-      const response = await fetch(path, { cache: 'no-store' });
+      const response = await adminApiFetch(workspaceId, path, { cache: 'no-store' });
       const data = await responseJson<LocalJobsResponse>(response, `GET ${path}`);
       if (!response.ok) throw new Error(data.error || 'Failed to load local publish jobs');
       setJobs(data.jobs);
@@ -584,12 +585,12 @@ export default function ReadyPostsPanel() {
         );
       }
     }
-  }, []);
+  }, [workspaceId]);
 
   const loadReconciliations = useCallback(async () => {
     try {
       const path = '/admin/api/external-post-reconciliations';
-      const response = await fetch(path, { cache: 'no-store' });
+      const response = await adminApiFetch(workspaceId, path, { cache: 'no-store' });
       const data = await responseJson<ExternalReconciliationsResponse>(
         response,
         `GET ${path}`,
@@ -606,12 +607,12 @@ export default function ReadyPostsPanel() {
           : 'Failed to load external reconciliations',
       );
     }
-  }, []);
+  }, [workspaceId]);
 
   const loadManualReconciliations = useCallback(async (showError = false) => {
     try {
       const path = '/admin/api/manual-reconciliations';
-      const response = await fetch(path, { cache: 'no-store' });
+      const response = await adminApiFetch(workspaceId, path, { cache: 'no-store' });
       const data = await responseJson<ManualReconciliationsResponse>(
         response,
         `GET ${path}`,
@@ -630,7 +631,7 @@ export default function ReadyPostsPanel() {
         );
       }
     }
-  }, []);
+  }, [workspaceId]);
 
   useEffect(() => {
     void loadPosts();
@@ -678,7 +679,7 @@ export default function ReadyPostsPanel() {
     setError('');
     try {
       const path = '/admin/api/manual-post-handlings';
-      const response = await fetch(path, {
+      const response = await adminApiFetch(workspaceId, path, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -733,7 +734,7 @@ export default function ReadyPostsPanel() {
     setError('');
     try {
       const path = '/admin/api/local-publish-jobs';
-      const response = await fetch(path, {
+      const response = await adminApiFetch(workspaceId, path, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -773,7 +774,7 @@ export default function ReadyPostsPanel() {
       setError('');
       try {
         const path = '/admin/api/publish-batches';
-        const response = await fetch(path, {
+        const response = await adminApiFetch(workspaceId, path, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(action === 'create'
@@ -836,7 +837,7 @@ export default function ReadyPostsPanel() {
         itemHash: evidence.itemHash,
         snapshotRevision: evidence.snapshotRevision,
       };
-      const response = await fetch(path, {
+      const response = await adminApiFetch(workspaceId, path, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...exactEvidence, confirmed: true }),
@@ -881,7 +882,7 @@ export default function ReadyPostsPanel() {
     setError('');
     try {
       const path = '/admin/api/local-publish-job-success-attestations';
-      const response = await fetch(path, {
+      const response = await adminApiFetch(workspaceId, path, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -942,7 +943,7 @@ export default function ReadyPostsPanel() {
     setError('');
     try {
       const path = '/admin/api/manual-scheduling-attestations';
-      const response = await fetch(path, {
+      const response = await adminApiFetch(workspaceId, path, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -991,7 +992,7 @@ export default function ReadyPostsPanel() {
     setReceiptErrors((current) => ({ ...current, [job.id]: '' }));
     try {
       const path = '/admin/api/local-publish-job-dispositions';
-      const response = await fetch(path, {
+      const response = await adminApiFetch(workspaceId, path, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1031,7 +1032,7 @@ export default function ReadyPostsPanel() {
       setManualReconciliationError('');
       try {
         const path = '/admin/api/manual-reconciliations';
-        const response = await fetch(path, {
+        const response = await adminApiFetch(workspaceId, path, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -1076,7 +1077,7 @@ export default function ReadyPostsPanel() {
       try {
         const path =
           `/admin/api/manual-reconciliations/${currentManualReconciliation.id}/retry`;
-        const response = await fetch(path, {
+        const response = await adminApiFetch(workspaceId, path, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ confirmed: true }),

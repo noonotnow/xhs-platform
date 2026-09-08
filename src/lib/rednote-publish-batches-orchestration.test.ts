@@ -88,6 +88,7 @@ describe('approved RedNote batch attempt materialization', () => {
       batch.id,
       batch.manifestHash,
       'operator@example.com',
+      'legacy-local-publish',
     )).resolves.toEqual(batch);
     expect(attempts.createLinked).not.toHaveBeenCalled();
   });
@@ -104,6 +105,7 @@ describe('approved RedNote batch attempt materialization', () => {
       batch.id,
       batch.manifestHash,
       'operator@example.com',
+      'legacy-local-publish',
     )).resolves.toEqual(batch);
     expect(stores.approve).not.toHaveBeenCalled();
     expect(attempts.createLinked).toHaveBeenCalledWith(
@@ -125,6 +127,7 @@ describe('approved RedNote batch attempt materialization', () => {
       batch.id,
       batch.manifestHash,
       'operator@example.com',
+      'legacy-local-publish',
     )).rejects.toMatchObject({ code: 'ATTEMPT_PACKET_MISMATCH' });
     expect(attempts.createLinked).not.toHaveBeenCalled();
   });
