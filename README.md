@@ -66,6 +66,7 @@ in Vercel:
 | `DATABASE_URL` | Backward-compatible PostgreSQL connection fallback when XHS-specific variables are unset |
 | `POSTGRES_URL` | Legacy PostgreSQL connection fallback when all variables above are unset |
 | `CLOUDFLARE_ACCESS_TEAM_DOMAIN` | Access team domain, such as `team.cloudflareaccess.com`; the verified JWT issuer is `https://<team-domain>` |
+| `CLOUDFLARE_ACCESS_ISSUER` | Optional full issuer URL override; takes precedence over `CLOUDFLARE_ACCESS_TEAM_DOMAIN` |
 | `CLOUDFLARE_ACCESS_AUDIENCE` | Access application audience (`aud`) for the XHS admin application |
 | `CLOUDFLARE_ACCESS_OPERATOR_EMAILS` | Comma-separated operator email allowlist |
 | `UPLOAD_TOKEN_SECRET` | Long random secret shared with the XHS microservice for two-minute upload grants |
