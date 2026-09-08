@@ -148,6 +148,7 @@ describe('Ready x3 pre-provider failure recovery', () => {
               payload_revision: input.revision,
               frozen_payload: payload,
               approved_at: '2026-08-31T14:00:00.000Z',
+              late_fallback_policy: { action: 'post_now', maxLateMinutes: 30 },
               job_snapshot: batchSnapshot,
               batch_snapshot: batchSnapshot,
               dispatch_mode: 'scheduled',
@@ -196,6 +197,7 @@ describe('Ready x3 pre-provider failure recovery', () => {
               payload_revision: input.revision,
               frozen_payload: payload,
               approved_at: '2026-08-31T14:00:00.000Z',
+              late_fallback_policy: { action: 'post_now', maxLateMinutes: 30 },
               job_snapshot: batchSnapshot,
               batch_snapshot: { ...batchSnapshot, title: 'Changed title' },
               dispatch_mode: 'scheduled',
@@ -234,6 +236,7 @@ describe('Ready x3 pre-provider failure recovery', () => {
               payload_revision: input.revision,
               frozen_payload: payload,
               approved_at: '2026-08-31T14:00:00.000Z',
+              late_fallback_policy: { action: 'post_now', maxLateMinutes: 30 },
               job_snapshot: batchSnapshot,
               batch_snapshot: batchSnapshot,
               dispatch_mode: 'scheduled',
@@ -272,6 +275,101 @@ describe('Ready x3 pre-provider failure recovery', () => {
         statement.includes('INSERT INTO local_publish_jobs'))).toBe(false);
       expect(statements.some((statement) =>
         statement.includes("'expired_batch_claim_authorization_reclassified'"))).toBe(true);
+      const lockCall = mocks.query.mock.calls.find(([statement]) =>
+        String(statement).includes('SELECT attempt.id,attempt.claim_token'));
+      expect(String(lockCall?.[0])).toContain("item.dispatch_mode='scheduled'");
+      expect(String(lockCall?.[0])).toContain('attempt.late_fallback_policy=$6::jsonb');
+      expect(lockCall?.[1]?.[5]).toBe(
+        JSON.stringify({ action: 'post_now', maxLateMinutes: 30 }),
+      );
+    });
+
+    it.each([
+      ['changed action', { action: 'schedule', maxLateMinutes: 30 }],
+      ['changed timeout', { action: 'post_now', maxLateMinutes: 31 }],
+      ['extra field', { action: 'post_now', maxLateMinutes: 30, revision: input.revision }],
+    ])('fails closed for a legacy fallback with a %s', async (_, lateFallbackPolicy) => {
+      const payload = recoveryPayload();
+      const itemHash = stableDigest(batchSnapshot);
+      const batchManifest = [{
+        notionPageId: input.sourceNotionPageId,
+        itemHash,
+        dispatchMode: 'scheduled' as const,
+        lateBySeconds: 0,
+      }];
+      mocks.query.mockImplementation(async (statement: string) => {
+        if (statement.includes('SELECT attempt.id,attempt.claim_token')) {
+          return {
+            rows: [{
+              id: input.attemptId,
+              claim_token: '33333333-3333-4333-8333-333333333333',
+              claim_expires_at: '2026-08-31T15:10:00.000Z',
+              payload_digest: payload.payloadDigest,
+              payload_revision: input.revision,
+              frozen_payload: payload,
+              approved_at: '2026-08-31T14:00:00.000Z',
+              late_fallback_policy: lateFallbackPolicy,
+              job_snapshot: batchSnapshot,
+              batch_snapshot: batchSnapshot,
+              dispatch_mode: 'scheduled',
+              item_hash: itemHash,
+              manifest_hash: storedManifestHash(batchManifest),
+              batch_manifest: batchManifest,
+            }],
+          };
+        }
+        return { rows: [], rowCount: 1 };
+      });
+
+      await expect(requeueExpiredMisclassifiedBatchClaim(input))
+        .rejects.toMatchObject({
+          code: 'EXPIRED_BATCH_CLAIM_RECOVERY_UNSAFE',
+          status: 409,
+        });
+      expect(mocks.query.mock.calls.some(([statement]) =>
+        String(statement).includes('SET authorization_kind=NULL'))).toBe(false);
+    });
+
+    it('fails closed when the frozen Ready x3 action is not scheduled', async () => {
+      const payload = recoveryPayload();
+      payload.browserPayload.timingMode = 'post_now';
+      payload.payloadDigest = frozenPayloadDigest(payload);
+      const itemHash = stableDigest(batchSnapshot);
+      const batchManifest = [{
+        notionPageId: input.sourceNotionPageId,
+        itemHash,
+        dispatchMode: 'scheduled' as const,
+        lateBySeconds: 0,
+      }];
+      mocks.query.mockImplementation(async (statement: string) => {
+        if (statement.includes('SELECT attempt.id,attempt.claim_token')) {
+          return {
+            rows: [{
+              id: input.attemptId,
+              claim_token: '33333333-3333-4333-8333-333333333333',
+              claim_expires_at: '2026-08-31T15:10:00.000Z',
+              payload_digest: payload.payloadDigest,
+              payload_revision: input.revision,
+              frozen_payload: payload,
+              approved_at: '2026-08-31T14:00:00.000Z',
+              late_fallback_policy: { action: 'post_now', maxLateMinutes: 30 },
+              job_snapshot: batchSnapshot,
+              batch_snapshot: batchSnapshot,
+              dispatch_mode: 'scheduled',
+              item_hash: itemHash,
+              manifest_hash: storedManifestHash(batchManifest),
+              batch_manifest: batchManifest,
+            }],
+          };
+        }
+        return { rows: [], rowCount: 1 };
+      });
+
+      await expect(requeueExpiredMisclassifiedBatchClaim(input))
+        .rejects.toMatchObject({
+          code: 'EXPIRED_BATCH_CLAIM_RECOVERY_UNSAFE',
+          status: 409,
+        });
     });
 
     it('rejects an unexpired claim and every pre-browser evidence barrier', async () => {
@@ -325,6 +423,7 @@ describe('Ready x3 pre-provider failure recovery', () => {
               payload_revision: input.revision,
               frozen_payload: payload,
               approved_at: '2026-08-31T14:00:00.000Z',
+              late_fallback_policy: { action: 'post_now', maxLateMinutes: 30 },
               job_snapshot: batchSnapshot,
               batch_snapshot: batchSnapshot,
               dispatch_mode: 'scheduled',
@@ -368,6 +467,7 @@ describe('Ready x3 pre-provider failure recovery', () => {
                 payload_revision: input.revision,
                 frozen_payload: payload,
                 approved_at: '2026-08-31T14:00:00.000Z',
+                late_fallback_policy: { action: 'post_now', maxLateMinutes: 30 },
                 job_snapshot: batchSnapshot,
                 batch_snapshot: batchSnapshot,
                 dispatch_mode: 'scheduled',
@@ -418,6 +518,7 @@ describe('Ready x3 pre-provider failure recovery', () => {
               payload_revision: input.revision,
               frozen_payload: payload,
               approved_at: '2026-08-31T14:00:00.000Z',
+              late_fallback_policy: { action: 'post_now', maxLateMinutes: 30 },
               job_snapshot: batchSnapshot,
               batch_snapshot: batchSnapshot,
               dispatch_mode: 'scheduled',
@@ -461,6 +562,7 @@ describe('Ready x3 pre-provider failure recovery', () => {
               payload_revision: input.revision,
               frozen_payload: payload,
               approved_at: '2026-08-31T14:00:00.000Z',
+              late_fallback_policy: { action: 'post_now', maxLateMinutes: 30 },
               job_snapshot: mismatchedSnapshot,
               batch_snapshot: mismatchedSnapshot,
               dispatch_mode: 'scheduled',

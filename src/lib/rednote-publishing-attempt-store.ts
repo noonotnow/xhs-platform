@@ -76,6 +76,10 @@ async function assertAttemptReceiptMatches(
 }
 
 const readyX3SourceLockContext = new AsyncLocalStorage<string>();
+const LEGACY_READY_X3_LATE_FALLBACK_POLICY = {
+  action: 'post_now',
+  maxLateMinutes: 30,
+} as const;
 
 function iso(value: Date | string | null) {
   return value ? new Date(value).toISOString() : null;
@@ -438,7 +442,7 @@ export async function createRednotePublishAttempt(input: {
         p.executor.playwrightRunId ?? null, p.browserPayload.targetPublishAt, p.requestedAt,
          input.approve === true && p.executor.type === 'worker', input.supersedesAttemptId ?? null,
          input.readyX3 ? 'ready_x3' : null,
-         input.readyX3 ? JSON.stringify({ action: 'post_now', maxLateMinutes: 30 }) : null,
+         input.readyX3 ? JSON.stringify(LEGACY_READY_X3_LATE_FALLBACK_POLICY) : null,
       ],
     );
     const row = inserted.rows[0];
@@ -1389,6 +1393,7 @@ export async function requeueExpiredMisclassifiedBatchClaim(input: {
       payload_revision: string;
       frozen_payload: FrozenRednoteAttemptPayload;
       approved_at: Date | string;
+      late_fallback_policy: unknown;
       job_snapshot: LocalPublishSnapshot;
       batch_snapshot: LocalPublishSnapshot;
       dispatch_mode: 'scheduled' | 'post_now';
@@ -1404,6 +1409,7 @@ export async function requeueExpiredMisclassifiedBatchClaim(input: {
       `SELECT attempt.id,attempt.claim_token,attempt.claim_expires_at,
           attempt.payload_digest,attempt.payload_revision,
           attempt.frozen_payload,attempt.approved_at,
+          attempt.late_fallback_policy,
           job.snapshot AS job_snapshot,item.snapshot AS batch_snapshot,
           item.dispatch_mode,item.item_hash,batch.manifest_hash,
           (
@@ -1460,14 +1466,8 @@ export async function requeueExpiredMisclassifiedBatchClaim(input: {
          AND batch.status IN ('approved','partially_approved')
          AND batch.approved_at IS NOT NULL
          AND attempt.authorization_kind='ready_x3'
-         AND attempt.late_fallback_policy IS NOT NULL
-         AND (
-           (item.dispatch_mode='scheduled'
-             AND attempt.late_fallback_policy->>'action'='schedule')
-           OR
-           (item.dispatch_mode='post_now'
-             AND attempt.late_fallback_policy->>'action'='post_now')
-         )
+         AND item.dispatch_mode='scheduled'
+         AND attempt.late_fallback_policy=$6::jsonb
          AND attempt.active
          AND attempt.approved_at IS NOT NULL
          AND attempt.terminal_outcome IS NULL
@@ -1506,6 +1506,7 @@ export async function requeueExpiredMisclassifiedBatchClaim(input: {
         input.attemptId,
         input.sourceNotionPageId,
         input.revision,
+        JSON.stringify(LEGACY_READY_X3_LATE_FALLBACK_POLICY),
       ],
     );
     const row = locked.rows[0];
@@ -1516,6 +1517,10 @@ export async function requeueExpiredMisclassifiedBatchClaim(input: {
       !isDeepStrictEqual(row.job_snapshot, row.batch_snapshot) ||
       row.job_snapshot.notionLastEditedTime !== input.revision ||
       row.batch_snapshot.notionLastEditedTime !== input.revision ||
+      !isDeepStrictEqual(
+        row.late_fallback_policy,
+        LEGACY_READY_X3_LATE_FALLBACK_POLICY,
+      ) ||
       stableDigest(row.batch_snapshot) !== row.item_hash ||
       storedManifestHash(row.batch_manifest) !== row.manifest_hash ||
       row.payload_revision !== input.revision ||
@@ -1524,11 +1529,12 @@ export async function requeueExpiredMisclassifiedBatchClaim(input: {
       payload.payloadRevision !== input.revision ||
       payload.sourceNotionPageId !== input.sourceNotionPageId ||
       payload.sourceLocalPublishJobId !== input.jobId ||
+      payload.browserPayload.timingMode !== 'scheduled' ||
       frozenPayloadDigest(payload) !== row.payload_digest ||
       !attemptPayloadMatchesApprovedBatch(
         payload.browserPayload,
         row.batch_snapshot,
-        row.dispatch_mode === 'post_now' ? 'post_now' : 'schedule',
+        'schedule',
       )
     ) {
       throw new LocalPublishJobError(
