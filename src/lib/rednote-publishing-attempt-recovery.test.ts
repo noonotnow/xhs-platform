@@ -389,6 +389,96 @@ describe('Ready x3 pre-provider failure recovery', () => {
           });
       },
     );
+
+    it('rejects a multi-item batch because its persisted insertion order cannot be reconstructed', async () => {
+      const payload = recoveryPayload();
+      const itemHash = stableDigest(batchSnapshot);
+      const batchManifest = [
+        {
+          notionPageId: input.sourceNotionPageId,
+          itemHash,
+          dispatchMode: 'scheduled' as const,
+          lateBySeconds: 0,
+        },
+        {
+          notionPageId: 'another-page',
+          itemHash: 'e'.repeat(64),
+          dispatchMode: 'scheduled' as const,
+          lateBySeconds: 0,
+        },
+      ];
+      mocks.query.mockImplementation(async (statement: string) => {
+        if (statement.includes('SELECT attempt.id,attempt.claim_token')) {
+          return {
+            rows: [{
+              id: input.attemptId,
+              claim_token: '33333333-3333-4333-8333-333333333333',
+              claim_expires_at: '2026-08-31T15:10:00.000Z',
+              payload_digest: payload.payloadDigest,
+              payload_revision: input.revision,
+              frozen_payload: payload,
+              approved_at: '2026-08-31T14:00:00.000Z',
+              job_snapshot: batchSnapshot,
+              batch_snapshot: batchSnapshot,
+              dispatch_mode: 'scheduled',
+              item_hash: itemHash,
+              manifest_hash: storedManifestHash(batchManifest),
+              batch_manifest: batchManifest,
+            }],
+          };
+        }
+        return { rows: [], rowCount: 1 };
+      });
+
+      await expect(requeueExpiredMisclassifiedBatchClaim(input))
+        .rejects.toMatchObject({
+          code: 'EXPIRED_BATCH_CLAIM_RECOVERY_UNSAFE',
+          status: 409,
+        });
+    });
+
+    it('rejects a batch snapshot revision that differs from the attempt and request', async () => {
+      const payload = recoveryPayload();
+      const mismatchedSnapshot = {
+        ...batchSnapshot,
+        notionLastEditedTime: '2026-08-31T13:59:59.000Z',
+      };
+      const itemHash = stableDigest(mismatchedSnapshot);
+      const batchManifest = [{
+        notionPageId: input.sourceNotionPageId,
+        itemHash,
+        dispatchMode: 'scheduled' as const,
+        lateBySeconds: 0,
+      }];
+      mocks.query.mockImplementation(async (statement: string) => {
+        if (statement.includes('SELECT attempt.id,attempt.claim_token')) {
+          return {
+            rows: [{
+              id: input.attemptId,
+              claim_token: '33333333-3333-4333-8333-333333333333',
+              claim_expires_at: '2026-08-31T15:10:00.000Z',
+              payload_digest: payload.payloadDigest,
+              payload_revision: input.revision,
+              frozen_payload: payload,
+              approved_at: '2026-08-31T14:00:00.000Z',
+              job_snapshot: mismatchedSnapshot,
+              batch_snapshot: mismatchedSnapshot,
+              dispatch_mode: 'scheduled',
+              item_hash: itemHash,
+              manifest_hash: storedManifestHash(batchManifest),
+              batch_manifest: batchManifest,
+            }],
+          };
+        }
+        return { rows: [], rowCount: 1 };
+      });
+
+      await expect(requeueExpiredMisclassifiedBatchClaim(input))
+        .rejects.toMatchObject({
+          code: 'EXPIRED_BATCH_CLAIM_RECOVERY_UNSAFE',
+          status: 409,
+        });
+    });
   });
 
   it('requeues the same attempt after a guarded NOT_LOGGED_IN failure', async () => {

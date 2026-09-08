@@ -1512,11 +1512,16 @@ export async function requeueExpiredMisclassifiedBatchClaim(input: {
     const payload = row?.frozen_payload;
     if (
       !row ||
+      row.batch_manifest?.length !== 1 ||
       !isDeepStrictEqual(row.job_snapshot, row.batch_snapshot) ||
+      row.job_snapshot.notionLastEditedTime !== input.revision ||
+      row.batch_snapshot.notionLastEditedTime !== input.revision ||
       stableDigest(row.batch_snapshot) !== row.item_hash ||
       storedManifestHash(row.batch_manifest) !== row.manifest_hash ||
+      row.payload_revision !== input.revision ||
       payload.payloadDigest !== row.payload_digest ||
       payload.payloadRevision !== row.payload_revision ||
+      payload.payloadRevision !== input.revision ||
       payload.sourceNotionPageId !== input.sourceNotionPageId ||
       payload.sourceLocalPublishJobId !== input.jobId ||
       frozenPayloadDigest(payload) !== row.payload_digest ||
