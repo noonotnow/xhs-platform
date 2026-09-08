@@ -1789,10 +1789,23 @@ const TERMINAL_EXPIRED_BATCH_CLAIM_SQL_GUARDS = [
   ['batchLinked', 'batch.id=item.batch_id'],
   ['batchItemQueued', "item.state='queued'"],
   ['batchDispatchScheduled', "item.dispatch_mode='scheduled'"],
+  ['batchItemPageMatchesAttempt',
+    'item.notion_page_id=attempt.source_notion_page_id'],
+  ['batchSnapshotMatchesJob', 'item.snapshot=job.snapshot'],
+  ['batchSnapshotPageMatchesAttempt',
+    "item.snapshot->>'notionPageId'=attempt.source_notion_page_id"],
+  ['batchSnapshotRevisionMatchesAttempt',
+    "item.snapshot->>'notionLastEditedTime'=attempt.payload_revision"],
+  ['batchItemDigestValidSql',
+    'item.item_hash=terminal_expired_batch_claim_digest(item.snapshot)'],
   ['batchApproved', "batch.status IN ('approved','partially_approved')"],
   ['batchApprovalPresent', 'batch.approved_at IS NOT NULL'],
   ['batchSingleItem', `(SELECT count(*) FROM rednote_publish_batch_items sibling
     WHERE sibling.batch_id=batch.id)=1`],
+  ['batchManifestDigestValidSql',
+    `batch.manifest_hash=terminal_expired_batch_claim_manifest_digest(
+      item.notion_page_id,item.item_hash,item.dispatch_mode,item.late_by_seconds
+    )`],
   ['attemptRecordFound', 'attempt.id=$3::uuid'],
   ['attemptLinked', 'attempt.source_local_publish_job_id=job.id'],
   ['attemptWorkspaceMatches', 'attempt.workspace_id=job.workspace_id'],
@@ -1813,6 +1826,110 @@ const TERMINAL_EXPIRED_BATCH_CLAIM_SQL_GUARDS = [
   ['attemptClaimPresent', 'attempt.claim_token IS NOT NULL'],
   ['attemptLeaseMatchesJobLease', 'attempt.claim_expires_at=job.claim_expires_at'],
   ['attemptLeaseExpired', 'attempt.claim_expires_at<=CURRENT_TIMESTAMP'],
+  ['frozenContractRevisionMatchesAttempt',
+    "attempt.frozen_payload->>'contractRevision'=attempt.contract_revision"],
+  ['frozenPageMatchesAttempt',
+    "attempt.frozen_payload->>'sourceNotionPageId'=attempt.source_notion_page_id"],
+  ['frozenJobMatchesAttempt',
+    `attempt.frozen_payload->>'sourceLocalPublishJobId'=
+      attempt.source_local_publish_job_id::text`],
+  ['frozenRevisionMatchesAttemptSql',
+    "attempt.frozen_payload->>'payloadRevision'=attempt.payload_revision"],
+  ['frozenDigestFieldMatchesAttempt',
+    "attempt.frozen_payload->>'payloadDigest'=attempt.payload_digest"],
+  ['frozenPayloadDigestValidSql',
+    `attempt.payload_digest=terminal_expired_batch_claim_digest(
+      attempt.frozen_payload->'browserPayload'
+    )`],
+  ['browserSourcePageMatchesAttempt',
+    `attempt.frozen_payload->'browserPayload'->>'sourcePostId'=
+      attempt.source_notion_page_id`],
+  ['browserExpectedAccountMatchesSnapshot',
+    `attempt.frozen_payload->'browserPayload'->>'expectedAccountId'=
+      item.snapshot->>'expectedAccountId'`],
+  ['browserTitleMatchesSnapshot',
+    "attempt.frozen_payload->'browserPayload'->>'title'=item.snapshot->>'title'"],
+  ['browserCaptionMatchesSnapshot',
+    `attempt.frozen_payload->'browserPayload'->>'caption'=
+      item.snapshot->>'caption'`],
+  ['browserTagsMatchSnapshot',
+    "attempt.frozen_payload->'browserPayload'->'tags'=item.snapshot->'tags'"],
+  ['browserPublishModeMatchesSnapshot',
+    `attempt.frozen_payload->'browserPayload'->>'publishMode'=
+      item.snapshot->>'mediaType'`],
+  ['browserScheduledDateMatchesSnapshot',
+    `attempt.frozen_payload->'browserPayload'->>'scheduledDate'=
+      item.snapshot->>'publishAt'`],
+  ['browserTargetPublishAtMatchesSnapshot',
+    `attempt.frozen_payload->'browserPayload'->>'targetPublishAt'=
+      item.snapshot->>'publishAt'`],
+  ['browserTimingScheduled',
+    "attempt.frozen_payload->'browserPayload'->>'timingMode'='scheduled'"],
+  ['batchMediaCountValid', `CASE
+    WHEN jsonb_typeof(item.snapshot->'media')='array'
+    THEN jsonb_array_length(item.snapshot->'media') BETWEEN 1 AND 18
+    ELSE FALSE
+  END`],
+  ['batchFirstMediaTypeMatches',
+    "item.snapshot->'media'->0->>'type'=item.snapshot->>'mediaType'"],
+  ['batchFirstMediaUrlMatches',
+    "item.snapshot->'media'->0->>'url'=item.snapshot->>'mediaUrl'"],
+  ['batchMediaTypesMatch', `CASE
+    WHEN jsonb_typeof(item.snapshot->'media')='array'
+    THEN NOT EXISTS (
+      SELECT 1 FROM jsonb_array_elements(item.snapshot->'media') AS media(value)
+      WHERE media.value->>'type' IS DISTINCT FROM item.snapshot->>'mediaType'
+    )
+    ELSE FALSE
+  END`],
+  ['browserMediaMatchesSnapshot', `CASE
+    WHEN jsonb_typeof(
+      attempt.frozen_payload->'browserPayload'->'mediaAssets'
+    )='array'
+      AND jsonb_typeof(item.snapshot->'media')='array'
+    THEN (
+      SELECT jsonb_agg(
+        jsonb_build_object(
+          'type',asset.value->>'mediaType',
+          'url',asset.value->>'deliveryUrl'
+        )
+        ORDER BY asset.ordinality
+      )
+      FROM jsonb_array_elements(
+        attempt.frozen_payload->'browserPayload'->'mediaAssets'
+      ) WITH ORDINALITY AS asset(value,ordinality)
+    )=(
+      SELECT jsonb_agg(
+        jsonb_build_object(
+          'type',media.value->>'type',
+          'url',media.value->>'url'
+        )
+        ORDER BY media.ordinality
+      )
+      FROM jsonb_array_elements(item.snapshot->'media')
+        WITH ORDINALITY AS media(value,ordinality)
+    )
+    ELSE FALSE
+  END`],
+  ['batchMediaIdentitiesValid', `CASE
+    WHEN jsonb_typeof(item.snapshot->'media')='array'
+    THEN NOT EXISTS (
+      SELECT 1 FROM jsonb_array_elements(item.snapshot->'media') AS media(value)
+      WHERE media.value->>'identity' IS DISTINCT FROM
+        terminal_expired_batch_claim_digest(
+          jsonb_build_object(
+            'type',media.value->>'type',
+            'url',media.value->>'url'
+          )
+        )
+    )
+    ELSE FALSE
+  END`],
+  ['browserCoverMatchesVideoSnapshot', `(
+    item.snapshot->>'mediaType'<>'video'
+    OR attempt.frozen_payload->'browserPayload'->'coverAsset'->>'deliveryUrl'=
+      item.snapshot->>'thumbnailUrl'
+  )`],
   ['attemptCreatedEventExact', `(SELECT count(*) FROM rednote_publish_attempt_events event
     WHERE event.attempt_id=attempt.id AND event.event_type='attempt_created')=1`],
   ['workerClaimedEventExact', `(SELECT count(*) FROM rednote_publish_attempt_events event
@@ -1915,6 +2032,14 @@ function evaluateTerminalExpiredBatchClaimCandidate(
     revision: string;
   },
 ) {
+  const payload = row?.frozen_payload;
+  const check = (test: () => boolean) => {
+    try {
+      return Boolean(row && test());
+    } catch {
+      return false;
+    }
+  };
   const checks: ExpiredBatchClaimChecks = {
     recordFound: Boolean(row),
     ...Object.fromEntries(
@@ -1922,6 +2047,22 @@ function evaluateTerminalExpiredBatchClaimCandidate(
     ),
     ...(row?.sql_checks ?? {}),
     ...evaluateMisclassifiedBatchPacket(row, input),
+    batchExpectedAccountPresent: check(() =>
+      typeof row!.batch_snapshot.expectedAccountId === 'string'),
+    browserExpectedAccountPresent: check(() =>
+      typeof payload!.browserPayload.expectedAccountId === 'string'),
+    batchPublishAtPresent: check(() =>
+      typeof row!.batch_snapshot.publishAt === 'string'),
+    browserScheduledDatePresent: check(() =>
+      typeof payload!.browserPayload.scheduledDate === 'string'),
+    browserTargetPublishAtPresent: check(() =>
+      typeof payload!.browserPayload.targetPublishAt === 'string'),
+    videoThumbnailPresent: check(() =>
+      row!.batch_snapshot.mediaType !== 'video' ||
+      typeof row!.batch_snapshot.thumbnailUrl === 'string'),
+    browserVideoCoverPresent: check(() =>
+      row!.batch_snapshot.mediaType !== 'video' ||
+      typeof payload!.browserPayload.coverAsset?.deliveryUrl === 'string'),
   };
   const failedChecks = Object.entries(checks)
     .filter(([, passed]) => !passed)

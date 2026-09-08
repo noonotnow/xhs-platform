@@ -742,6 +742,79 @@ describe('Ready x3 pre-provider failure recovery', () => {
     });
 
     it.each([
+      'batchItemPageMatchesAttempt',
+      'frozenContractRevisionMatchesAttempt',
+      'browserExpectedAccountMatchesSnapshot',
+      'browserScheduledDateMatchesSnapshot',
+      'browserTargetPublishAtMatchesSnapshot',
+    ])('reports the exact app/trigger parity failure for %s', async (checkName) => {
+      mocks.query.mockResolvedValue({
+        rows: [terminalExpiredCandidate({
+          sql_checks: { [checkName]: false },
+        })],
+      });
+
+      const result = await diagnoseTerminalExpiredMisclassifiedBatchClaim(input);
+
+      expect(result.eligible).toBe(false);
+      expect(result.failedChecks).toContain(checkName);
+      expect(result.checks[checkName]).toBe(false);
+    });
+
+    it.each([
+      [
+        'missing expected account on both packet sides',
+        'batchExpectedAccountPresent',
+        () => {
+          const candidate = terminalExpiredCandidate();
+          return {
+            ...candidate,
+            job_snapshot: { ...candidate.job_snapshot, expectedAccountId: undefined },
+            batch_snapshot: { ...candidate.batch_snapshot, expectedAccountId: undefined },
+            frozen_payload: {
+              ...candidate.frozen_payload,
+              browserPayload: {
+                ...candidate.frozen_payload.browserPayload,
+                expectedAccountId: undefined,
+              },
+            },
+          };
+        },
+      ],
+      [
+        'missing publish time on both packet sides',
+        'batchPublishAtPresent',
+        () => {
+          const candidate = terminalExpiredCandidate();
+          return {
+            ...candidate,
+            job_snapshot: { ...candidate.job_snapshot, publishAt: undefined },
+            batch_snapshot: { ...candidate.batch_snapshot, publishAt: undefined },
+            frozen_payload: {
+              ...candidate.frozen_payload,
+              browserPayload: {
+                ...candidate.frozen_payload.browserPayload,
+                scheduledDate: null,
+                targetPublishAt: undefined,
+              },
+            },
+          };
+        },
+      ],
+    ])('rejects terminal diagnosis with %s', async (
+      _,
+      expectedFailedCheck,
+      candidate,
+    ) => {
+      mocks.query.mockResolvedValue({ rows: [candidate()] });
+
+      const result = await diagnoseTerminalExpiredMisclassifiedBatchClaim(input);
+
+      expect(result.eligible).toBe(false);
+      expect(result.failedChecks).toContain(expectedFailedCheck);
+    });
+
+    it.each([
       ['action', { action: 'schedule', maxLateMinutes: 30 }],
       ['timeout', { action: 'post_now', maxLateMinutes: 31 }],
       ['extra field', { action: 'post_now', maxLateMinutes: 30, extra: true }],
@@ -792,6 +865,11 @@ describe('Ready x3 pre-provider failure recovery', () => {
         'attempt.receipt_lookup_updated_at=job.claim_expires_at',
         'attempt.claim_expires_at=job.claim_expires_at',
         "item.state='queued'",
+        'item.notion_page_id=attempt.source_notion_page_id',
+        "attempt.frozen_payload->>'contractRevision'=attempt.contract_revision",
+        "attempt.frozen_payload->'browserPayload'->>'expectedAccountId'=",
+        "attempt.frozen_payload->'browserPayload'->>'scheduledDate'=",
+        "attempt.frozen_payload->'browserPayload'->>'targetPublishAt'=",
         '(SELECT count(*) FROM rednote_publish_attempt_events event',
         "event.actor_id='local_publish_lease_recovery'",
         "event.event_type='execution_started'",
