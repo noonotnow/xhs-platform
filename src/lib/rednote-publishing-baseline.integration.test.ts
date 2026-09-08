@@ -31,6 +31,7 @@ const migrationFiles = [
   '024_local_publish_queue_quarantine.sql',
   '025_late_rednote_terminal_results.sql',
   '026_batch_authorization_reclassification.sql',
+  '027_expired_batch_claim_reclassification.sql',
 ] as const;
 
 describe('canonical local publishing migration chain', () => {
@@ -257,6 +258,197 @@ describe('canonical local publishing migration chain', () => {
         terminal_outcome: null,
       }],
     });
+  });
+
+  it('reclassifies only an expired unexecuted batch claim and preserves its approval', async () => {
+    const batchId = '11111111-aaaa-4111-8111-111111111111';
+    const itemId = '22222222-aaaa-4222-8222-222222222222';
+    const jobId = '33333333-aaaa-4333-8333-333333333333';
+    const attemptId = '44444444-aaaa-4444-8444-444444444444';
+    const claimToken = '55555555-aaaa-4555-8555-555555555555';
+    await database.query(
+      `INSERT INTO rednote_publish_batches(
+         id, kind, status, manifest_hash, approved_at
+       ) VALUES ($1, 'bootstrap', 'approved', $2, CURRENT_TIMESTAMP)`,
+      [batchId, 'e'.repeat(64)],
+    );
+    await database.query(
+      `INSERT INTO rednote_publish_batch_items(
+         id, batch_id, notion_page_id, snapshot, item_hash, state, dispatch_mode
+       ) VALUES ($1, $2, 'expired-claim-page', '{}'::jsonb, $3, 'approved', 'scheduled')`,
+      [itemId, batchId, 'f'.repeat(64)],
+    );
+    await database.query(
+      `INSERT INTO local_publish_jobs(
+         id, notion_page_id, snapshot, status, idempotency_key, workspace_id,
+         batch_item_id, claim_token, claimed_at, claim_expires_at
+       ) VALUES (
+         $1, 'expired-claim-page', '{}'::jsonb, 'claimed', $2,
+         'workspace-1', $3, $4, CURRENT_TIMESTAMP - INTERVAL '2 minutes',
+         '2026-01-01T00:00:00Z'
+       )`,
+      [
+        jobId,
+        '66666666-aaaa-4666-8666-666666666666',
+        itemId,
+        claimToken,
+      ],
+    );
+    await database.query(
+      `INSERT INTO rednote_publish_attempts(
+         id, workspace_id, idempotency_key, contract_revision,
+         source_notion_page_id, source_local_publish_job_id,
+         frozen_payload, payload_digest, payload_revision,
+         executor_type, executor_kind, executor_id, target_publish_at,
+         requested_at, receipt_lookup_state, active, approved_at,
+         claim_token, claim_expires_at, authorization_kind,
+         late_fallback_policy
+       ) VALUES (
+         $1, 'workspace-1', $2, 'rednote-publishing/v1',
+         'expired-claim-page', $3, '{}'::jsonb, $4, 'batch-revision',
+         'worker', 'playwright', 'worker-test', CURRENT_TIMESTAMP + INTERVAL '1 day',
+         CURRENT_TIMESTAMP, 'pending', true, '2026-08-31T14:00:00Z',
+         $5, '2026-01-01T00:00:00Z', 'ready_x3',
+         '{"action":"schedule","maxLateMinutes":30}'::jsonb
+       )`,
+      [
+        attemptId,
+        '77777777-aaaa-4777-8777-777777777777',
+        jobId,
+        '1'.repeat(64),
+        claimToken,
+      ],
+    );
+    await database.query(
+      `INSERT INTO rednote_publish_attempt_events(
+         attempt_id, event_type, occurred_at, actor_type, actor_id
+       ) VALUES ($1, 'worker_claimed', CURRENT_TIMESTAMP, 'worker', 'worker-test')`,
+      [attemptId],
+    );
+
+    await database.exec(`
+      BEGIN;
+      SELECT set_config('app.expired_batch_claim_reclassification', 'on', true);
+      UPDATE rednote_publish_attempts
+      SET authorization_kind = NULL,
+          late_fallback_policy = NULL,
+          claim_token = NULL,
+          claim_expires_at = NULL
+      WHERE id = '${attemptId}';
+      UPDATE local_publish_jobs
+      SET status = 'queued',
+          claim_token = NULL,
+          claimed_at = NULL,
+          claim_expires_at = NULL
+      WHERE id = '${jobId}';
+      COMMIT;
+    `);
+
+    await expect(database.query<{
+      active: boolean;
+      approved_at: string;
+      authorization_kind: string | null;
+      terminal_outcome: string | null;
+      claim_token: string | null;
+    }>(
+      `SELECT active, approved_at::text, authorization_kind,
+          terminal_outcome, claim_token
+       FROM rednote_publish_attempts
+       WHERE id = $1`,
+      [attemptId],
+    )).resolves.toMatchObject({
+      rows: [{
+        active: true,
+        approved_at: '2026-08-31 14:00:00+00',
+        authorization_kind: null,
+        terminal_outcome: null,
+        claim_token: null,
+      }],
+    });
+    await expect(database.query<{ status: string }>(
+      'SELECT status FROM local_publish_jobs WHERE id = $1',
+      [jobId],
+    )).resolves.toMatchObject({ rows: [{ status: 'queued' }] });
+  });
+
+  it('rejects expired-claim reclassification while the lease is still live', async () => {
+    const batchId = '88888888-aaaa-4888-8888-888888888888';
+    const itemId = '99999999-aaaa-4999-8999-999999999999';
+    const jobId = 'aaaaaaaa-bbbb-4aaa-8aaa-aaaaaaaaaaaa';
+    const attemptId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const claimToken = 'cccccccc-bbbb-4ccc-8ccc-cccccccccccc';
+    await database.query(
+      `INSERT INTO rednote_publish_batches(
+         id, kind, status, manifest_hash, approved_at
+       ) VALUES ($1, 'bootstrap', 'approved', $2, CURRENT_TIMESTAMP)`,
+      [batchId, '2'.repeat(64)],
+    );
+    await database.query(
+      `INSERT INTO rednote_publish_batch_items(
+         id, batch_id, notion_page_id, snapshot, item_hash, state, dispatch_mode
+       ) VALUES ($1, $2, 'live-claim-page', '{}'::jsonb, $3, 'approved', 'scheduled')`,
+      [itemId, batchId, '3'.repeat(64)],
+    );
+    await database.query(
+      `INSERT INTO local_publish_jobs(
+         id, notion_page_id, snapshot, status, idempotency_key, workspace_id,
+         batch_item_id, claim_token, claimed_at, claim_expires_at
+       ) VALUES (
+         $1, 'live-claim-page', '{}'::jsonb, 'claimed', $2,
+         'workspace-1', $3, $4, CURRENT_TIMESTAMP,
+         '2099-01-01T00:00:00Z'
+       )`,
+      [jobId, 'dddddddd-bbbb-4ddd-8ddd-dddddddddddd', itemId, claimToken],
+    );
+    await database.query(
+      `INSERT INTO rednote_publish_attempts(
+         id, workspace_id, idempotency_key, contract_revision,
+         source_notion_page_id, source_local_publish_job_id,
+         frozen_payload, payload_digest, payload_revision,
+         executor_type, executor_kind, executor_id, target_publish_at,
+         requested_at, receipt_lookup_state, active, approved_at,
+         claim_token, claim_expires_at, authorization_kind,
+         late_fallback_policy
+       ) VALUES (
+         $1, 'workspace-1', $2, 'rednote-publishing/v1',
+         'live-claim-page', $3, '{}'::jsonb, $4, 'batch-revision',
+         'worker', 'playwright', 'worker-test', CURRENT_TIMESTAMP + INTERVAL '1 day',
+         CURRENT_TIMESTAMP, 'pending', true, CURRENT_TIMESTAMP,
+         $5, '2099-01-01T00:00:00Z', 'ready_x3',
+         '{"action":"schedule","maxLateMinutes":30}'::jsonb
+       )`,
+      [
+        attemptId,
+        'eeeeeeee-bbbb-4eee-8eee-eeeeeeeeeeee',
+        jobId,
+        '4'.repeat(64),
+        claimToken,
+      ],
+    );
+    await database.query(
+      `INSERT INTO rednote_publish_attempt_events(
+         attempt_id, event_type, occurred_at, actor_type, actor_id
+       ) VALUES ($1, 'worker_claimed', CURRENT_TIMESTAMP, 'worker', 'worker-test')`,
+      [attemptId],
+    );
+
+    await database.exec('BEGIN');
+    try {
+      await database.exec(
+        `SELECT set_config('app.expired_batch_claim_reclassification', 'on', true)`,
+      );
+      await expect(database.query(
+        `UPDATE rednote_publish_attempts
+         SET authorization_kind = NULL,
+             late_fallback_policy = NULL,
+             claim_token = NULL,
+             claim_expires_at = NULL
+         WHERE id = $1`,
+        [attemptId],
+      )).rejects.toThrow(/Ready x3 authorization is immutable/);
+    } finally {
+      await database.exec('ROLLBACK');
+    }
   });
 
   it('supports Note ID-only receipts and append-only renewable evidence', async () => {
