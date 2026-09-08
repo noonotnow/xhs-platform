@@ -25,6 +25,9 @@ import type {
   OperatorSuccessAttestationSummary,
 } from '@/types/local-publish-job';
 
+export const CLAIM_LEASE_EXPIRED_MESSAGE =
+  'The publish lease expired without a terminal result. Automatic dispatch is permanently closed; review the frozen attempt before operator handling or reconciliation.';
+
 interface LocalPublishJobRow extends QueryResultRow {
   id: string;
   workspace_id: string;
@@ -779,7 +782,7 @@ export async function releaseExpiredStoredLocalPublishClaims() {
                   AND attempt.superseded_by_attempt_id IS NULL
               )
               THEN 'The publish lease expired after dispatch authorization. Automatic dispatch is permanently closed; reconcile the existing post or record operator handling.'
-            ELSE 'The publish lease expired without a terminal result. Automatic dispatch is permanently closed; review the frozen attempt before operator handling or reconciliation.'
+            ELSE ${CLAIM_LEASE_EXPIRED_MESSAGE}
           END,
           next_verification_at = CASE
             WHEN EXISTS (

@@ -34,6 +34,7 @@ const migrationFiles = [
   '026_batch_authorization_reclassification.sql',
   '027_expired_batch_claim_reclassification.sql',
   '028_legacy_ready_x3_batch_fallback_reclassification.sql',
+  '029_terminal_expired_batch_claim_reclassification.sql',
 ] as const;
 
 describe('canonical local publishing migration chain', () => {
@@ -115,6 +116,109 @@ describe('canonical local publishing migration chain', () => {
       [attemptId],
     );
     return attemptId;
+  }
+
+  async function insertTerminalExpiredBatchClaim(options: {
+    fallback?: Record<string, unknown>;
+    errorMessage?: string;
+    addExecutionEvidence?: boolean;
+  } = {}) {
+    const batchId = randomUUID();
+    const itemId = randomUUID();
+    const jobId = randomUUID();
+    const attemptId = randomUUID();
+    const claimToken = randomUUID();
+    const pageId = `terminal-expired-${attemptId}`;
+    const approval = '2026-09-08T17:08:23.346Z';
+    const terminal = '2026-09-08T20:19:53.817Z';
+    const fallback = options.fallback ?? {
+      action: 'post_now',
+      maxLateMinutes: 30,
+    };
+    await database.query(
+      `INSERT INTO rednote_publish_batches(
+         id, kind, status, manifest_hash, approved_at
+       ) VALUES ($1, 'bootstrap', 'approved', $2, $3)`,
+      [batchId, 'a'.repeat(64), approval],
+    );
+    await database.query(
+      `INSERT INTO rednote_publish_batch_items(
+         id, batch_id, notion_page_id, snapshot, item_hash, state, dispatch_mode
+       ) VALUES ($1, $2, $3, '{}'::jsonb, $4, 'queued', 'scheduled')`,
+      [itemId, batchId, pageId, 'b'.repeat(64)],
+    );
+    await database.query(
+      `INSERT INTO local_publish_jobs(
+         id, notion_page_id, snapshot, status, idempotency_key, workspace_id,
+         batch_item_id, claim_attempts, claimed_at, claim_expires_at,
+         completed_at, error_code, error_message
+       ) VALUES (
+         $1, $2, '{}'::jsonb, 'failed', $3, 'workspace-1', $4, 1,
+         '2026-09-08T19:15:12.818Z', $5, $5, 'CLAIM_LEASE_EXPIRED', $6
+       )`,
+      [
+        jobId,
+        pageId,
+        randomUUID(),
+        itemId,
+        terminal,
+        options.errorMessage ??
+          'The publish lease expired without a terminal result. Automatic dispatch is permanently closed; review the frozen attempt before operator handling or reconciliation.',
+      ],
+    );
+    await database.query(
+      `UPDATE rednote_publish_batch_items
+       SET local_publish_job_id=$1,state='queued'
+       WHERE id=$2`,
+      [jobId, itemId],
+    );
+    await database.query(
+      `INSERT INTO rednote_publish_attempts(
+         id, workspace_id, idempotency_key, contract_revision,
+         source_notion_page_id, source_local_publish_job_id,
+         frozen_payload, payload_digest, payload_revision,
+         executor_type, executor_kind, executor_id, target_publish_at,
+         requested_at, receipt_lookup_state, receipt_lookup_updated_at,
+         active, approved_at, terminal_outcome, terminal_at,
+         claim_token, claim_expires_at, authorization_kind,
+         late_fallback_policy
+       ) VALUES (
+         $1, 'workspace-1', $2, 'rednote-publishing/v1',
+         $3, $4, '{}'::jsonb, $5, 'batch-revision',
+         'worker', 'playwright', 'worker-test', '2026-09-08T23:20:00Z',
+         $6, 'not_required', $7, false, $6, 'known_failed', $7,
+         $8, $7, 'ready_x3', $9::jsonb
+       )`,
+      [
+        attemptId,
+        randomUUID(),
+        pageId,
+        jobId,
+        'c'.repeat(64),
+        approval,
+        terminal,
+        claimToken,
+        JSON.stringify(fallback),
+      ],
+    );
+    await database.query(
+      `INSERT INTO rednote_publish_attempt_events(
+         attempt_id, event_type, occurred_at, actor_type, actor_id
+       ) VALUES
+         ($1, 'attempt_created', $2, 'admin', 'batch-approval'),
+         ($1, 'worker_claimed', '2026-09-08T19:15:12.818Z', 'worker', 'worker-test'),
+         ($1, 'terminal_outcome_recorded', $3, 'admin', 'local_publish_lease_recovery')`,
+      [attemptId, approval, terminal],
+    );
+    if (options.addExecutionEvidence) {
+      await database.query(
+        `INSERT INTO rednote_publish_attempt_events(
+           attempt_id, event_type, occurred_at, actor_type, actor_id
+         ) VALUES ($1, 'execution_started', $2, 'worker', 'worker-test')`,
+        [attemptId, terminal],
+      );
+    }
+    return { attemptId, approvedAt: approval };
   }
 
   it('installs every baseline and RedNote worker table in order', async () => {
@@ -579,6 +683,86 @@ describe('canonical local publishing migration chain', () => {
              claim_token = NULL,
              claim_expires_at = NULL
          WHERE id = $1`,
+        [attemptId],
+      )).rejects.toThrow(/Ready x3 authorization is immutable/);
+    } finally {
+      await database.exec('ROLLBACK');
+    }
+  });
+
+  it('permits only the exact terminal lease-expiry reclassification transition', async () => {
+    const { attemptId, approvedAt } = await insertTerminalExpiredBatchClaim();
+    await database.exec('BEGIN');
+    try {
+      await database.exec(
+        `SELECT set_config('app.ready_x3_invalid_claim_recovery', 'on', true);
+         SELECT set_config(
+           'app.terminal_expired_batch_claim_reclassification',
+           'on',
+           true
+         )`,
+      );
+      await expect(database.query(
+        `UPDATE rednote_publish_attempts
+         SET authorization_kind=NULL,late_fallback_policy=NULL,
+             active=true,terminal_outcome=NULL,terminal_at=NULL,
+             receipt_lookup_state='pending',
+             receipt_lookup_updated_at=CURRENT_TIMESTAMP,
+             claim_token=NULL,claim_expires_at=NULL
+         WHERE id=$1`,
+        [attemptId],
+      )).resolves.toBeDefined();
+      const result = await database.query<{
+        active: boolean;
+        approved_at: string;
+        authorization_kind: string | null;
+        terminal_outcome: string | null;
+        claim_token: string | null;
+      }>(
+        `SELECT active,approved_at::text,authorization_kind,
+            terminal_outcome,claim_token
+         FROM rednote_publish_attempts
+         WHERE id=$1`,
+        [attemptId],
+      );
+      expect(result.rows[0]).toMatchObject({
+        active: true,
+        approved_at: '2026-09-08 17:08:23.346+00',
+        authorization_kind: null,
+        terminal_outcome: null,
+        claim_token: null,
+      });
+      expect(new Date(result.rows[0]?.approved_at ?? '').toISOString())
+        .toBe(new Date(approvedAt).toISOString());
+    } finally {
+      await database.exec('ROLLBACK');
+    }
+  });
+
+  it.each([
+    ['altered fallback', { fallback: { action: 'schedule', maxLateMinutes: 30 } }],
+    ['altered lease error', { errorMessage: 'Different lease failure' }],
+    ['execution evidence', { addExecutionEvidence: true }],
+  ])('rejects terminal lease-expiry reclassification with %s', async (_, options) => {
+    const { attemptId } = await insertTerminalExpiredBatchClaim(options);
+    await database.exec('BEGIN');
+    try {
+      await database.exec(
+        `SELECT set_config('app.ready_x3_invalid_claim_recovery', 'on', true);
+         SELECT set_config(
+           'app.terminal_expired_batch_claim_reclassification',
+           'on',
+           true
+         )`,
+      );
+      await expect(database.query(
+        `UPDATE rednote_publish_attempts
+         SET authorization_kind=NULL,late_fallback_policy=NULL,
+             active=true,terminal_outcome=NULL,terminal_at=NULL,
+             receipt_lookup_state='pending',
+             receipt_lookup_updated_at=CURRENT_TIMESTAMP,
+             claim_token=NULL,claim_expires_at=NULL
+         WHERE id=$1`,
         [attemptId],
       )).rejects.toThrow(/Ready x3 authorization is immutable/);
     } finally {
