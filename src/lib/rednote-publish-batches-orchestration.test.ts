@@ -5,7 +5,7 @@ const stores = vi.hoisted(() => ({
   list: vi.fn(),
 }));
 const attempts = vi.hoisted(() => ({
-  createLinked: vi.fn(),
+  createBatchLinked: vi.fn(),
   getLinked: vi.fn(),
 }));
 
@@ -22,7 +22,7 @@ vi.mock('@/lib/rednote-publishing-attempt-store', async (importOriginal) => {
   const original = await importOriginal<typeof import('@/lib/rednote-publishing-attempt-store')>();
   return {
     ...original,
-    createLinkedRednotePublishAttempt: attempts.createLinked,
+    createBatchLinkedRednotePublishAttempt: attempts.createBatchLinked,
     getLinkedRednotePublishAttempt: attempts.getLinked,
   };
 });
@@ -70,6 +70,27 @@ const batch = {
     localPublishJobId: '44444444-4444-4444-8444-444444444444',
   }],
 };
+const linkedBatchAttempt = {
+  approvedAt: '2099-08-01T12:05:00.000Z',
+  payload: {
+    sourcePostId: snapshot.notionPageId,
+    expectedAccountId: snapshot.expectedAccountId,
+    title: snapshot.title,
+    caption: snapshot.caption,
+    tags: snapshot.tags,
+    scheduledDate: snapshot.publishAt,
+    targetPublishAt: snapshot.publishAt,
+    timingMode: 'scheduled',
+    publishMode: 'video',
+    mediaAssets: [{
+      assetId: 'video-0',
+      deliveryUrl: media[0].url,
+      sha256: 'a'.repeat(64),
+      mediaType: 'video',
+      role: 'content',
+    }],
+  },
+};
 
 describe('approved RedNote batch attempt materialization', () => {
   beforeEach(() => {
@@ -79,10 +100,7 @@ describe('approved RedNote batch attempt materialization', () => {
   });
 
   it('does not create a duplicate attempt on an exact approved-batch replay', async () => {
-    attempts.getLinked.mockResolvedValue({
-      payload: { expectedAccountId: snapshot.expectedAccountId },
-      readyX3Authorization: { media },
-    });
+    attempts.getLinked.mockResolvedValue(linkedBatchAttempt);
 
     await expect(approvePublishBatch(
       batch.id,
@@ -90,7 +108,7 @@ describe('approved RedNote batch attempt materialization', () => {
       'operator@example.com',
       'legacy-local-publish',
     )).resolves.toEqual(batch);
-    expect(attempts.createLinked).not.toHaveBeenCalled();
+    expect(attempts.createBatchLinked).not.toHaveBeenCalled();
   });
 
   it('repairs a missing approved linked attempt without issuing a second job', async () => {
@@ -99,7 +117,10 @@ describe('approved RedNote batch attempt materialization', () => {
       'ATTEMPT_NOT_FOUND',
       409,
     ));
-    attempts.createLinked.mockResolvedValue({ attempt: { id: 'attempt-1' }, created: true });
+    attempts.createBatchLinked.mockResolvedValue({
+      attempt: { id: 'attempt-1' },
+      created: true,
+    });
 
     await expect(approvePublishBatch(
       batch.id,
@@ -108,7 +129,7 @@ describe('approved RedNote batch attempt materialization', () => {
       'legacy-local-publish',
     )).resolves.toEqual(batch);
     expect(stores.approve).not.toHaveBeenCalled();
-    expect(attempts.createLinked).toHaveBeenCalledWith(
+    expect(attempts.createBatchLinked).toHaveBeenCalledWith(
       snapshot,
       batch.items[0].localPublishJobId,
       'legacy-local-publish',
@@ -119,8 +140,8 @@ describe('approved RedNote batch attempt materialization', () => {
 
   it('fails closed when the existing attempt differs from the frozen account', async () => {
     attempts.getLinked.mockResolvedValue({
-      payload: { expectedAccountId: 'different-account' },
-      readyX3Authorization: { media },
+      ...linkedBatchAttempt,
+      payload: { ...linkedBatchAttempt.payload, expectedAccountId: 'different-account' },
     });
 
     await expect(approvePublishBatch(
@@ -129,6 +150,21 @@ describe('approved RedNote batch attempt materialization', () => {
       'operator@example.com',
       'legacy-local-publish',
     )).rejects.toMatchObject({ code: 'ATTEMPT_PACKET_MISMATCH' });
-    expect(attempts.createLinked).not.toHaveBeenCalled();
+    expect(attempts.createBatchLinked).not.toHaveBeenCalled();
+  });
+
+  it('rejects a linked attempt carrying Ready x3 consent for a bounded batch', async () => {
+    attempts.getLinked.mockResolvedValue({
+      ...linkedBatchAttempt,
+      readyX3Authorization: { kind: 'ready_x3' },
+    });
+
+    await expect(approvePublishBatch(
+      batch.id,
+      batch.manifestHash,
+      'operator@example.com',
+      'legacy-local-publish',
+    )).rejects.toMatchObject({ code: 'ATTEMPT_PACKET_MISMATCH' });
+    expect(attempts.createBatchLinked).not.toHaveBeenCalled();
   });
 });

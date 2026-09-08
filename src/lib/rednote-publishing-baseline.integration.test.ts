@@ -30,6 +30,7 @@ const migrationFiles = [
   '023_rednote_worker_result_v2.sql',
   '024_local_publish_queue_quarantine.sql',
   '025_late_rednote_terminal_results.sql',
+  '026_batch_authorization_reclassification.sql',
 ] as const;
 
 describe('canonical local publishing migration chain', () => {
@@ -162,6 +163,98 @@ describe('canonical local publishing migration chain', () => {
         active: true,
         terminal_outcome: null,
         receipt_lookup_state: 'pending',
+      }],
+    });
+  });
+
+  it('permits only an approved pre-browser batch failure to shed Ready x3 authorization', async () => {
+    const batchId = '55555555-5555-4555-8555-555555555555';
+    const itemId = '66666666-6666-4666-8666-666666666666';
+    const jobId = '77777777-7777-4777-8777-777777777777';
+    const attemptId = '88888888-8888-4888-8888-888888888888';
+    await database.query(
+      `INSERT INTO rednote_publish_batches(
+         id, kind, status, manifest_hash, approved_at
+       ) VALUES ($1, 'bootstrap', 'approved', $2, CURRENT_TIMESTAMP)`,
+      [batchId, 'b'.repeat(64)],
+    );
+    await database.query(
+      `INSERT INTO rednote_publish_batch_items(
+         id, batch_id, notion_page_id, snapshot, item_hash, state, dispatch_mode
+       ) VALUES ($1, $2, 'batch-recovery-page', '{}'::jsonb, $3, 'approved', 'scheduled')`,
+      [itemId, batchId, 'c'.repeat(64)],
+    );
+    await database.query(
+      `INSERT INTO local_publish_jobs(
+         id, notion_page_id, snapshot, status, idempotency_key, workspace_id,
+         batch_item_id, error_code, error_message
+       ) VALUES (
+         $1, 'batch-recovery-page', '{}'::jsonb, 'failed', $2,
+         'workspace-1', $3, 'INVALID_CLAIM',
+         'readyX3Authorization: must exactly match the frozen packet revision, schedule, and media fields'
+       )`,
+      [
+        jobId,
+        '99999999-9999-4999-8999-999999999999',
+        itemId,
+      ],
+    );
+    await database.query(
+      `INSERT INTO rednote_publish_attempts(
+         id, workspace_id, idempotency_key, contract_revision,
+         source_notion_page_id, source_local_publish_job_id,
+         frozen_payload, payload_digest, payload_revision,
+         executor_type, executor_kind, executor_id, target_publish_at,
+         requested_at, terminal_outcome, terminal_at, receipt_lookup_state,
+         active, approved_at, authorization_kind, late_fallback_policy
+       ) VALUES (
+         $1, 'workspace-1', $2, 'rednote-publishing/v1',
+         'batch-recovery-page', $3, '{}'::jsonb, $4, 'batch-revision',
+         'worker', 'playwright', 'worker-test', CURRENT_TIMESTAMP + INTERVAL '1 day',
+         CURRENT_TIMESTAMP, 'known_failed', CURRENT_TIMESTAMP, 'not_required',
+         false, CURRENT_TIMESTAMP, 'ready_x3',
+         '{"action":"schedule","maxLateMinutes":30}'::jsonb
+       )`,
+      [
+        attemptId,
+        'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        jobId,
+        'd'.repeat(64),
+      ],
+    );
+
+    await database.exec(`
+      BEGIN;
+      SELECT set_config('app.ready_x3_invalid_claim_recovery', 'on', true);
+      SELECT set_config('app.batch_authorization_reclassification', 'on', true);
+      UPDATE rednote_publish_attempts
+      SET authorization_kind = NULL,
+          late_fallback_policy = NULL,
+          active = true,
+          terminal_outcome = NULL,
+          terminal_at = NULL,
+          receipt_lookup_state = 'pending',
+          receipt_lookup_updated_at = CURRENT_TIMESTAMP,
+          claim_token = NULL,
+          claim_expires_at = NULL
+      WHERE id = '${attemptId}';
+      COMMIT;
+    `);
+
+    await expect(database.query<{
+      active: boolean;
+      authorization_kind: string | null;
+      terminal_outcome: string | null;
+    }>(
+      `SELECT active, authorization_kind, terminal_outcome
+       FROM rednote_publish_attempts
+       WHERE id = $1`,
+      [attemptId],
+    )).resolves.toMatchObject({
+      rows: [{
+        active: true,
+        authorization_kind: null,
+        terminal_outcome: null,
       }],
     });
   });
