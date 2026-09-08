@@ -348,6 +348,15 @@ RedNote exposes it at scheduling time. `scheduledFor` must match the frozen
 authenticated account enters receipt verification and never permits an
 automatic republish.
 
+The `scheduled` job status is a verification-only state, not final publication:
+it schedules its first receipt check after the frozen `publishAt` and never
+backfills Notion as Published without later post-time note identity evidence.
+The result endpoint also accepts an idempotent late `scheduled`, `ambiguous`, or
+`rejected` v2 terminal result for the exact original claim token after lease
+expiry. Late delivery cannot reopen or requeue dispatch; conflicting results,
+new claim tokens, and rejected results that conflict with dispatch evidence are
+rejected.
+
 `noteId` is the durable publication identity. Matching authenticated-account
 ownership plus `noteId` can mark the canonical Notion row Published without a
 public URL. A query-free `/explore/{noteId}` URL is optional derived metadata.

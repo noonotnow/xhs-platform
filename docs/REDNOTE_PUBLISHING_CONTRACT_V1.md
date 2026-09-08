@@ -68,6 +68,22 @@ dispatch, and enters Verify receipt; it must never be automatically republished.
 `rejected` records a known failure. A later attempt is possible only through the
 normal approval and authorization path.
 
+A `scheduled` receipt confirms only that the Creator submission accepted the
+frozen native schedule. The job remains verification-only (the durable status
+is `scheduled`, with a due verification time) and does not backfill Notion as
+Published. Final publication requires later post-time Creator Manager or public
+note identity evidence.
+
+If result delivery fails after the executor durably records a terminal v2
+result, the result endpoint accepts one late `scheduled`, `ambiguous`, or
+`rejected` result for the exact original `(jobId, claimToken)`. Acceptance never
+reopens the attempt or makes the job dispatch-claimable. Exact replay is
+idempotent; a different token or conflicting result is rejected. An expiry-only
+`outcome_unknown` may be refined by an exact scheduled receipt, while a
+canonical post-click `ambiguous` result remains verify-only and cannot later be
+replaced by success. A late rejection is accepted only when no dispatch or
+publication receipt evidence conflicts with a definitive pre-click failure.
+
 The durable identity is `noteId`. A canonical query-free
 `https://www.rednote.com/explore/{noteId}` URL is optional derived metadata.
 Current `noteId` + `xsecToken` reachability is renewable evidence, not identity.

@@ -23,6 +23,7 @@ import {
   recordStoredLocalPublishDispatch,
   recordStoredAcknowledgedPublication,
   recordStoredAmbiguousOutcome,
+  recordLateStoredWorkerTerminalResult,
   recordStoredRejectedOutcome,
   recordStoredScheduledAcknowledgement,
   releaseExpiredStoredLocalPublishClaims,
@@ -97,6 +98,7 @@ interface ResultDependencies {
   completeReconciliation: typeof completeStoredLocalPublishReconciliation;
   recordAcknowledged?: typeof recordStoredAcknowledgedPublication;
   recordAmbiguous?: typeof recordStoredAmbiguousOutcome;
+  recordLateTerminal?: typeof recordLateStoredWorkerTerminalResult;
   recordScheduledAcknowledgement?: typeof recordStoredScheduledAcknowledgement;
   recordRejected?: typeof recordStoredRejectedOutcome;
   backfill: (
@@ -122,6 +124,7 @@ const resultDependencies: ResultDependencies = {
   completeReconciliation: completeStoredLocalPublishReconciliation,
   recordAcknowledged: recordStoredAcknowledgedPublication,
   recordAmbiguous: recordStoredAmbiguousOutcome,
+  recordLateTerminal: recordLateStoredWorkerTerminalResult,
   recordScheduledAcknowledgement: recordStoredScheduledAcknowledgement,
   recordRejected: recordStoredRejectedOutcome,
   backfill: markXhsPostPublished,
@@ -1038,10 +1041,26 @@ export async function submitLocalPublishJobResult(
   const durableAttempt = typeof workspaceOrDependencies === 'string';
   const result = parseLocalPublishWorkerResult(rawResult);
   if ('contractVersion' in result) {
+    if (
+      durableAttempt
+      && result.outcome !== 'acknowledged'
+    ) {
+      const late = await (
+        dependencies.recordLateTerminal ?? recordLateStoredWorkerTerminalResult
+      )(id, claimToken, result, workspaceId);
+      if (late) return jobSummary(late);
+    }
     if (result.outcome === 'scheduled') {
       let accountMatches = false;
       if (durableAttempt) {
         const attempt = await getLinkedRednotePublishAttempt(workspaceId, id);
+        if (attempt.payload.timingMode !== 'scheduled') {
+          throw new LocalPublishJobError(
+            'A post-now publishing attempt cannot return a scheduled outcome',
+            'UNEXPECTED_SCHEDULED_OUTCOME',
+            409,
+          );
+        }
         try {
           assertScheduledAcknowledgementMatches(
             result.scheduledFor,

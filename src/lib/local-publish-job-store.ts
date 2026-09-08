@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import type { QueryResultRow } from 'pg';
 import { isDeepStrictEqual } from 'util';
 import { sql } from '@/lib/db';
@@ -63,6 +63,41 @@ interface LocalPublishJobRow extends QueryResultRow {
   public_index_checked_at?: Date | string | null;
   provider_restriction_status?: 'removed' | 'restricted' | null;
   provider_restriction_reported_at?: Date | string | null;
+}
+
+export type LateStoredWorkerTerminalResult =
+  | {
+      contractVersion: 'rednote-worker-result/v2';
+      outcome: 'scheduled';
+      acknowledgedAt: string;
+      scheduledFor: string;
+      authenticatedAccount: {
+        accountId: string;
+        capturedAt: string;
+        ownership: 'owned' | 'account_mismatch';
+      };
+      noteId?: string;
+    }
+  | {
+      contractVersion: 'rednote-worker-result/v2';
+      outcome: 'ambiguous' | 'rejected';
+      occurredAt: string;
+      code: string;
+      message: string;
+    };
+
+interface LateTerminalCandidateRow extends LocalPublishJobRow {
+  attempt_id: string;
+  attempt_executor_id: string;
+  attempt_terminal_outcome: 'accepted' | 'known_failed' | 'outcome_unknown' | null;
+  attempt_dispatch_authorized_at: Date | string | null;
+  frozen_timing_mode: 'scheduled' | 'post_now';
+  frozen_target_publish_at: string;
+  frozen_expected_account_id: string;
+  attempt_receipt_note_id: string | null;
+  canonical_account_ownership: 'owned' | 'account_mismatch' | null;
+  late_result_digest: string | null;
+  worker_terminal_event_exists: boolean;
 }
 
 export interface StoredLocalPublishJob {
@@ -203,6 +238,52 @@ function mapRow(row: LocalPublishJobRow): StoredLocalPublishJob {
       ? { restrictionReportedAt: optionalTimestamp(row.provider_restriction_reported_at ?? null) }
       : {}),
   };
+}
+
+function lateTerminalResultDigest(result: LateStoredWorkerTerminalResult) {
+  return createHash('sha256').update(JSON.stringify(result)).digest('hex');
+}
+
+function assertLateTerminalReplayMatches(
+  job: StoredLocalPublishJob,
+  candidate: LateTerminalCandidateRow,
+  result: LateStoredWorkerTerminalResult,
+  digest: string,
+) {
+  if (candidate.late_result_digest) {
+    if (candidate.late_result_digest !== digest) {
+      throw new LocalPublishJobError(
+        'The late worker result conflicts with the canonical terminal receipt',
+        'LATE_RESULT_CONFLICT',
+        409,
+      );
+    }
+    return;
+  }
+  const timestampMatches = job.receiptAcknowledgedAt === (
+    result.outcome === 'scheduled' ? result.acknowledgedAt : result.occurredAt
+  );
+  const commonMatches = job.receiptOutcome === result.outcome && timestampMatches;
+  const scheduledMatches = result.outcome !== 'scheduled' || (
+    job.authenticatedAccountId === result.authenticatedAccount.accountId
+    && job.authenticatedAccountAt === result.authenticatedAccount.capturedAt
+    && candidate.canonical_account_ownership
+      === result.authenticatedAccount.ownership
+    && (result.noteId ?? null) === (job.noteId ?? null)
+    && candidate.frozen_target_publish_at != null
+    && new Date(result.scheduledFor).getTime()
+      === new Date(candidate.frozen_target_publish_at).getTime()
+  );
+  const failureMatches = result.outcome === 'scheduled' || (
+    job.errorCode === result.code && job.errorMessage === result.message
+  );
+  if (!commonMatches || !scheduledMatches || !failureMatches) {
+    throw new LocalPublishJobError(
+      'The late worker result conflicts with the canonical terminal receipt',
+      'LATE_RESULT_CONFLICT',
+      409,
+    );
+  }
 }
 
 export function jobSummary(job: StoredLocalPublishJob): LocalPublishJobSummary {
@@ -1452,6 +1533,451 @@ export async function recordStoredScheduledAcknowledgement(
   throw new LocalPublishJobError(
     'The scheduled acknowledgement cannot be recorded from this state',
     'INVALID_JOB_TRANSITION',
+    409,
+  );
+}
+
+export async function recordLateStoredWorkerTerminalResult(
+  id: string,
+  claimToken: string,
+  result: LateStoredWorkerTerminalResult,
+  workspaceId = 'legacy-local-publish',
+): Promise<StoredLocalPublishJob | null> {
+  const candidateResult = await sql<LateTerminalCandidateRow>`
+    SELECT job.*,
+      attempt.id AS attempt_id,
+      attempt.executor_id AS attempt_executor_id,
+      attempt.terminal_outcome AS attempt_terminal_outcome,
+      attempt.dispatch_authorized_at AS attempt_dispatch_authorized_at,
+      attempt.frozen_payload->'browserPayload'->>'timingMode'
+        AS frozen_timing_mode,
+      attempt.frozen_payload->'browserPayload'->>'targetPublishAt'
+        AS frozen_target_publish_at,
+      attempt.frozen_payload->'browserPayload'->>'expectedAccountId'
+        AS frozen_expected_account_id,
+      receipt.rednote_note_id AS attempt_receipt_note_id,
+      (
+        SELECT evidence.evidence_status
+        FROM rednote_publication_evidence AS evidence
+        WHERE evidence.attempt_id = attempt.id
+          AND evidence.evidence_kind = 'authenticated_account'
+          AND evidence.account_id = job.authenticated_account_id
+        ORDER BY evidence.created_at DESC
+        LIMIT 1
+      ) AS canonical_account_ownership,
+      (
+        SELECT event.diagnostics->>'resultDigest'
+        FROM rednote_publish_attempt_events AS event
+        WHERE event.attempt_id = attempt.id
+          AND event.event_type = 'execution_evidence'
+          AND event.diagnostics->>'kind' = 'late_terminal_result_accepted'
+        ORDER BY event.created_at DESC
+        LIMIT 1
+      ) AS late_result_digest,
+      EXISTS (
+        SELECT 1
+        FROM rednote_publish_attempt_events AS event
+        WHERE event.attempt_id = attempt.id
+          AND event.event_type = 'terminal_outcome_recorded'
+          AND event.actor_type = 'worker'
+      ) AS worker_terminal_event_exists
+    FROM local_publish_jobs AS job
+    JOIN rednote_publish_attempts AS attempt
+      ON attempt.workspace_id = job.workspace_id
+      AND attempt.source_local_publish_job_id = job.id
+      AND attempt.executor_type = 'worker'
+      AND attempt.claim_token = ${claimToken}::uuid
+      AND attempt.superseded_by_attempt_id IS NULL
+    LEFT JOIN rednote_publish_attempt_receipts AS receipt
+      ON receipt.attempt_id = attempt.id
+    WHERE job.id = ${id}::uuid
+      AND job.workspace_id = ${workspaceId}
+      AND job.status IN (
+        'claimed', 'staged', 'failed', 'submitted', 'scheduled',
+        'verification_pending', 'verified', 'reconciled'
+      )
+      AND (
+        job.claim_expires_at <= CURRENT_TIMESTAMP
+        OR job.claim_token IS NULL
+      )
+      AND job.external_disposition_request_id IS NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM plan_operator_scheduled_posts AS manual_handling
+        WHERE manual_handling.notion_page_id = job.notion_page_id
+          AND manual_handling.workspace_id = job.workspace_id
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM manual_reconciliation_requests AS disposition
+        WHERE disposition.request_kind = 'targeted_local_job'
+          AND disposition.source_local_job_id = job.id
+          AND disposition.workspace_id = job.workspace_id
+      )
+    ORDER BY attempt.created_at DESC
+    LIMIT 1
+  `;
+  const candidate = candidateResult.rows[0];
+  if (!candidate) {
+    const current = await sql<LocalPublishJobRow>`
+      SELECT *
+      FROM local_publish_jobs
+      WHERE id = ${id}::uuid
+        AND workspace_id = ${workspaceId}
+        AND status IN (
+          'claimed', 'staged', 'failed', 'submitted', 'scheduled',
+          'verification_pending', 'verified', 'reconciled'
+        )
+        AND (
+          claim_expires_at <= CURRENT_TIMESTAMP
+          OR claim_token IS NULL
+        )
+      LIMIT 1
+    `;
+    if (current.rows[0]) {
+      throw new LocalPublishJobError(
+        'The late worker result does not match the original claim token',
+        'STALE_CLAIM',
+        409,
+      );
+    }
+    return null;
+  }
+
+  const job = mapRow(candidate);
+  const digest = lateTerminalResultDigest(result);
+  if (job.receiptOutcome) {
+    assertLateTerminalReplayMatches(job, candidate, result, digest);
+    return job;
+  }
+  if (candidate.worker_terminal_event_exists) {
+    throw new LocalPublishJobError(
+      'The linked attempt already has a worker terminal outcome without a canonical job receipt',
+      'LATE_RESULT_CONFLICT',
+      409,
+    );
+  }
+
+  let attemptOutcome: 'accepted' | 'known_failed' | 'outcome_unknown';
+  let jobStatus: 'failed' | 'scheduled' | 'verification_pending';
+  let receiptState: 'found' | 'identity_pending' | 'not_required';
+  let accountMatches = false;
+  if (result.outcome === 'scheduled') {
+    if (
+      candidate.frozen_timing_mode !== 'scheduled'
+      || new Date(result.scheduledFor).getTime()
+        !== new Date(candidate.frozen_target_publish_at).getTime()
+      || !candidate.attempt_dispatch_authorized_at
+    ) {
+      throw new LocalPublishJobError(
+        'The late scheduled result does not match the frozen authorized schedule',
+        'SCHEDULE_READBACK_MISMATCH',
+        409,
+      );
+    }
+    accountMatches = result.authenticatedAccount.ownership === 'owned'
+      && result.authenticatedAccount.accountId
+        === candidate.frozen_expected_account_id;
+    attemptOutcome = accountMatches ? 'accepted' : 'outcome_unknown';
+    jobStatus = accountMatches ? 'scheduled' : 'verification_pending';
+    receiptState = result.noteId ? 'found' : 'identity_pending';
+  } else if (result.outcome === 'ambiguous') {
+    if (!candidate.attempt_dispatch_authorized_at) {
+      throw new LocalPublishJobError(
+        'An ambiguous late result requires durable dispatch authorization',
+        'LATE_RESULT_CONFLICT',
+        409,
+      );
+    }
+    attemptOutcome = 'outcome_unknown';
+    jobStatus = 'verification_pending';
+    receiptState = 'identity_pending';
+  } else {
+    if (
+      candidate.dispatched_at
+      || candidate.note_id
+      || candidate.share_url
+      || candidate.attempt_receipt_note_id
+      || candidate.attempt_terminal_outcome === 'accepted'
+    ) {
+      throw new LocalPublishJobError(
+        'A rejected late result conflicts with durable dispatch or receipt evidence',
+        'LATE_RESULT_CONFLICT',
+        409,
+      );
+    }
+    attemptOutcome = 'known_failed';
+    jobStatus = 'failed';
+    receiptState = 'not_required';
+  }
+
+  const acknowledgedAt = result.outcome === 'scheduled'
+    ? result.acknowledgedAt
+    : result.occurredAt;
+  const accountId = result.outcome === 'scheduled'
+    ? result.authenticatedAccount.accountId
+    : null;
+  const accountCapturedAt = result.outcome === 'scheduled'
+    ? result.authenticatedAccount.capturedAt
+    : null;
+  const noteId = result.outcome === 'scheduled' ? result.noteId ?? null : null;
+  const errorCode = result.outcome === 'scheduled'
+    ? (accountMatches ? null : 'ACCOUNT_MISMATCH')
+    : result.code;
+  const errorMessage = result.outcome === 'scheduled'
+    ? (
+        accountMatches
+          ? null
+          : 'Authenticated Creator account does not match the frozen expectedAccountId'
+      )
+    : result.message;
+  const scheduledFor = result.outcome === 'scheduled'
+    ? result.scheduledFor
+    : null;
+
+  const recorded = await sql<LocalPublishJobRow>`
+    WITH candidate AS MATERIALIZED (
+      SELECT job.id AS job_id, attempt.id AS attempt_id,
+        attempt.executor_id, job.batch_item_id
+      FROM local_publish_jobs AS job
+      JOIN rednote_publish_attempts AS attempt
+        ON attempt.workspace_id = job.workspace_id
+        AND attempt.source_local_publish_job_id = job.id
+        AND attempt.executor_type = 'worker'
+        AND attempt.claim_token = ${claimToken}::uuid
+        AND attempt.superseded_by_attempt_id IS NULL
+      WHERE job.id = ${id}::uuid
+        AND job.workspace_id = ${workspaceId}
+        AND job.status IN (
+          'claimed', 'staged', 'failed', 'scheduled', 'verification_pending'
+        )
+        AND job.receipt_outcome IS NULL
+        AND (
+          job.claim_expires_at <= CURRENT_TIMESTAMP
+          OR job.claim_token IS NULL
+        )
+        AND job.external_disposition_request_id IS NULL
+        AND NOT EXISTS (
+          SELECT 1
+          FROM rednote_publish_attempt_events AS terminal_event
+          WHERE terminal_event.attempt_id = attempt.id
+            AND terminal_event.event_type = 'terminal_outcome_recorded'
+            AND terminal_event.actor_type = 'worker'
+        )
+        AND (
+          attempt.terminal_outcome IS NULL
+          OR attempt.terminal_outcome = ${attemptOutcome}
+          OR (
+            attempt.terminal_outcome = 'outcome_unknown'
+            AND ${attemptOutcome} IN ('accepted', 'known_failed')
+          )
+        )
+        AND (
+          ${result.outcome} <> 'rejected'
+          OR (
+            job.dispatched_at IS NULL
+            AND job.note_id IS NULL
+            AND job.share_url IS NULL
+            AND NOT EXISTS (
+              SELECT 1
+              FROM rednote_publish_attempt_receipts AS receipt
+              WHERE receipt.attempt_id = attempt.id
+            )
+          )
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM plan_operator_scheduled_posts AS manual_handling
+          WHERE manual_handling.notion_page_id = job.notion_page_id
+            AND manual_handling.workspace_id = job.workspace_id
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM manual_reconciliation_requests AS disposition
+          WHERE disposition.request_kind = 'targeted_local_job'
+            AND disposition.source_local_job_id = job.id
+            AND disposition.workspace_id = job.workspace_id
+        )
+      FOR UPDATE OF job, attempt
+    ),
+    updated_attempt AS (
+      UPDATE rednote_publish_attempts AS attempt
+      SET active = false,
+          terminal_outcome = ${attemptOutcome},
+          terminal_at = COALESCE(terminal_at, CURRENT_TIMESTAMP),
+          receipt_lookup_state = ${receiptState},
+          receipt_lookup_updated_at = CURRENT_TIMESTAMP,
+          claim_expires_at = CURRENT_TIMESTAMP
+      FROM candidate
+      WHERE attempt.id = candidate.attempt_id
+      RETURNING attempt.id
+    ),
+    attempt_receipt AS (
+      INSERT INTO rednote_publish_attempt_receipts(
+        attempt_id, rednote_note_id, platform_publish_time, provenance
+      )
+      SELECT candidate.attempt_id, ${noteId},
+        ${acknowledgedAt}::timestamptz,
+        jsonb_build_object(
+          'kind', 'late_rednote_worker_result_v2_scheduled',
+          'scheduledFor', ${scheduledFor}::text,
+          'authenticatedAccountId', ${accountId}::text,
+          'authenticatedAccountCapturedAt', ${accountCapturedAt}::text
+        )
+      FROM candidate
+      JOIN updated_attempt ON updated_attempt.id = candidate.attempt_id
+      WHERE ${result.outcome} = 'scheduled'
+        AND ${noteId}::text IS NOT NULL
+      ON CONFLICT(attempt_id) DO NOTHING
+      RETURNING attempt_id
+    ),
+    updated_job AS (
+      UPDATE local_publish_jobs AS job
+      SET status = ${jobStatus},
+          claim_token = NULL,
+          claim_expires_at = CURRENT_TIMESTAMP,
+          dispatched_at = CASE
+            WHEN ${result.outcome} IN ('scheduled', 'ambiguous')
+              THEN COALESCE(dispatched_at, ${acknowledgedAt}::timestamptz)
+            ELSE dispatched_at
+          END,
+          note_id = CASE
+            WHEN ${result.outcome} = 'scheduled'
+              THEN COALESCE(note_id, ${noteId})
+            ELSE note_id
+          END,
+          receipt_contract_version = 'rednote-worker-result/v2',
+          receipt_outcome = ${result.outcome},
+          receipt_acknowledged_at = ${acknowledgedAt}::timestamptz,
+          authenticated_account_id = ${accountId},
+          authenticated_account_at = ${accountCapturedAt}::timestamptz,
+          verification_attempts = CASE
+            WHEN ${jobStatus} = 'scheduled' THEN 0
+            WHEN ${jobStatus} = 'verification_pending'
+              THEN verification_attempts + 1
+            ELSE verification_attempts
+          END,
+          next_verification_at = CASE
+            WHEN ${jobStatus} = 'scheduled'
+              THEN GREATEST(
+                CURRENT_TIMESTAMP,
+                ${scheduledFor}::timestamptz
+              ) + INTERVAL '15 minutes'
+            WHEN ${jobStatus} = 'verification_pending'
+              THEN CURRENT_TIMESTAMP + INTERVAL '15 minutes'
+            ELSE next_verification_at
+          END,
+          error_code = ${errorCode},
+          error_message = ${errorMessage},
+          completed_at = CASE
+            WHEN ${jobStatus} = 'failed'
+              THEN COALESCE(completed_at, CURRENT_TIMESTAMP)
+            ELSE completed_at
+          END,
+          updated_at = CURRENT_TIMESTAMP
+      FROM candidate
+      JOIN updated_attempt ON updated_attempt.id = candidate.attempt_id
+      WHERE job.id = candidate.job_id
+      RETURNING job.*
+    ),
+    updated_item AS (
+      UPDATE rednote_publish_batch_items AS item
+      SET state = ${jobStatus},
+          updated_at = CURRENT_TIMESTAMP
+      FROM candidate
+      JOIN updated_job ON updated_job.id = candidate.job_id
+      WHERE item.local_publish_job_id = candidate.job_id
+        AND item.state IN (
+          'claimed', 'staged', 'failed', 'scheduled', 'verification_pending'
+        )
+      RETURNING item.id
+    ),
+    evidence AS (
+      INSERT INTO rednote_publication_evidence(
+        workspace_id, local_publish_job_id, attempt_id, note_id,
+        evidence_kind, captured_at, account_id, evidence_status
+      )
+      SELECT ${workspaceId}, candidate.job_id, candidate.attempt_id,
+        ${noteId}, 'authenticated_account',
+        ${accountCapturedAt}::timestamptz, ${accountId},
+        CASE WHEN ${accountMatches} THEN 'owned' ELSE 'account_mismatch' END
+      FROM candidate
+      JOIN updated_job ON updated_job.id = candidate.job_id
+      WHERE ${result.outcome} = 'scheduled'
+      RETURNING id
+    ),
+    audit_event AS (
+      INSERT INTO rednote_publish_attempt_events(
+        attempt_id, event_type, occurred_at, actor_type, actor_id, diagnostics
+      )
+      SELECT candidate.attempt_id, 'execution_evidence', CURRENT_TIMESTAMP,
+        'worker', candidate.executor_id,
+        jsonb_build_object(
+          'kind', 'late_terminal_result_accepted',
+          'contractVersion', 'rednote-worker-result/v2',
+          'outcome', ${result.outcome}::text,
+          'resultDigest', ${digest}::text
+        )
+      FROM candidate
+      JOIN updated_job ON updated_job.id = candidate.job_id
+      RETURNING attempt_id
+    )
+    SELECT * FROM updated_job
+  `;
+  if (recorded.rows[0]) return mapRow(recorded.rows[0]);
+
+  const replayResult = await sql<LateTerminalCandidateRow>`
+    SELECT job.*,
+      attempt.id AS attempt_id,
+      attempt.executor_id AS attempt_executor_id,
+      attempt.terminal_outcome AS attempt_terminal_outcome,
+      attempt.dispatch_authorized_at AS attempt_dispatch_authorized_at,
+      attempt.frozen_payload->'browserPayload'->>'timingMode'
+        AS frozen_timing_mode,
+      attempt.frozen_payload->'browserPayload'->>'targetPublishAt'
+        AS frozen_target_publish_at,
+      attempt.frozen_payload->'browserPayload'->>'expectedAccountId'
+        AS frozen_expected_account_id,
+      receipt.rednote_note_id AS attempt_receipt_note_id,
+      (
+        SELECT evidence.evidence_status
+        FROM rednote_publication_evidence AS evidence
+        WHERE evidence.attempt_id = attempt.id
+          AND evidence.evidence_kind = 'authenticated_account'
+          AND evidence.account_id = job.authenticated_account_id
+        ORDER BY evidence.created_at DESC
+        LIMIT 1
+      ) AS canonical_account_ownership,
+      (
+        SELECT event.diagnostics->>'resultDigest'
+        FROM rednote_publish_attempt_events AS event
+        WHERE event.attempt_id = attempt.id
+          AND event.event_type = 'execution_evidence'
+          AND event.diagnostics->>'kind' = 'late_terminal_result_accepted'
+        ORDER BY event.created_at DESC
+        LIMIT 1
+      ) AS late_result_digest,
+      false AS worker_terminal_event_exists
+    FROM local_publish_jobs AS job
+    JOIN rednote_publish_attempts AS attempt
+      ON attempt.workspace_id = job.workspace_id
+      AND attempt.source_local_publish_job_id = job.id
+      AND attempt.claim_token = ${claimToken}::uuid
+    LEFT JOIN rednote_publish_attempt_receipts AS receipt
+      ON receipt.attempt_id = attempt.id
+    WHERE job.id = ${id}::uuid
+      AND job.workspace_id = ${workspaceId}
+    ORDER BY attempt.created_at DESC
+    LIMIT 1
+  `;
+  const replay = replayResult.rows[0];
+  if (replay?.receipt_outcome) {
+    assertLateTerminalReplayMatches(mapRow(replay), replay, result, digest);
+    return mapRow(replay);
+  }
+  throw new LocalPublishJobError(
+    'The late worker result is stale or conflicts with terminal state',
+    'LATE_RESULT_CONFLICT',
     409,
   );
 }
