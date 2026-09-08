@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
 import {
   diagnoseReadyX3StaleBrowserFrameRecovery,
+  requeueMisclassifiedBatchInvalidClaimFailure,
   requeueReadyX3InvalidClaimFailure,
   requeueReadyX3NotLoggedInFailure,
   requeueReadyX3ScheduleReadbackMismatch,
@@ -30,6 +31,7 @@ export async function POST(request: NextRequest) {
     confirmation = body.confirm;
     if (
       body.confirm !== 'REQUEUE_EXACT_READY_X3_PRESTAGE_CLAIM' &&
+      body.confirm !== 'REQUEUE_EXACT_MISCLASSIFIED_BATCH_INVALID_CLAIM_FAILURE' &&
       body.confirm !== 'REQUEUE_EXACT_READY_X3_INVALID_CLAIM_FAILURE' &&
       body.confirm !== 'REQUEUE_EXACT_READY_X3_NOT_LOGGED_IN_FAILURE' &&
       body.confirm !== 'REQUEUE_EXACT_READY_X3_STALE_BROWSER_FRAME_FAILURE' &&
@@ -52,6 +54,8 @@ export async function POST(request: NextRequest) {
     const result =
       body.confirm === 'DIAGNOSE_EXACT_READY_X3_STALE_BROWSER_FRAME_RECOVERY'
         ? await diagnoseReadyX3StaleBrowserFrameRecovery(recoveryInput)
+        : body.confirm === 'REQUEUE_EXACT_MISCLASSIFIED_BATCH_INVALID_CLAIM_FAILURE'
+          ? await requeueMisclassifiedBatchInvalidClaimFailure(recoveryInput)
         : body.confirm === 'REQUEUE_EXACT_READY_X3_INVALID_CLAIM_FAILURE'
         ? await requeueReadyX3InvalidClaimFailure(recoveryInput)
         : body.confirm === 'REQUEUE_EXACT_READY_X3_NOT_LOGGED_IN_FAILURE'

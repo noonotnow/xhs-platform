@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import { AsyncLocalStorage } from 'async_hooks';
+import { isDeepStrictEqual } from 'util';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { getPool } from '@/lib/db';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
@@ -163,6 +164,45 @@ export async function createLinkedRednotePublishAttempt(
   readyX3Action?: 'schedule' | 'post_now',
   createAttempt: typeof createRednotePublishAttempt = createRednotePublishAttempt,
 ) {
+  return createApprovedLinkedRednotePublishAttempt(
+    snapshot,
+    idempotencyKey,
+    workspaceId,
+    localJobId,
+    readyX3Action,
+    readyX3Action ? 'ready_x3' : null,
+    createAttempt,
+  );
+}
+
+export async function createBatchLinkedRednotePublishAttempt(
+  snapshot: LocalPublishSnapshot,
+  idempotencyKey: string,
+  workspaceId: string,
+  localJobId: string,
+  action: 'schedule' | 'post_now',
+  createAttempt: typeof createRednotePublishAttempt = createRednotePublishAttempt,
+) {
+  return createApprovedLinkedRednotePublishAttempt(
+    snapshot,
+    idempotencyKey,
+    workspaceId,
+    localJobId,
+    action,
+    'batch',
+    createAttempt,
+  );
+}
+
+async function createApprovedLinkedRednotePublishAttempt(
+  snapshot: LocalPublishSnapshot,
+  idempotencyKey: string,
+  workspaceId: string,
+  localJobId: string,
+  action: 'schedule' | 'post_now' | undefined,
+  authorizationKind: 'ready_x3' | 'batch' | null,
+  createAttempt: typeof createRednotePublishAttempt,
+) {
   if (!snapshot.expectedAccountId) {
     throw new LocalPublishJobError(
       'REDNOTE_EXPECTED_ACCOUNT_ID is required before creating an executable attempt',
@@ -171,7 +211,7 @@ export async function createLinkedRednotePublishAttempt(
     );
   }
   const requestedAt = new Date().toISOString();
-  const timingMode = readyX3Action ??
+  const timingMode = action ??
     (snapshot.publishAt ? 'schedule' as const : 'post_now' as const);
   const commonBrowserPayload = {
     sourcePostId: snapshot.notionPageId,
@@ -267,9 +307,46 @@ export async function createLinkedRednotePublishAttempt(
     workspaceId,
     idempotencyKey,
     payload,
-    approve: Boolean(readyX3Action),
-    readyX3: Boolean(readyX3Action),
+    approve: authorizationKind !== null,
+    readyX3: authorizationKind === 'ready_x3',
   });
+}
+
+export function linkedAttemptMatchesApprovedBatch(
+  attempt: {
+    approvedAt?: string | null;
+    readyX3Authorization?: ReadyX3Authorization;
+    payload?: FrozenRednoteBrowserPayload;
+  },
+  snapshot: LocalPublishSnapshot,
+  action: 'schedule' | 'post_now',
+) {
+  const payload = attempt.payload;
+  if (!attempt.approvedAt || attempt.readyX3Authorization || !payload) return false;
+  return attemptPayloadMatchesApprovedBatch(payload, snapshot, action);
+}
+
+function attemptPayloadMatchesApprovedBatch(
+  payload: FrozenRednoteBrowserPayload,
+  snapshot: LocalPublishSnapshot,
+  action: 'schedule' | 'post_now',
+) {
+  const media = payload.mediaAssets.map((item) =>
+    rednotePublishMedia(item.mediaType, item.deliveryUrl));
+  return payload.sourcePostId === snapshot.notionPageId &&
+    payload.expectedAccountId === snapshot.expectedAccountId &&
+    payload.title === snapshot.title &&
+    payload.caption === snapshot.caption &&
+    isDeepStrictEqual(payload.tags, snapshot.tags) &&
+    payload.publishMode === snapshot.mediaType &&
+    payload.scheduledDate === (snapshot.publishAt ?? null) &&
+    payload.timingMode === (action === 'schedule' ? 'scheduled' : 'post_now') &&
+    (action === 'post_now' || payload.targetPublishAt === snapshot.publishAt) &&
+    isDeepStrictEqual(media, snapshotPublishMedia(snapshot)) &&
+    (
+      snapshot.mediaType !== 'video' ||
+      payload.coverAsset?.deliveryUrl === snapshot.thumbnailUrl
+    );
 }
 
 function validatePayload(payload: FrozenRednoteAttemptPayload) {
@@ -1098,6 +1175,185 @@ export async function requeueReadyX3InvalidClaimFailure(input: {
     evidenceKind: 'invalid_claim_failure_requeued',
     unsafeMessage: 'The Ready x3 validation failure is not safe to recover',
     unsafeCode: 'READY_X3_INVALID_CLAIM_RECOVERY_UNSAFE',
+  });
+}
+
+const MISCLASSIFIED_BATCH_INVALID_CLAIM_MESSAGE =
+  'readyX3Authorization: must exactly match the frozen packet revision, schedule, and media fields';
+
+export async function requeueMisclassifiedBatchInvalidClaimFailure(input: {
+  workspaceId: string;
+  jobId: string;
+  attemptId: string;
+  sourceNotionPageId: string;
+  revision: string;
+}) {
+  for (const [name, value] of Object.entries(input)) {
+    if (typeof value !== 'string' || !value.trim()) {
+      throw new LocalPublishJobError(`${name} is required`, 'VALIDATION_ERROR', 400);
+    }
+  }
+  return transaction(async (client) => {
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+      `${input.workspaceId}:${input.sourceNotionPageId}`,
+    ]);
+    await client.query(
+      `SELECT set_config('app.ready_x3_invalid_claim_recovery', 'on', true)`,
+    );
+    await client.query(
+      `SELECT set_config('app.batch_authorization_reclassification', 'on', true)`,
+    );
+    const locked = await client.query<{
+      id: string;
+      payload_digest: string;
+      payload_revision: string;
+      frozen_payload: FrozenRednoteAttemptPayload;
+      approved_at: Date | string;
+      job_snapshot: LocalPublishSnapshot;
+      batch_snapshot: LocalPublishSnapshot;
+      dispatch_mode: 'scheduled' | 'post_now';
+    }>(
+      `SELECT attempt.id,attempt.payload_digest,attempt.payload_revision,
+          attempt.frozen_payload,attempt.approved_at,
+          job.snapshot AS job_snapshot,item.snapshot AS batch_snapshot,
+          item.dispatch_mode
+       FROM local_publish_jobs job
+       JOIN rednote_publish_batch_items item
+         ON item.id=job.batch_item_id
+        AND item.local_publish_job_id=job.id
+       JOIN rednote_publish_batches batch ON batch.id=item.batch_id
+       JOIN rednote_publish_attempts attempt
+         ON attempt.source_local_publish_job_id=job.id
+        AND attempt.workspace_id=job.workspace_id
+       WHERE job.workspace_id=$1 AND job.id=$2::uuid
+         AND attempt.id=$3::uuid
+         AND job.notion_page_id=$4
+         AND attempt.source_notion_page_id=$4
+         AND attempt.payload_revision=$5
+         AND job.status='failed'
+         AND job.error_code='INVALID_CLAIM'
+         AND job.error_message LIKE '%' || $6 || '%'
+         AND job.staged_at IS NULL
+         AND job.dispatch_authorized_at IS NULL
+         AND job.dispatched_at IS NULL
+         AND job.note_id IS NULL AND job.share_url IS NULL
+         AND job.success_attestation_id IS NULL
+         AND job.external_disposition_request_id IS NULL
+         AND item.state='failed'
+         AND batch.status IN ('approved','partially_approved')
+         AND batch.approved_at IS NOT NULL
+         AND attempt.authorization_kind='ready_x3'
+         AND NOT attempt.active
+         AND attempt.approved_at IS NOT NULL
+         AND attempt.terminal_outcome='known_failed'
+         AND attempt.receipt_lookup_state='not_required'
+         AND attempt.superseded_by_attempt_id IS NULL
+         AND attempt.dispatch_authorized_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM rednote_publish_attempt_events event
+           WHERE event.attempt_id=attempt.id
+             AND event.event_type='execution_started'
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM rednote_publish_attempt_receipts receipt
+           WHERE receipt.attempt_id=attempt.id
+         )
+       FOR UPDATE OF job,item,batch,attempt`,
+      [
+        input.workspaceId,
+        input.jobId,
+        input.attemptId,
+        input.sourceNotionPageId,
+        input.revision,
+        MISCLASSIFIED_BATCH_INVALID_CLAIM_MESSAGE,
+      ],
+    );
+    const row = locked.rows[0];
+    const payload = row?.frozen_payload;
+    if (
+      !row ||
+      !isDeepStrictEqual(row.job_snapshot, row.batch_snapshot) ||
+      payload.payloadDigest !== row.payload_digest ||
+      payload.payloadRevision !== row.payload_revision ||
+      payload.sourceNotionPageId !== input.sourceNotionPageId ||
+      payload.sourceLocalPublishJobId !== input.jobId ||
+      frozenPayloadDigest(payload) !== row.payload_digest ||
+      !attemptPayloadMatchesApprovedBatch(
+        payload.browserPayload,
+        row.batch_snapshot,
+        row.dispatch_mode === 'post_now' ? 'post_now' : 'schedule',
+      )
+    ) {
+      throw new LocalPublishJobError(
+        'The failed claim is not an exact misclassified bounded-batch attempt',
+        'BATCH_AUTHORIZATION_REPAIR_UNSAFE',
+        409,
+      );
+    }
+    const attempt = await client.query<{ id: string }>(
+      `UPDATE rednote_publish_attempts
+       SET authorization_kind=NULL,late_fallback_policy=NULL,
+           active=true,terminal_outcome=NULL,terminal_at=NULL,
+           receipt_lookup_state='pending',
+           receipt_lookup_updated_at=CURRENT_TIMESTAMP,
+           claim_token=NULL,claim_expires_at=NULL
+       WHERE workspace_id=$1 AND id=$2::uuid
+         AND source_local_publish_job_id=$3::uuid
+         AND authorization_kind='ready_x3'
+         AND NOT active AND approved_at IS NOT NULL
+         AND terminal_outcome='known_failed'
+         AND receipt_lookup_state='not_required'
+         AND dispatch_authorized_at IS NULL
+         AND superseded_by_attempt_id IS NULL
+       RETURNING id`,
+      [input.workspaceId, input.attemptId, input.jobId],
+    );
+    const job = await client.query<{ id: string }>(
+      `UPDATE local_publish_jobs
+       SET status='queued',claim_token=NULL,claimed_at=NULL,
+           claim_expires_at=NULL,error_code=NULL,error_message=NULL,
+           completed_at=NULL,updated_at=CURRENT_TIMESTAMP
+       WHERE workspace_id=$1 AND id=$2::uuid
+         AND status='failed' AND error_code='INVALID_CLAIM'
+         AND dispatch_authorized_at IS NULL AND dispatched_at IS NULL
+         AND EXISTS (
+           SELECT 1 FROM rednote_publish_attempts attempt
+           WHERE attempt.id=$3::uuid
+             AND attempt.source_local_publish_job_id=local_publish_jobs.id
+             AND attempt.workspace_id=local_publish_jobs.workspace_id
+             AND attempt.authorization_kind IS NULL
+             AND attempt.active AND attempt.terminal_outcome IS NULL
+         )
+       RETURNING id`,
+      [input.workspaceId, input.jobId, input.attemptId],
+    );
+    if (!attempt.rows[0] || !job.rows[0]) {
+      throw new LocalPublishJobError(
+        'The failed bounded-batch claim changed during recovery',
+        'BATCH_AUTHORIZATION_REPAIR_UNSAFE',
+        409,
+      );
+    }
+    await client.query(
+      `INSERT INTO rednote_publish_attempt_events(
+         attempt_id,event_type,occurred_at,actor_type,actor_id,diagnostics
+       ) VALUES(
+         $1::uuid,'execution_evidence',CURRENT_TIMESTAMP,'admin',
+         'batch_authorization_invalid_claim_recovery',
+         jsonb_build_object(
+           'kind','batch_authorization_reclassified',
+           'priorAuthorizationKind','ready_x3'
+         )
+       )`,
+      [input.attemptId],
+    );
+    return {
+      requeued: true,
+      reclassifiedAuthorization: 'batch' as const,
+      jobId: input.jobId,
+      attemptId: input.attemptId,
+      publicationMayHaveStarted: false as const,
+    };
   });
 }
 

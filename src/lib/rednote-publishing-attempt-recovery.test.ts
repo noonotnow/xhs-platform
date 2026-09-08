@@ -19,6 +19,7 @@ import {
   createRednotePublishAttempt,
   frozenPayloadDigest,
   recordLinkedAttemptOutcome,
+  requeueMisclassifiedBatchInvalidClaimFailure,
   requeueReadyX3InvalidClaimFailure,
   requeueReadyX3NotLoggedInFailure,
   requeueReadyX3ScheduleReadbackMismatch,
@@ -30,6 +31,7 @@ import {
   REDNOTE_PUBLISHING_CONTRACT_REVISION,
   type FrozenRednoteAttemptPayload,
 } from '@/lib/rednote-publishing-contract-v1';
+import { rednoteMediaIdentity } from '@/lib/rednote-publish-authorization';
 
 const input = {
   workspaceId: 'workspace-1',
@@ -52,6 +54,148 @@ describe('Ready x3 pre-provider failure recovery', () => {
   beforeEach(() => {
     mocks.query.mockReset();
     mocks.release.mockReset();
+  });
+
+  describe('misclassified bounded-batch authorization recovery', () => {
+    const mediaUrl = 'https://images.xhs.justlikekatie.com/day-16.png';
+    const batchSnapshot = {
+      notionPageId: input.sourceNotionPageId,
+      headline: 'Day 16',
+      title: 'Day 16',
+      caption: 'Caption',
+      tags: ['Tag'],
+      platform: 'RedNote' as const,
+      mediaType: 'image' as const,
+      mediaIndex: 0,
+      mediaUrl,
+      media: [{
+        type: 'image' as const,
+        url: mediaUrl,
+        identity: rednoteMediaIdentity({ type: 'image', url: mediaUrl }),
+      }],
+      publishAt: '2026-08-31T18:00:00.000Z',
+      notionLastEditedTime: input.revision,
+      expectedAccountId: '678ba3b5000000000a03ecd2',
+    };
+
+    function recoveryPayload() {
+      const payload: FrozenRednoteAttemptPayload = {
+        contractRevision: REDNOTE_PUBLISHING_CONTRACT_REVISION,
+        sourceNotionPageId: input.sourceNotionPageId,
+        sourceLocalPublishJobId: input.jobId,
+        payloadRevision: input.revision,
+        payloadDigest: '',
+        requestedAt: '2026-08-31T15:00:00.000Z',
+        executor: {
+          type: 'worker',
+          kind: 'playwright',
+          id: 'local-publish-worker',
+        },
+        browserPayload: {
+          sourcePostId: input.sourceNotionPageId,
+          expectedAccountId: batchSnapshot.expectedAccountId,
+          title: batchSnapshot.title,
+          caption: batchSnapshot.caption,
+          tags: batchSnapshot.tags,
+          scheduledDate: batchSnapshot.publishAt,
+          targetPublishAt: batchSnapshot.publishAt,
+          timingMode: 'scheduled',
+          visibility: 'public',
+          publishMode: 'image',
+          mediaAssets: [{
+            assetId: 'image-0',
+            deliveryUrl: mediaUrl,
+            sha256: 'a'.repeat(64),
+            mediaType: 'image',
+            role: 'content',
+          }],
+        },
+      };
+      payload.payloadDigest = frozenPayloadDigest(payload);
+      return payload;
+    }
+
+    beforeEach(() => {
+      mocks.query.mockReset();
+      mocks.release.mockReset();
+    });
+
+    it('reclassifies and requeues the same approved batch attempt without a new job', async () => {
+      const payload = recoveryPayload();
+      mocks.query.mockImplementation(async (statement: string) => {
+        if (statement.includes('SELECT attempt.id,attempt.payload_digest')) {
+          return {
+            rows: [{
+              id: input.attemptId,
+              payload_digest: payload.payloadDigest,
+              payload_revision: input.revision,
+              frozen_payload: payload,
+              approved_at: '2026-08-31T14:00:00.000Z',
+              job_snapshot: batchSnapshot,
+              batch_snapshot: batchSnapshot,
+              dispatch_mode: 'scheduled',
+            }],
+          };
+        }
+        if (statement.includes('UPDATE rednote_publish_attempts')) {
+          return { rows: [{ id: input.attemptId }] };
+        }
+        if (statement.includes('UPDATE local_publish_jobs')) {
+          return { rows: [{ id: input.jobId }] };
+        }
+        return { rows: [], rowCount: 1 };
+      });
+
+      await expect(requeueMisclassifiedBatchInvalidClaimFailure(input)).resolves.toEqual({
+        requeued: true,
+        reclassifiedAuthorization: 'batch',
+        jobId: input.jobId,
+        attemptId: input.attemptId,
+        publicationMayHaveStarted: false,
+      });
+
+      const statements = mocks.query.mock.calls.map(([statement]) => String(statement));
+      expect(statements).toContain(
+        "SELECT set_config('app.batch_authorization_reclassification', 'on', true)",
+      );
+      expect(statements.some((statement) =>
+        statement.includes('SET authorization_kind=NULL,late_fallback_policy=NULL'))).toBe(true);
+      expect(statements.some((statement) =>
+        statement.includes("SET status='queued'"))).toBe(true);
+      expect(statements.some((statement) =>
+        statement.includes('INSERT INTO local_publish_jobs'))).toBe(false);
+      expect(statements.some((statement) =>
+        statement.includes("'batch_authorization_reclassified'"))).toBe(true);
+    });
+
+    it('fails closed when the frozen attempt differs from the approved batch packet', async () => {
+      const payload = recoveryPayload();
+      mocks.query.mockImplementation(async (statement: string) => {
+        if (statement.includes('SELECT attempt.id,attempt.payload_digest')) {
+          return {
+            rows: [{
+              id: input.attemptId,
+              payload_digest: payload.payloadDigest,
+              payload_revision: input.revision,
+              frozen_payload: payload,
+              approved_at: '2026-08-31T14:00:00.000Z',
+              job_snapshot: batchSnapshot,
+              batch_snapshot: { ...batchSnapshot, title: 'Changed title' },
+              dispatch_mode: 'scheduled',
+            }],
+          };
+        }
+        return { rows: [], rowCount: 1 };
+      });
+
+      await expect(requeueMisclassifiedBatchInvalidClaimFailure(input))
+        .rejects.toMatchObject({
+          code: 'BATCH_AUTHORIZATION_REPAIR_UNSAFE',
+          status: 409,
+        });
+      expect(mocks.query.mock.calls.some(([statement]) =>
+        String(statement).includes('SET authorization_kind=NULL'))).toBe(false);
+    });
   });
 
   it('requeues the same attempt after a guarded NOT_LOGGED_IN failure', async () => {

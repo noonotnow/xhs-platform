@@ -20,8 +20,9 @@ import {
   type NewPublishBatchItem,
 } from '@/lib/rednote-publish-batch-store';
 import {
-  createLinkedRednotePublishAttempt,
+  createBatchLinkedRednotePublishAttempt,
   getLinkedRednotePublishAttempt,
+  linkedAttemptMatchesApprovedBatch,
 } from '@/lib/rednote-publishing-attempt-store';
 import { listPlanOperatorScheduledPageIds } from '@/lib/plan-operator-scheduled-store';
 import type {
@@ -317,10 +318,11 @@ async function materializeApprovedBatchAttempts(
         workspaceId,
         item.localPublishJobId,
       );
-      if (
-        existing.payload.expectedAccountId !== item.snapshot.expectedAccountId ||
-        !isDeepStrictEqual(existing.readyX3Authorization?.media, item.snapshot.media)
-      ) {
+      if (!linkedAttemptMatchesApprovedBatch(
+        existing,
+        item.snapshot,
+        item.dispatchMode === 'post_now' ? 'post_now' : 'schedule',
+      )) {
         throw new LocalPublishJobError(
           'The linked worker attempt does not match the approved batch packet',
           'ATTEMPT_PACKET_MISMATCH',
@@ -334,7 +336,7 @@ async function materializeApprovedBatchAttempts(
         error.code !== 'ATTEMPT_NOT_FOUND'
       ) throw error;
     }
-    await createLinkedRednotePublishAttempt(
+    await createBatchLinkedRednotePublishAttempt(
       item.snapshot,
       item.localPublishJobId,
       workspaceId,
