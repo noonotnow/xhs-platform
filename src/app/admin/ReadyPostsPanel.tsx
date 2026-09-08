@@ -47,8 +47,7 @@ import {
   receiptPendingLocalPublishJobs,
 } from '@/lib/local-publish-job-display';
 import { manualSchedulingProvenanceMismatch } from '@/lib/manual-scheduling-provenance';
-
-const SHOW_LEGACY_EXECUTION_AUDITS = false;
+import { READY_POSTS_PANEL_FEATURES } from '@/lib/ready-posts-panel-features';
 
 interface ApiError {
   error?: string;
@@ -1200,7 +1199,8 @@ export default function ReadyPostsPanel() {
         <p className={styles.muted}>Schema notices: {warnings.join(' · ')}</p>
       )}
 
-      {SHOW_LEGACY_EXECUTION_AUDITS && successAttestationCandidates.length > 0 && (
+      {READY_POSTS_PANEL_FEATURES.legacyExecutionAudits &&
+        successAttestationCandidates.length > 0 && (
         <section className={styles.successAttestation} aria-labelledby="success-attestation-heading">
           <div>
             <h3 id="success-attestation-heading">Attest scheduled success</h3>
@@ -1329,7 +1329,7 @@ export default function ReadyPostsPanel() {
         </section>
       )}
 
-      {SHOW_LEGACY_EXECUTION_AUDITS && (
+      {READY_POSTS_PANEL_FEATURES.boundedBatchApproval && (
       <section className={styles.batchApproval} aria-labelledby="batch-approval-heading">
         <div className={styles.queueHeading}>
           <div>
@@ -1730,7 +1730,8 @@ export default function ReadyPostsPanel() {
                   </div>
                 )}
 
-                {SHOW_LEGACY_EXECUTION_AUDITS && manualSchedulingCandidate && (
+                {READY_POSTS_PANEL_FEATURES.legacyExecutionAudits &&
+                  manualSchedulingCandidate && (
                   <div className={styles.manualReconciliation}>
                     <div className={styles.manualReconciliationHeading}>
                       <div>

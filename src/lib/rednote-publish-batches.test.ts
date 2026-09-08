@@ -121,6 +121,32 @@ describe('bounded RedNote publish batches', () => {
     expect(untimed).toEqual(before);
   });
 
+  it('freezes the selected Day 16 card as a one-item bootstrap manifest', () => {
+    const now = new Date('2026-08-04T13:00:00.000Z');
+    const day16 = post('2026-08-04T14:00:00.000Z', {
+      id: '16161616-1616-4161-8161-161616161616',
+      headline: 'Day 16',
+    });
+
+    const items = buildBatchItems(
+      [day16],
+      'bootstrap',
+      now,
+      'creator-account-1',
+    );
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      notionPageId: day16.id,
+      dispatchMode: 'scheduled',
+      snapshot: {
+        notionPageId: day16.id,
+        title: 'Day 16',
+        expectedAccountId: 'creator-account-1',
+      },
+    });
+  });
+
   it('never dispatches a publication-confirmed post under a legacy Ready status', () => {
     const now = new Date('2026-08-04T13:00:00.000Z');
     const published = post('2026-08-04T14:00:00.000Z', {
