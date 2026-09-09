@@ -4,6 +4,10 @@ import { LocalPublishJobError } from '@/lib/local-publish-job-input';
 import { normalizeLocalPublishJobError } from '@/lib/local-publish-jobs';
 import { parseRednotePublishJobRecoveryInput } from '@/lib/rednote-publish-job-recovery';
 import { recoverStoredApprovedPublishJob } from '@/lib/rednote-publish-job-recovery-store';
+import type {
+  PublicRednotePublishJobRecovery,
+  RednotePublishJobRecovery,
+} from '@/types/local-publish-job';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -15,6 +19,24 @@ const NO_STORE_HEADERS = {
   'CDN-Cache-Control': 'no-store',
   'Vercel-CDN-Cache-Control': 'no-store',
 };
+
+function publicRecovery(
+  recovery: RednotePublishJobRecovery,
+): PublicRednotePublishJobRecovery {
+  return {
+    id: recovery.id,
+    batchId: recovery.batchId,
+    manifestHash: recovery.manifestHash,
+    itemId: recovery.itemId,
+    jobId: recovery.jobId,
+    itemHash: recovery.itemHash,
+    snapshotRevision: recovery.snapshotRevision,
+    approvedAt: recovery.approvedAt,
+    recoveredAt: recovery.recoveredAt,
+    priorClaimAttempts: recovery.priorClaimAttempts,
+    alreadyRecovered: recovery.alreadyRecovered,
+  };
+}
 
 export async function POST(request: NextRequest) {
   let operator;
@@ -42,7 +64,7 @@ export async function POST(request: NextRequest) {
       operator.email,
     );
     return NextResponse.json(
-      { recovery },
+      { recovery: publicRecovery(recovery) },
       { status: recovery.alreadyRecovered ? 200 : 201, headers: NO_STORE_HEADERS },
     );
   } catch (error) {

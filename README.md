@@ -534,12 +534,22 @@ steps above.
 
 `migrations/010_rednote_publish_job_recoveries.sql` adds the append-only recovery
 audit and `migrations/011_generation_aware_rednote_publish_job_recoveries.sql`
-scopes its uniqueness to each terminal claim generation. This is the only
+scopes its uniqueness to each terminal claim generation.
+`migrations/031_recovery_attempt_generations.sql` adds immutable lineage from
+each recovery audit to its terminal source attempt and fresh approved worker
+attempt generation. Apply migration 031 before deploying code that uses this
+recovery path; a database already through migration 030 needs only migration
+031. The migration does not repair previously recovered jobs by itself. An
+exact replay after the migration and application deploy idempotently creates
+the missing attempt generation for a queue-only recovery audit.
+
+This is the only
 supported recovery for a bounded job that terminal-failed
 with exact error `BOUNDED_BATCH_BYPASS_DISABLED` before staging or dispatch. It
-updates the original `local_publish_jobs` row back to `queued`; it does not create
-a job, replace an item, rebuild or approve a manifest, change the frozen snapshot
-or publish time, or change the original batch approval.
+updates the original `local_publish_jobs` row back to `queued` and creates a
+fresh approved worker attempt while preserving the terminal source attempt. It
+does not create a job, replace an item, rebuild or approve a manifest, change the
+frozen snapshot or publish time, or change the original batch approval.
 
 Use this deployment and operator sequence exactly:
 
@@ -554,24 +564,42 @@ Use this deployment and operator sequence exactly:
      -f migrations/010_rednote_publish_job_recoveries.sql
    psql "$XHS_DATABASE_POSTGRES_URL_NON_POOLING" -v ON_ERROR_STOP=1 \
      -f migrations/011_generation_aware_rednote_publish_job_recoveries.sql
+   psql "$XHS_DATABASE_POSTGRES_URL_NON_POOLING" -v ON_ERROR_STOP=1 \
+     -f migrations/031_recovery_attempt_generations.sql
    ```
 
-3. Deploy the platform release containing the recovery API and UI. Do not rebuild,
-   supersede, or approve a batch and do not create a replacement job.
+3. Deploy the platform release containing the recovery API and UI only after
+   migration 031 succeeds. Do not rebuild, supersede, or approve a batch and do
+   not create a replacement job.
 4. In `/admin`, refresh **Bounded batch approval**. **Eligible pre-dispatch
    recovery** appears only when the approved batch, two-way item/job linkage,
    immutable snapshots, manifest/item hashes, source revision, exact error,
    pre-dispatch null evidence, and absence of alternate ownership still match.
+   For a queue-only recovery audit written before migration 031, Admin rebuilds
+   the exact request from the latest matching audit only when no attempt lineage
+   exists and exactly one approved terminal worker source generation matches.
+   Any currently authenticated authorized Admin may perform that one-time repair.
+   The immutable audit keeps its original actor, while the fresh attempt's
+   append-only `administrative_recovery` event records the current repair
+   operator and identifies the operation as `repair_missing_attempt_lineage`.
+   Mismatched, actor-less, or ambiguous history fails closed, and the action
+   disappears once lineage exists.
 5. Confirm the Day 5 job remains safely queued and do not recover or otherwise
    mutate it. Compare every displayed Vibe Atlas job, batch, item, manifest hash,
    item hash, source revision, and original publish time with the approved change
    record. Select
-   **Confirm exact-job recovery** once for the proven later failure generation and
-   accept the confirmation that no second approval or replacement job is created.
-6. A created response writes one immutable audit row for that claim generation and
-   moves the same job and item to `queued`. An exact repeated request is idempotent
-   only while that job is
-   still safely queued at the latest audited generation. A later recovery is
+   **Repair missing attempt lineage** for an already queued audited recovery, or
+   **Confirm exact-job recovery** once for a proven later failure generation, and
+   accept the confirmation that no second batch approval or replacement job is
+   created. A later failed-generation recovery remains bound to the original
+   recovery actor; only the missing-lineage repair permits a different authorized
+   Admin.
+6. A first recovery writes one immutable audit row. An exact queue-only repair
+   reuses its existing audit instead of writing another. Both create one fresh
+   approved worker attempt generation for that claim generation, supersede the
+   terminal attempt without erasing it, and leave the same job and item
+   `queued`. An exact repeated request is idempotent only while that job is still
+   safely queued at the latest audited generation. A later recovery is
    allowed only after a distinct greater claim attempt has later exact claimed and
    completed timestamps and independently satisfies every original precondition.
    Unchanged generations, changed evidence, or a job claimed by a worker fail closed.
@@ -594,9 +622,12 @@ The authenticated action is
 }
 ```
 
-The action accepts only an allowlisted Cloudflare Access operator. It records that
-operator and the recovery time in `rednote_publish_job_recoveries`. Never call it
-for a different error, after staging/authorization/dispatch/publication evidence,
+The action accepts only an allowlisted Cloudflare Access operator. A new recovery
+records that operator and the recovery time in `rednote_publish_job_recoveries`.
+A queue-only missing-lineage repair never rewrites that immutable provenance; its
+append-only attempt event records the currently authenticated repair operator
+instead. The request and Admin projection never accept or expose an actor field.
+Never call it for a different error, after staging/authorization/dispatch/publication evidence,
 for an unapproved or superseded batch, or while another publish or reconciliation
 lifecycle owns the post. Because an in-flight external reconciliation has no
 canonical page ID until it succeeds, any `processing` external reconciliation

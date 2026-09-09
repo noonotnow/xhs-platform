@@ -45,6 +45,7 @@ const migrationFiles = [
   '028_legacy_ready_x3_batch_fallback_reclassification.sql',
   '029_terminal_expired_batch_claim_reclassification.sql',
   '030_revision_aware_publish_lifecycle.sql',
+  '031_recovery_attempt_generations.sql',
 ] as const;
 
 function stable(value: unknown): string {
@@ -334,7 +335,8 @@ describe('canonical local publishing migration chain', () => {
     const pageId = `recovery-page-${randomUUID()}`;
     const revision = '2026-09-08T16:37:00.000Z';
     const claimedAt = '2026-09-08T19:15:12.818Z';
-    const completedAt = '2026-09-08T20:19:53.817Z';
+    const completedAt = '2026-09-08T20:19:53.817900Z';
+    const terminalAt = '2026-09-08T20:19:53.817400Z';
     const snapshot = {
       notionPageId: pageId,
       headline: 'Recovery guard',
@@ -380,8 +382,8 @@ describe('canonical local publishing migration chain', () => {
          batch_item_id, claim_token, claim_attempts, claimed_at,
          claim_expires_at, completed_at, error_code, error_message
        ) VALUES (
-         $1, $2, $3, $4::jsonb, 'failed', $5, $6, $7, 1, $8,
-         $9, $9, 'BOUNDED_BATCH_BYPASS_DISABLED',
+         $1, $2, $3, $4::jsonb, 'failed', $5, $6, NULL, 1, $7,
+         $8, $8, 'BOUNDED_BATCH_BYPASS_DISABLED',
          'Bounded batch bypass is disabled'
        )`,
       [
@@ -391,10 +393,50 @@ describe('canonical local publishing migration chain', () => {
         JSON.stringify(snapshot),
         randomUUID(),
         itemId,
-        claimToken,
         claimedAt,
         completedAt,
       ],
+    );
+    const attemptId = randomUUID();
+    await database.query(
+      `INSERT INTO rednote_publish_attempts(
+         id, workspace_id, idempotency_key, contract_revision,
+         source_notion_page_id, source_local_publish_job_id,
+         frozen_payload, payload_digest, payload_revision,
+         executor_type, executor_kind, executor_id, target_publish_at,
+         requested_at, approved_at, active, terminal_outcome, terminal_at,
+         receipt_lookup_state, claim_token, claim_expires_at,
+         authorization_kind, late_fallback_policy
+       ) VALUES (
+         $1, $2, $3, 'rednote-publishing/v1', $4, $5, $6::jsonb, $7, $8,
+         'worker', 'playwright', 'worker-recovery', $9,
+         '2026-09-08T17:00:00.000Z', '2026-09-08T17:08:23.346Z',
+         false, 'known_failed', $10, 'not_required', $11, $10,
+         'ready_x3', $12::jsonb
+       )`,
+      [
+        attemptId,
+        workspaceId,
+        randomUUID(),
+        pageId,
+        jobId,
+        JSON.stringify(snapshot),
+        stableDigest(snapshot),
+        revision,
+        snapshot.publishAt,
+        terminalAt,
+        claimToken,
+        JSON.stringify({ action: 'post_now', maxLateMinutes: 30 }),
+      ],
+    );
+    await database.query(
+      `INSERT INTO rednote_publish_attempt_events(
+         attempt_id, event_type, occurred_at, actor_type, actor_id
+       ) VALUES
+         ($1, 'attempt_created', '2026-09-08T17:00:00.000Z', 'create', 'test'),
+         ($1, 'worker_claimed', $2, 'worker', 'worker-recovery'),
+         ($1, 'terminal_outcome_recorded', $3, 'worker', 'worker-recovery')`,
+       [attemptId, claimedAt, terminalAt],
     );
     return {
       actor: 'operator@example.com',
@@ -403,6 +445,7 @@ describe('canonical local publishing migration chain', () => {
         manifestHash,
         itemId,
         jobId,
+        attemptId,
         itemHash,
         snapshotRevision: revision,
       },
@@ -2274,10 +2317,22 @@ describe('canonical local publishing migration chain', () => {
     await expect(database.exec(migration)).resolves.toBeDefined();
   });
 
+  it('can reapply migration 031 without replacing recovery lineage', async () => {
+    const migration = await readFile(
+      path.join(
+        process.cwd(),
+        'migrations',
+        '031_recovery_attempt_generations.sql',
+      ),
+      'utf8',
+    );
+    await expect(database.exec(migration)).resolves.toBeDefined();
+  });
+
   it('selects migration 030 when the recovery blocker signature is missing', async () => {
     const previousSchema = new PGlite();
     try {
-      for (const file of migrationFiles.slice(0, -1)) {
+      for (const file of migrationFiles.slice(0, -2)) {
         const migration = await readFile(
           path.join(process.cwd(), 'migrations', file),
           'utf8',
@@ -2334,6 +2389,8 @@ describe('canonical local publishing migration chain', () => {
           }
           if (statement.includes(
             'CREATE OR REPLACE FUNCTION rednote_publish_revision_is_valid',
+          ) || statement.includes(
+            'CREATE TABLE IF NOT EXISTS rednote_publish_recovery_attempt_generations',
           )) {
             await previousSchema.exec(statement);
             return { rows: [], rowCount: 1 };
@@ -2344,9 +2401,13 @@ describe('canonical local publishing migration chain', () => {
 
       const before = await readRednoteSchemaReadiness(client);
       expect(before['030']).toBe(false);
-      const applied = await applyExpectedRednoteSchemaMigrations(client, ['030']);
-      expect(applied.applied).toEqual(['030']);
+      const applied = await applyExpectedRednoteSchemaMigrations(
+        client,
+        ['030', '031'],
+      );
+      expect(applied.applied).toEqual(['030', '031']);
       expect(applied.after['030']).toBe(true);
+      expect(applied.after['031']).toBe(true);
 
       await previousSchema.exec(`
         DROP FUNCTION rednote_publish_revision_blockers(TEXT, TEXT, TEXT);

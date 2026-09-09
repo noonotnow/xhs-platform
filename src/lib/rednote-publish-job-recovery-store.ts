@@ -57,11 +57,29 @@ interface RecoveryRow extends QueryResultRow {
   recovery_snapshot_revision: string | null;
   recovery_prior_claim_attempts: number | null;
   recovery_prior_claimed_at: Date | string | null;
-  recovery_prior_completed_at: Date | string | null;
+  recovery_prior_completed_at_raw: string | null;
+  recovery_attempt_id: string | null;
 }
 
 interface OwnershipRow extends QueryResultRow {
   active_ownership: boolean;
+}
+
+interface RecoveryAuditRow extends QueryResultRow {
+  id: string;
+  snapshot_revision: string;
+  prior_claim_attempts: number;
+  prior_completed_at_raw: string;
+}
+
+interface RecoveryGenerationRow extends QueryResultRow {
+  source_attempt_id: string;
+  recovery_attempt_id: string;
+  valid: boolean;
+}
+
+interface RecoverySourceAttemptRow extends QueryResultRow {
+  id: string;
 }
 
 interface RequeuedItemRow extends QueryResultRow {
@@ -88,7 +106,7 @@ function audit(row: RecoveryRow): ExistingRecoveryAudit | null {
     !row.recovery_item_hash ||
     !row.recovery_snapshot_revision ||
     row.recovery_prior_claim_attempts === null ||
-    !row.recovery_prior_completed_at
+    !row.recovery_prior_completed_at_raw
   ) {
     return null;
   }
@@ -104,7 +122,7 @@ function audit(row: RecoveryRow): ExistingRecoveryAudit | null {
     recoveredAt: timestamp(row.recovered_at),
     priorClaimAttempts: row.recovery_prior_claim_attempts,
     priorClaimedAt: optionalTimestamp(row.recovery_prior_claimed_at),
-    priorCompletedAt: timestamp(row.recovery_prior_completed_at),
+    priorCompletedAt: timestamp(row.recovery_prior_completed_at_raw),
   };
 }
 
@@ -164,6 +182,199 @@ function result(
     priorClaimAttempts: record.priorClaimAttempts,
     alreadyRecovered,
   };
+}
+
+function recoveryError(
+  message: string,
+  code: 'RECOVERY_PRECONDITION_FAILED' | 'RECOVERY_STATE_CONFLICT',
+) {
+  return new LocalPublishJobError(message, code, 409);
+}
+
+async function ensureRecoveryAttemptGeneration(
+  client: Pick<PoolClient, 'query'>,
+  recovery: RecoveryAuditRow,
+  row: RecoveryRow,
+  {
+    auditRecoveredBy,
+    generationCreatedBy,
+    operation,
+  }: {
+    auditRecoveredBy: string;
+    generationCreatedBy: string;
+    operation: 'recover_failed_job' | 'repair_missing_attempt_lineage';
+  },
+) {
+  const existing = await client.query<RecoveryGenerationRow>(
+    `SELECT generation.source_attempt_id, generation.recovery_attempt_id,
+       (
+         source.superseded_by_attempt_id = replacement.id
+         AND replacement.supersedes_attempt_id = source.id
+         AND replacement.source_local_publish_job_id =
+           recovery.local_publish_job_id
+         AND replacement.workspace_id = source.workspace_id
+         AND replacement.source_notion_page_id = source.source_notion_page_id
+         AND replacement.contract_revision = source.contract_revision
+         AND replacement.frozen_payload = source.frozen_payload
+         AND replacement.payload_digest = source.payload_digest
+         AND replacement.payload_revision = source.payload_revision
+         AND replacement.payload_revision = recovery.snapshot_revision
+         AND replacement.executor_type = source.executor_type
+         AND replacement.executor_kind = source.executor_kind
+         AND replacement.executor_id = source.executor_id
+         AND replacement.target_publish_at IS NOT DISTINCT FROM
+           source.target_publish_at
+         AND replacement.requested_at = source.requested_at
+         AND replacement.approved_at = source.approved_at
+         AND replacement.authorization_kind IS NOT DISTINCT FROM
+           source.authorization_kind
+         AND replacement.late_fallback_policy IS NOT DISTINCT FROM
+           source.late_fallback_policy
+         AND replacement.active
+         AND replacement.approved_at IS NOT NULL
+         AND replacement.terminal_outcome IS NULL
+         AND replacement.receipt_lookup_state = 'pending'
+         AND replacement.claim_token IS NULL
+         AND replacement.claim_expires_at IS NULL
+         AND replacement.dispatch_authorized_at IS NULL
+         AND replacement.worker_run_id IS NULL
+         AND replacement.playwright_run_id IS NULL
+         AND replacement.superseded_by_attempt_id IS NULL
+       ) AS valid
+     FROM rednote_publish_recovery_attempt_generations generation
+     JOIN rednote_publish_job_recoveries recovery
+       ON recovery.id = generation.recovery_id
+     JOIN rednote_publish_attempts source
+       ON source.id = generation.source_attempt_id
+     JOIN rednote_publish_attempts replacement
+       ON replacement.id = generation.recovery_attempt_id
+     WHERE generation.recovery_id = $1::uuid
+     FOR UPDATE OF source, replacement`,
+    [recovery.id],
+  );
+  if (existing.rows[0]) {
+    if (!existing.rows[0].valid) {
+      throw recoveryError(
+        'The audited recovery attempt generation is no longer claimable.',
+        'RECOVERY_STATE_CONFLICT',
+      );
+    }
+    return existing.rows[0].recovery_attempt_id;
+  }
+
+  const sources = await client.query<RecoverySourceAttemptRow>(
+    `SELECT attempt.id
+     FROM rednote_publish_attempts attempt
+     WHERE attempt.workspace_id = $1
+       AND attempt.source_local_publish_job_id = $2::uuid
+       AND attempt.executor_type = 'worker'
+       AND attempt.approved_at IS NOT NULL
+       AND NOT attempt.active
+       AND attempt.terminal_outcome = 'known_failed'
+       AND attempt.terminal_at <= $3::timestamptz
+       AND attempt.receipt_lookup_state = 'not_required'
+       AND attempt.dispatch_authorized_at IS NULL
+       AND attempt.superseded_by_attempt_id IS NULL
+       AND attempt.payload_revision = $4
+     FOR UPDATE`,
+    [
+      row.workspace_id,
+      row.job_id,
+      recovery.prior_completed_at_raw,
+      recovery.snapshot_revision,
+    ],
+  );
+  if (sources.rows.length !== 1) {
+    throw recoveryError(
+      'Recovery requires exactly one approved terminal worker attempt generation.',
+      'RECOVERY_PRECONDITION_FAILED',
+    );
+  }
+  const sourceAttemptId = sources.rows[0].id;
+  const inserted = await client.query<{ id: string }>(
+    `INSERT INTO rednote_publish_attempts (
+       workspace_id, idempotency_key, contract_revision,
+       source_notion_page_id, source_local_publish_job_id,
+       frozen_payload, payload_digest, payload_revision,
+       executor_type, executor_kind, executor_id,
+       worker_run_id, playwright_run_id, target_publish_at, requested_at,
+       approved_at, active, supersedes_attempt_id,
+       authorization_kind, late_fallback_policy
+     )
+     SELECT
+       source.workspace_id, gen_random_uuid(), source.contract_revision,
+       source.source_notion_page_id, source.source_local_publish_job_id,
+       source.frozen_payload, source.payload_digest, source.payload_revision,
+       source.executor_type, source.executor_kind, source.executor_id,
+       NULL, NULL, source.target_publish_at, source.requested_at,
+       source.approved_at, true, source.id,
+       source.authorization_kind, source.late_fallback_policy
+     FROM rednote_publish_attempts source
+     WHERE source.id = $1::uuid
+     RETURNING id`,
+    [sourceAttemptId],
+  );
+  const recoveryAttemptId = inserted.rows[0]?.id;
+  if (!recoveryAttemptId) {
+    throw recoveryError(
+      'The approved recovery attempt generation could not be created.',
+      'RECOVERY_STATE_CONFLICT',
+    );
+  }
+  const superseded = await client.query<{ id: string }>(
+    `UPDATE rednote_publish_attempts
+     SET superseded_by_attempt_id = $1::uuid
+     WHERE id = $2::uuid
+       AND superseded_by_attempt_id IS NULL
+       AND NOT active
+       AND terminal_outcome = 'known_failed'
+       AND receipt_lookup_state = 'not_required'
+       AND dispatch_authorized_at IS NULL
+     RETURNING id`,
+    [recoveryAttemptId, sourceAttemptId],
+  );
+  if (superseded.rows.length !== 1) {
+    throw recoveryError(
+      'The terminal worker attempt changed while recovery was being recorded.',
+      'RECOVERY_STATE_CONFLICT',
+    );
+  }
+  await client.query(
+    `INSERT INTO rednote_publish_recovery_attempt_generations(
+       recovery_id, source_attempt_id, recovery_attempt_id
+     ) VALUES ($1::uuid, $2::uuid, $3::uuid)`,
+    [recovery.id, sourceAttemptId, recoveryAttemptId],
+  );
+  await client.query(
+    `INSERT INTO rednote_publish_attempt_events(
+       attempt_id, event_type, occurred_at, actor_type, actor_id, diagnostics
+     ) VALUES
+       ($1::uuid, 'superseded', CURRENT_TIMESTAMP, 'admin', $3, '{}'::jsonb),
+       (
+         $2::uuid, 'attempt_created', CURRENT_TIMESTAMP, 'admin', $3,
+         '{}'::jsonb
+       ),
+       (
+         $2::uuid, 'administrative_recovery', CURRENT_TIMESTAMP, 'admin', $3,
+         jsonb_build_object(
+           'recoveryId', $4::text,
+           'sourceAttemptId', $1::text,
+           'priorClaimAttempts', $5::integer,
+           'operation', $6::text,
+           'auditRecoveredBy', $7::text
+         )
+       )`,
+    [
+      sourceAttemptId,
+      recoveryAttemptId,
+      generationCreatedBy,
+      recovery.id,
+      recovery.prior_claim_attempts,
+      operation,
+      auditRecoveredBy,
+    ],
+  );
+  return recoveryAttemptId;
 }
 
 export async function recoverStoredApprovedPublishJobTransaction(
@@ -243,7 +454,9 @@ export async function recoverStoredApprovedPublishJobTransaction(
          recovery.snapshot_revision AS recovery_snapshot_revision,
          recovery.prior_claim_attempts AS recovery_prior_claim_attempts,
          recovery.prior_claimed_at AS recovery_prior_claimed_at,
-         recovery.prior_completed_at AS recovery_prior_completed_at
+         recovery.prior_completed_at::text AS
+           recovery_prior_completed_at_raw,
+         generation.recovery_attempt_id
        FROM local_publish_jobs AS job
        JOIN rednote_publish_batch_items AS item ON item.id = job.batch_item_id
        JOIN rednote_publish_batches AS batch ON batch.id = item.batch_id
@@ -254,6 +467,8 @@ export async function recoverStoredApprovedPublishJobTransaction(
          ORDER BY prior_claim_attempts DESC, recovered_at DESC
          LIMIT 1
        ) AS recovery ON TRUE
+       LEFT JOIN rednote_publish_recovery_attempt_generations generation
+         ON generation.recovery_id = recovery.id
        WHERE job.id = $1::uuid
          AND job.success_attestation_id IS NULL
          AND NOT EXISTS (
@@ -283,6 +498,13 @@ export async function recoverStoredApprovedPublishJobTransaction(
         409,
       );
     }
+    const existingAudit = audit(row);
+    if (row.recovery_id && !existingAudit) {
+      throw recoveryError(
+        'The latest immutable recovery audit is incomplete.',
+        'RECOVERY_PRECONDITION_FAILED',
+      );
+    }
     await client.query('LOCK TABLE external_post_reconciliations IN SHARE MODE');
     const ownership = await client.query<OwnershipRow>(
       `SELECT EXISTS (
@@ -293,7 +515,7 @@ export async function recoverStoredApprovedPublishJobTransaction(
            $3,
            $4::uuid,
            $5::uuid,
-           NULL::uuid
+           $6::uuid
          )
        ) AS active_ownership`,
       [
@@ -302,6 +524,7 @@ export async function recoverStoredApprovedPublishJobTransaction(
         row.item_snapshot.notionLastEditedTime,
         row.item_id,
         row.job_id,
+        row.recovery_attempt_id,
       ],
     );
     const action = validateRecoveryCandidate(
@@ -316,8 +539,28 @@ export async function recoverStoredApprovedPublishJobTransaction(
         409,
       );
     }
-    const existingAudit = audit(row);
-    if (action === 'already_recovered' && existingAudit) {
+    if (action === 'repair_missing_attempt_lineage' && existingAudit) {
+      if (!row.recovery_prior_completed_at_raw) {
+        throw recoveryError(
+          'The recovery audit is missing its exact completion timestamp.',
+          'RECOVERY_STATE_CONFLICT',
+        );
+      }
+      await ensureRecoveryAttemptGeneration(
+        client,
+        {
+          id: existingAudit.id,
+          snapshot_revision: existingAudit.snapshotRevision,
+          prior_claim_attempts: existingAudit.priorClaimAttempts,
+          prior_completed_at_raw: row.recovery_prior_completed_at_raw,
+        },
+        row,
+        {
+          auditRecoveredBy: existingAudit.recoveredBy,
+          generationCreatedBy: recoveredBy,
+          operation: 'repair_missing_attempt_lineage',
+        },
+      );
       await client.query('COMMIT');
       return result(existingAudit, row.approved_at, true);
     }
@@ -328,8 +571,7 @@ export async function recoverStoredApprovedPublishJobTransaction(
         409,
       );
     }
-    const inserted = await client.query<{
-      id: string;
+    const inserted = await client.query<RecoveryAuditRow & {
       recovered_at: Date | string;
     }>(
       `INSERT INTO rednote_publish_job_recoveries (
@@ -349,7 +591,8 @@ export async function recoverStoredApprovedPublishJobTransaction(
          $1::uuid, $2::uuid, $3::uuid, $4, $5, $6,
          $7, $8, $9, $10::timestamptz, $11::timestamptz, $12
        )
-       RETURNING id, recovered_at`,
+       RETURNING id, recovered_at, snapshot_revision, prior_claim_attempts,
+         prior_completed_at::text AS prior_completed_at_raw`,
       [
         row.job_id,
         row.item_id,
@@ -364,6 +607,22 @@ export async function recoverStoredApprovedPublishJobTransaction(
         row.completed_at_raw,
         recoveredBy,
       ],
+    );
+    if (!inserted.rows[0]) {
+      throw recoveryError(
+        'The recovery audit could not be recorded.',
+        'RECOVERY_STATE_CONFLICT',
+      );
+    }
+    await ensureRecoveryAttemptGeneration(
+      client,
+      inserted.rows[0],
+      row,
+      {
+        auditRecoveredBy: recoveredBy,
+        generationCreatedBy: recoveredBy,
+        operation: 'recover_failed_job',
+      },
     );
     const updated = await client.query(
       `UPDATE local_publish_jobs
@@ -395,7 +654,7 @@ export async function recoverStoredApprovedPublishJobTransaction(
         row.job_error_message,
       ],
     );
-    if (updated.rowCount !== 1 || !inserted.rows[0]) {
+    if (updated.rowCount !== 1) {
       throw new LocalPublishJobError(
         'The publish job changed before recovery could be committed.',
         'RECOVERY_PRECONDITION_FAILED',

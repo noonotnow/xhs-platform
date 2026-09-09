@@ -8,9 +8,9 @@ import type {
   ManualSchedulingAttestationEvidence,
   ManualReconciliationSummary,
   OperatorSuccessAttestationEvidence,
+  PublicRednotePublishJobRecovery,
   PublishBatch,
   PublishBatchItemState,
-  RednotePublishJobRecovery,
   RednotePublishJobRecoveryEvidence,
 } from '@/types/local-publish-job';
 import type { ReadyXhsPost, ReadyXhsPostsResponse } from '@/types/ready-post';
@@ -69,7 +69,7 @@ interface PublishBatchesResponse extends ApiError {
 type LocalJobsResponse = ApiError & Record<string, unknown>;
 
 interface PublishJobRecoveryResponse extends ApiError {
-  recovery: RednotePublishJobRecovery;
+  recovery: PublicRednotePublishJobRecovery;
 }
 
 function manualPublicPostError(value: string) {
@@ -790,11 +790,13 @@ export default function ReadyPostsPanel({ workspaceId }: { workspaceId: string }
   async function recoverApprovedJob(
     evidence: RednotePublishJobRecoveryEvidence,
     title: string,
+    repairMissingAttemptLineage = false,
   ) {
     const fixedHydrationFailure =
       evidence.priorErrorCode === 'AMBIGUOUS_CREATOR_UI';
     const confirmed = window.confirm(
-      `Requeue the exact already-approved job for "${title}"?\n\n` +
+      `${repairMissingAttemptLineage ? 'Repair attempt lineage for' : 'Recover'} ` +
+      `the exact already-approved job for "${title}"?\n\n` +
       (fixedHydrationFailure
         ? 'Fixed failure: image-mode pre-staging hydration could not uniquely identify the upload mode.\n'
         : '') +
@@ -809,7 +811,14 @@ export default function ReadyPostsPanel({ workspaceId }: { workspaceId: string }
         ? `Latest audited generation ${evidence.latestAuditedClaimAttempts}\n\n`
         : '\n') +
       'This preserves the same job, frozen snapshot, hashes, publish time, and original approval. ' +
-      'It does not approve again or create a replacement job.',
+      'It creates one fresh approved worker attempt generation without approving again or ' +
+      'creating a replacement local job. ' +
+      (repairMissingAttemptLineage
+        ? 'The immutable original recovery audit and its actor remain unchanged; ' +
+          'the currently authenticated Admin is recorded separately as the lineage repair operator.'
+        : evidence.latestAuditedClaimAttempts !== null
+          ? 'This later failed-generation recovery remains bound to the original recovery identity.'
+          : ''),
     );
     if (!confirmed) return;
     setRecoveryBusyJobId(evidence.jobId);
@@ -1493,11 +1502,14 @@ export default function ReadyPostsPanel({ workspaceId }: { workspaceId: string }
           <div key={`recovery-${batch.id}`} className={styles.recoveryBatch}>
             <strong>Eligible pre-dispatch recovery</strong>
             <p>
-              These exact jobs failed before staging because bounded-batch bypass was disabled
-              or a now-fixed image-mode hydration check could not uniquely identify upload mode.
-              Recovery requeues the existing approved row with no second approval and no
-              replacement job. The fixed hydration failure is eligible only as a proven,
-              immediately later terminal claim generation.
+              These exact jobs either remain failed before staging or were already requeued by
+              an audited recovery that still lacks its fresh attempt lineage. Recovery preserves
+              the approved job and creates one fresh approved worker attempt generation with no
+              second approval or replacement local job. The fixed hydration failure is eligible
+              only as a proven, immediately later terminal claim generation. Any currently
+              authenticated authorized Admin may complete a missing-lineage repair; the original
+              audit actor is preserved and the repair operator is recorded separately. A later
+              failed-generation recovery remains bound to the original recovery identity.
             </p>
             <small>
               Original approval: {batch.approvedAt
@@ -1541,11 +1553,16 @@ export default function ReadyPostsPanel({ workspaceId }: { workspaceId: string }
                     onClick={() => void recoverApprovedJob(
                       item.recoveryEvidence!,
                       item.snapshot.title,
+                      item.state === 'queued',
                     )}
                   >
                     {recoveryBusyJobId === item.recoveryEvidence.jobId
-                      ? 'Requeueing exact job…'
-                      : 'Confirm exact-job recovery'}
+                      ? item.state === 'queued'
+                        ? 'Repairing attempt lineage…'
+                        : 'Requeueing exact job…'
+                      : item.state === 'queued'
+                        ? 'Repair missing attempt lineage'
+                        : 'Confirm exact-job recovery'}
                   </button>
                 </li>
               )] : [])}

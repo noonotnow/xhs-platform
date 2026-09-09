@@ -256,6 +256,20 @@ export interface RednotePublishJobRecovery
   alreadyRecovered: boolean;
 }
 
+export interface PublicRednotePublishJobRecovery {
+  id: string;
+  batchId: string;
+  manifestHash: string;
+  itemId: string;
+  jobId: string;
+  itemHash: string;
+  snapshotRevision: string;
+  approvedAt: string;
+  recoveredAt: string;
+  priorClaimAttempts: number;
+  alreadyRecovered: boolean;
+}
+
 export interface PublishBatchBlockedCandidate {
   notionPageId: string;
   headline: string;

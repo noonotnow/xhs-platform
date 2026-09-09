@@ -61,6 +61,7 @@ interface ItemRow extends QueryResultRow {
   recovery_job_snapshot?: LocalPublishSnapshot | null;
   recovery_claim_attempts?: number | null;
   recovery_claimed_at?: Date | string | null;
+  recovery_claim_expires_at?: Date | string | null;
   recovery_completed_at?: Date | string | null;
   recovery_staged_at?: Date | string | null;
   recovery_dispatch_authorized_at?: Date | string | null;
@@ -77,9 +78,14 @@ interface ItemRow extends QueryResultRow {
   recovery_audit_item_id?: string | null;
   recovery_audit_item_hash?: string | null;
   recovery_audit_snapshot_revision?: string | null;
+  recovery_audit_error_code?: string | null;
+  recovery_audit_error_message?: string | null;
   recovery_audit_claim_attempts?: number | null;
   recovery_audit_completed_at?: Date | string | null;
   recovery_audit_recovered_at?: Date | string | null;
+  recovery_audit_actor_available?: boolean;
+  recovery_has_attempt_generation?: boolean;
+  recovery_source_attempt_count?: number | null;
   recovery_no_active_ownership?: boolean;
 }
 
@@ -142,7 +148,8 @@ function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
     row.recovery_audit_manifest_hash === batch.manifest_hash &&
     row.recovery_audit_item_id === row.id &&
     row.recovery_audit_item_hash === row.item_hash &&
-    row.recovery_audit_snapshot_revision === row.snapshot.notionLastEditedTime
+    row.recovery_audit_snapshot_revision === row.snapshot.notionLastEditedTime &&
+    row.recovery_audit_actor_available === true
   );
   const laterClaimGeneration = Boolean(
     row.recovery_claim_attempts !== null &&
@@ -172,7 +179,7 @@ function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
   )
     ? row.recovery_job_error_code as RecoverableRednotePublishJobError
     : null;
-  const recoveryEligible = Boolean(
+  const failedRecoveryEligible = Boolean(
     batch?.status === 'approved' &&
     batch.approved_at &&
     row.state === 'failed' &&
@@ -197,6 +204,56 @@ function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
     (firstRecovery || distinctRefailure) &&
     row.recovery_no_active_ownership === true
   );
+  const queuedRepairError = (
+    matchingAuditEvidence &&
+    (
+      row.recovery_audit_error_code === RECOVERABLE_BOUNDED_BATCH_ERROR ||
+      (
+        row.recovery_audit_error_code === RECOVERABLE_AMBIGUOUS_CREATOR_ERROR &&
+        row.recovery_audit_error_message === RECOVERABLE_AMBIGUOUS_CREATOR_MESSAGE
+      )
+    )
+  )
+    ? row.recovery_audit_error_code as RecoverableRednotePublishJobError
+    : null;
+  const queuedRepairEligible = Boolean(
+    batch?.status === 'approved' &&
+    batch.approved_at &&
+    row.state === 'queued' &&
+    row.local_publish_job_id &&
+    row.recovery_job_id === row.local_publish_job_id &&
+    row.recovery_job_status === 'queued' &&
+    !row.recovery_job_error_code &&
+    !row.recovery_job_error_message &&
+    row.recovery_job_snapshot &&
+    row.recovery_claim_attempts !== null &&
+    row.recovery_claim_attempts !== undefined &&
+    row.recovery_claim_attempts === row.recovery_audit_claim_attempts &&
+    !row.recovery_claimed_at &&
+    !row.recovery_claim_expires_at &&
+    !row.recovery_completed_at &&
+    isDeepStrictEqual(row.snapshot, row.recovery_job_snapshot) &&
+    row.snapshot.notionLastEditedTime ===
+      row.recovery_job_snapshot.notionLastEditedTime &&
+    !row.recovery_staged_at &&
+    !row.recovery_dispatch_authorized_at &&
+    !row.recovery_dispatched_at &&
+    !row.recovery_note_id &&
+    !row.recovery_share_url &&
+    !row.recovery_next_verification_at &&
+    !row.recovery_verified_at &&
+    !row.recovery_reconciled_at &&
+    row.recovery_verification_attempts === 0 &&
+    queuedRepairError &&
+    row.recovery_has_attempt_generation === false &&
+    row.recovery_source_attempt_count === 1 &&
+    row.recovery_no_active_ownership === true
+  );
+  const recoveryEligible = failedRecoveryEligible || queuedRepairEligible;
+  const projectedError = queuedRepairEligible ? queuedRepairError : recoverableError;
+  const projectedClaimAttempts = queuedRepairEligible
+    ? row.recovery_audit_claim_attempts
+    : row.recovery_claim_attempts;
   return {
     id: row.id,
     notionPageId: row.notion_page_id,
@@ -216,8 +273,8 @@ function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
             jobId: row.recovery_job_id!,
             itemHash: row.item_hash,
             snapshotRevision: row.snapshot.notionLastEditedTime,
-            priorErrorCode: recoverableError!,
-            claimAttempts: row.recovery_claim_attempts!,
+            priorErrorCode: projectedError!,
+            claimAttempts: projectedClaimAttempts!,
             ...(row.recovery_audit_claim_attempts !== null &&
                 row.recovery_audit_claim_attempts !== undefined
               ? { latestAuditedClaimAttempts: row.recovery_audit_claim_attempts }
@@ -443,6 +500,7 @@ export async function listStoredPublishBatches(workspaceId: string, batchId?: st
         job.snapshot AS recovery_job_snapshot,
         job.claim_attempts AS recovery_claim_attempts,
         job.claimed_at AS recovery_claimed_at,
+        job.claim_expires_at AS recovery_claim_expires_at,
         job.completed_at AS recovery_completed_at,
         job.staged_at AS recovery_staged_at,
         job.dispatch_authorized_at AS recovery_dispatch_authorized_at,
@@ -459,9 +517,17 @@ export async function listStoredPublishBatches(workspaceId: string, batchId?: st
         recovery.batch_item_id AS recovery_audit_item_id,
         recovery.item_hash AS recovery_audit_item_hash,
         recovery.snapshot_revision AS recovery_audit_snapshot_revision,
+        recovery.prior_error_code AS recovery_audit_error_code,
+        recovery.prior_error_message AS recovery_audit_error_message,
         recovery.prior_claim_attempts AS recovery_audit_claim_attempts,
         recovery.prior_completed_at AS recovery_audit_completed_at,
         recovery.recovered_at AS recovery_audit_recovered_at,
+        COALESCE(
+          char_length(btrim(recovery.recovered_by)) BETWEEN 1 AND 320,
+          false
+        ) AS recovery_audit_actor_available,
+        generation.recovery_id IS NOT NULL AS recovery_has_attempt_generation,
+        source_attempts.source_count AS recovery_source_attempt_count,
         NOT EXISTS (
           SELECT 1
           FROM rednote_publish_revision_blockers(
@@ -474,7 +540,9 @@ export async function listStoredPublishBatches(workspaceId: string, batchId?: st
           )
         ) AS recovery_no_active_ownership
       FROM rednote_publish_batch_items AS item
-      LEFT JOIN local_publish_jobs AS job ON job.id = item.local_publish_job_id
+      LEFT JOIN local_publish_jobs AS job
+        ON job.id = item.local_publish_job_id
+       AND job.workspace_id = item.workspace_id
       LEFT JOIN LATERAL (
         SELECT *
         FROM rednote_publish_job_recoveries
@@ -482,6 +550,23 @@ export async function listStoredPublishBatches(workspaceId: string, batchId?: st
         ORDER BY prior_claim_attempts DESC, recovered_at DESC
         LIMIT 1
       ) AS recovery ON TRUE
+      LEFT JOIN rednote_publish_recovery_attempt_generations AS generation
+        ON generation.recovery_id = recovery.id
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*)::integer AS source_count
+        FROM rednote_publish_attempts AS source
+        WHERE source.workspace_id = item.workspace_id
+          AND source.source_local_publish_job_id = job.id
+          AND source.executor_type = 'worker'
+          AND source.approved_at IS NOT NULL
+          AND NOT source.active
+          AND source.terminal_outcome = 'known_failed'
+          AND source.terminal_at <= recovery.prior_completed_at
+          AND source.receipt_lookup_state = 'not_required'
+          AND source.dispatch_authorized_at IS NULL
+          AND source.superseded_by_attempt_id IS NULL
+          AND source.payload_revision = recovery.snapshot_revision
+      ) AS source_attempts ON TRUE
       WHERE item.batch_id = ${batch.id}::uuid
         AND item.workspace_id = ${workspaceId}
       ORDER BY item.snapshot->>'publishAt' NULLS FIRST, item.created_at
