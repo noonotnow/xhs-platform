@@ -575,6 +575,11 @@ Use this deployment and operator sequence exactly:
    recovery** appears only when the approved batch, two-way item/job linkage,
    immutable snapshots, manifest/item hashes, source revision, exact error,
    pre-dispatch null evidence, and absence of alternate ownership still match.
+   For a queue-only recovery audit written before migration 031, Admin rebuilds
+   the exact request from the latest matching audit only when no attempt lineage
+   exists and exactly one approved terminal worker source generation matches.
+   Mismatched or ambiguous history fails closed, and the action disappears once
+   lineage exists.
 5. Confirm the Day 5 job remains safely queued and do not recover or otherwise
    mutate it. Compare every displayed Vibe Atlas job, batch, item, manifest hash,
    item hash, source revision, and original publish time with the approved change
@@ -582,11 +587,12 @@ Use this deployment and operator sequence exactly:
    **Confirm exact-job recovery** once for the proven later failure generation and
    accept the confirmation that no second batch approval or replacement job is
    created.
-6. A created response writes one immutable audit row and one fresh approved
-   worker attempt generation for that claim generation, supersedes the terminal
-   attempt without erasing it, and moves the same job and item to `queued`. An
-   exact repeated request is idempotent only while that job is still safely
-   queued at the latest audited generation. A later recovery is
+6. A first recovery writes one immutable audit row. An exact queue-only repair
+   reuses its existing audit instead of writing another. Both create one fresh
+   approved worker attempt generation for that claim generation, supersede the
+   terminal attempt without erasing it, and leave the same job and item
+   `queued`. An exact repeated request is idempotent only while that job is still
+   safely queued at the latest audited generation. A later recovery is
    allowed only after a distinct greater claim attempt has later exact claimed and
    completed timestamps and independently satisfies every original precondition.
    Unchanged generations, changed evidence, or a job claimed by a worker fail closed.

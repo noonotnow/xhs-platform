@@ -524,5 +524,9 @@ describe('stored RedNote bootstrap replacement', () => {
     expect(itemQuery).toContain('LEFT JOIN LATERAL');
     expect(itemQuery).toContain('ORDER BY prior_claim_attempts DESC, recovered_at DESC');
     expect(itemQuery).toContain('job.error_message AS recovery_job_error_message');
+    expect(itemQuery).toContain('job.workspace_id = item.workspace_id');
+    expect(itemQuery).toContain('generation.recovery_id IS NOT NULL');
+    expect(itemQuery).toContain('COUNT(*)::integer AS source_count');
+    expect(itemQuery).toContain('source.payload_revision = recovery.snapshot_revision');
   });
 });

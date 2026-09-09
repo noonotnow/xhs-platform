@@ -56,6 +56,7 @@ import {
   PublishJobRecoveryError,
   recoverStoredApprovedPublishJob,
 } from '@/lib/rednote-publish-job-recovery-store';
+import { listStoredPublishBatches } from '@/lib/rednote-publish-batch-store';
 import { readRednotePublishingOperational } from '@/lib/rednote-publishing-attempt-store';
 
 const MIGRATIONS = [
@@ -287,6 +288,61 @@ async function insertRecoverableFixture({
       snapshotRevision: revision,
     },
   };
+}
+
+async function insertQueueOnlyRecoveryAudit(
+  fixture: RecoveryFixture,
+  {
+    manifestHash = EXACT_MANIFEST,
+    itemHash = ITEM_HASH,
+    snapshotRevision = fixture.input.snapshotRevision,
+  }: {
+    manifestHash?: string;
+    itemHash?: string;
+    snapshotRevision?: string;
+  } = {},
+) {
+  const recoveredAt = new Date().toISOString();
+  const inserted = await database.query<{ id: string }>(
+    `INSERT INTO rednote_publish_job_recoveries (
+      local_publish_job_id, batch_id, batch_item_id, manifest_hash,
+      item_hash, snapshot_revision, prior_error_code,
+      prior_error_message, prior_claim_attempts, prior_claimed_at,
+      prior_completed_at, recovered_by, recovered_at
+    ) VALUES (
+      $1, $2, $3, $4, $5, $6,
+      'BOUNDED_BATCH_BYPASS_DISABLED', 'bounded batch enforcement',
+      1, $7, $8, $9, $10
+    )
+    RETURNING id`,
+    [
+      fixture.jobId,
+      fixture.batchId,
+      fixture.batchItemId,
+      manifestHash,
+      itemHash,
+      snapshotRevision,
+      fixture.claimedAt,
+      fixture.completedAt,
+      RECOVERED_BY,
+      recoveredAt,
+    ],
+  );
+  await database.query(
+    `UPDATE local_publish_jobs
+     SET status = 'queued', claim_token = NULL, claimed_at = NULL,
+         claim_expires_at = NULL, completed_at = NULL,
+         error_code = NULL, error_message = NULL, updated_at = $2
+     WHERE id = $1`,
+    [fixture.jobId, recoveredAt],
+  );
+  await database.query(
+    `UPDATE rednote_publish_batch_items
+     SET state = 'queued', updated_at = $2
+     WHERE id = $1`,
+    [fixture.batchItemId, recoveredAt],
+  );
+  return inserted.rows[0]!.id;
 }
 
 async function countRows(table: string, where = '', params: unknown[] = []) {
@@ -614,45 +670,26 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
 
   it('repairs a pre-031 queue-only recovery audit without creating duplicates', async () => {
     const fixture = await insertRecoverableFixture();
-    const now = new Date().toISOString();
-    await database.query(
-      `INSERT INTO rednote_publish_job_recoveries (
-        local_publish_job_id, batch_id, batch_item_id, manifest_hash,
-        item_hash, snapshot_revision, prior_error_code,
-        prior_error_message, prior_claim_attempts, prior_claimed_at,
-        prior_completed_at, recovered_by, recovered_at
-      ) VALUES (
-        $1, $2, $3, $4, $5, $6,
-        'BOUNDED_BATCH_BYPASS_DISABLED', 'bounded batch enforcement',
-        1, $7, $8, $9, $10
-      )`,
-      [
-        fixture.jobId,
-        fixture.batchId,
-        fixture.batchItemId,
-        EXACT_MANIFEST,
-        ITEM_HASH,
-        fixture.input.snapshotRevision,
-        fixture.claimedAt,
-        fixture.completedAt,
-        RECOVERED_BY,
-        now,
-      ],
+    await insertQueueOnlyRecoveryAudit(fixture);
+
+    const before = await listStoredPublishBatches(
+      fixture.workspaceId,
+      fixture.batchId,
     );
-    await database.query(
-      `UPDATE local_publish_jobs
-       SET status = 'queued', claim_token = NULL, claimed_at = NULL,
-           claim_expires_at = NULL, completed_at = NULL,
-           error_code = NULL, error_message = NULL, updated_at = $2
-       WHERE id = $1`,
-      [fixture.jobId, now],
-    );
-    await database.query(
-      `UPDATE rednote_publish_batch_items
-       SET state = 'queued', updated_at = $2
-       WHERE id = $1`,
-      [fixture.batchItemId, now],
-    );
+    expect(before).toHaveLength(1);
+    expect(before[0].items).toHaveLength(1);
+    expect(before[0].items[0].recoveryEvidence).toEqual({
+      ...fixture.input,
+      priorErrorCode: 'BOUNDED_BATCH_BYPASS_DISABLED',
+      claimAttempts: 1,
+      latestAuditedClaimAttempts: 1,
+    });
+    expect(before.flatMap(({ items }) => items)
+      .filter(({ recoveryEvidence }) => recoveryEvidence)).toHaveLength(1);
+    await expect(listStoredPublishBatches(
+      'wrong-workspace',
+      fixture.batchId,
+    )).resolves.toEqual([]);
 
     await expect(recoverStoredApprovedPublishJob(
       fixture.input,
@@ -677,6 +714,110 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
       'WHERE source_attempt_id = $1',
       [fixture.sourceAttemptId],
     )).toBe(1);
+    const after = await listStoredPublishBatches(
+      fixture.workspaceId,
+      fixture.batchId,
+    );
+    expect(after[0].items[0].recoveryEvidence).toBeUndefined();
+    await expect(recoverStoredApprovedPublishJob(
+      fixture.input,
+      RECOVERED_BY,
+    )).resolves.toMatchObject({
+      alreadyRecovered: true,
+    });
+    expect((await listStoredPublishBatches(
+      fixture.workspaceId,
+      fixture.batchId,
+    ))[0].items[0].recoveryEvidence).toBeUndefined();
+  });
+
+  it('hides queued repair actions for mismatched or ambiguous source lineage', async () => {
+    const mismatchedAudit = await insertRecoverableFixture();
+    await insertQueueOnlyRecoveryAudit(mismatchedAudit, {
+      manifestHash: 'd'.repeat(64),
+    });
+    expect((await listStoredPublishBatches(
+      mismatchedAudit.workspaceId,
+      mismatchedAudit.batchId,
+    ))[0].items[0].recoveryEvidence).toBeUndefined();
+
+    const zero = await insertRecoverableFixture({ approvedSource: false });
+    await insertQueueOnlyRecoveryAudit(zero);
+    expect((await listStoredPublishBatches(
+      zero.workspaceId,
+      zero.batchId,
+    ))[0].items[0].recoveryEvidence).toBeUndefined();
+
+    const multiple = await insertRecoverableFixture();
+    await database.query(
+      `INSERT INTO rednote_publish_attempts (
+        id, workspace_id, idempotency_key, contract_revision,
+        source_notion_page_id, source_local_publish_job_id,
+        frozen_payload, payload_digest, payload_revision,
+        executor_type, executor_kind, executor_id, target_publish_at,
+        requested_at, terminal_outcome, terminal_at, receipt_lookup_state,
+        receipt_lookup_updated_at, active, diagnostics, approved_at,
+        authorization_kind, late_fallback_policy, claim_token
+      )
+      SELECT
+        $1, workspace_id, gen_random_uuid(), contract_revision,
+        source_notion_page_id, source_local_publish_job_id,
+        frozen_payload, payload_digest, payload_revision,
+        executor_type, executor_kind, executor_id, target_publish_at,
+        requested_at, terminal_outcome, terminal_at, receipt_lookup_state,
+        receipt_lookup_updated_at, active, '{"second":true}'::jsonb, approved_at,
+        authorization_kind, late_fallback_policy, claim_token
+      FROM rednote_publish_attempts WHERE id = $2`,
+      [crypto.randomUUID(), multiple.sourceAttemptId],
+    );
+    await insertQueueOnlyRecoveryAudit(multiple);
+    const projected = await listStoredPublishBatches(
+      multiple.workspaceId,
+      multiple.batchId,
+    );
+    expect(projected).toHaveLength(1);
+    expect(projected[0].items).toHaveLength(1);
+    expect(projected[0].items[0].recoveryEvidence).toBeUndefined();
+  });
+
+  it('keeps the queued repair action visible when lineage creation rolls back', async () => {
+    const fixture = await insertRecoverableFixture();
+    await insertQueueOnlyRecoveryAudit(fixture);
+    failQueryContaining = 'INSERT INTO rednote_publish_attempt_events';
+
+    await expect(recoverStoredApprovedPublishJob(
+      fixture.input,
+      RECOVERED_BY,
+    )).rejects.toThrow('forced recovery transaction failure');
+    failQueryContaining = null;
+
+    expect(await countRows(
+      'rednote_publish_attempts',
+      'WHERE source_local_publish_job_id = $1',
+      [fixture.jobId],
+    )).toBe(1);
+    expect(await countRows(
+      'rednote_publish_recovery_attempt_generations',
+      'WHERE source_attempt_id = $1',
+      [fixture.sourceAttemptId],
+    )).toBe(0);
+    const source = await database.query<{
+      superseded_by_attempt_id: string | null;
+    }>(
+      `SELECT superseded_by_attempt_id
+       FROM rednote_publish_attempts WHERE id = $1`,
+      [fixture.sourceAttemptId],
+    );
+    expect(source.rows).toEqual([{ superseded_by_attempt_id: null }]);
+    expect((await listStoredPublishBatches(
+      fixture.workspaceId,
+      fixture.batchId,
+    ))[0].items[0].recoveryEvidence).toEqual({
+      ...fixture.input,
+      priorErrorCode: 'BOUNDED_BATCH_BYPASS_DISABLED',
+      claimAttempts: 1,
+      latestAuditedClaimAttempts: 1,
+    });
   });
 
   it('fails closed for zero and multiple lifecycle sources without cardinality errors', async () => {
