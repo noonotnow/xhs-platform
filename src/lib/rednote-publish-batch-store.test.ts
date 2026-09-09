@@ -391,6 +391,7 @@ describe('stored RedNote bootstrap replacement', () => {
       recovery_audit_claim_attempts: null,
       recovery_audit_completed_at: null,
       recovery_audit_recovered_at: null,
+      recovery_audit_actor_available: false,
       recovery_no_active_ownership: true,
     };
     mocks.sql
@@ -427,6 +428,7 @@ describe('stored RedNote bootstrap replacement', () => {
           recovery_audit_item_id: itemId,
           recovery_audit_item_hash: hash,
           recovery_audit_snapshot_revision: snapshot.notionLastEditedTime,
+          recovery_audit_actor_available: true,
           recovery_audit_claim_attempts: 2,
           recovery_audit_completed_at: '2026-08-04T18:35:28.151762Z',
           recovery_audit_recovered_at: '2026-08-04T18:40:00.000Z',
@@ -461,6 +463,7 @@ describe('stored RedNote bootstrap replacement', () => {
           recovery_audit_item_id: itemId,
           recovery_audit_item_hash: hash,
           recovery_audit_snapshot_revision: snapshot.notionLastEditedTime,
+          recovery_audit_actor_available: true,
         }],
       });
     const alreadyAudited = await listStoredPublishBatches('workspace-1', batchId);
@@ -480,6 +483,7 @@ describe('stored RedNote bootstrap replacement', () => {
           recovery_audit_item_id: itemId,
           recovery_audit_item_hash: hash,
           recovery_audit_snapshot_revision: snapshot.notionLastEditedTime,
+          recovery_audit_actor_available: true,
           recovery_audit_claim_attempts: 1,
           recovery_audit_completed_at: '2026-08-04T17:04:33.963Z',
           recovery_audit_recovered_at: '2026-08-04T17:30:00.000Z',
@@ -510,6 +514,7 @@ describe('stored RedNote bootstrap replacement', () => {
           recovery_audit_item_id: itemId,
           recovery_audit_item_hash: hash,
           recovery_audit_snapshot_revision: snapshot.notionLastEditedTime,
+          recovery_audit_actor_available: true,
           recovery_audit_claim_attempts: 2,
           recovery_audit_completed_at: '2026-08-04T18:35:28.151762Z',
           recovery_audit_recovered_at: '2026-08-04T18:40:00.000Z',
@@ -517,6 +522,46 @@ describe('stored RedNote bootstrap replacement', () => {
       });
     const changedAudit = await listStoredPublishBatches('workspace-1', batchId);
     expect(changedAudit[0].items[0].recoveryEvidence).toBeUndefined();
+
+    const queuedAudit = {
+      ...item,
+      state: 'queued',
+      recovery_job_status: 'queued',
+      recovery_job_error_code: null,
+      recovery_job_error_message: null,
+      recovery_claimed_at: null,
+      recovery_completed_at: null,
+      recovery_audit_id: '66666666-6666-4666-8666-666666666666',
+      recovery_audit_batch_id: batchId,
+      recovery_audit_manifest_hash: hash,
+      recovery_audit_item_id: itemId,
+      recovery_audit_item_hash: hash,
+      recovery_audit_snapshot_revision: snapshot.notionLastEditedTime,
+      recovery_audit_error_code: 'BOUNDED_BATCH_BYPASS_DISABLED',
+      recovery_audit_error_message: 'Worker bypass is disabled',
+      recovery_audit_claim_attempts: 1,
+      recovery_audit_actor_available: true,
+      recovery_has_attempt_generation: false,
+      recovery_source_attempt_count: 1,
+    };
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [batchRow(batchId, 'approved', hash)] })
+      .mockResolvedValueOnce({ rows: [queuedAudit] });
+    const queued = await listStoredPublishBatches('workspace-1', batchId);
+    expect(queued[0].items[0].recoveryEvidence).toMatchObject({
+      jobId,
+      claimAttempts: 1,
+      latestAuditedClaimAttempts: 1,
+    });
+    expect(queued[0].items[0].recoveryEvidence).not.toHaveProperty('recoveredBy');
+
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [batchRow(batchId, 'approved', hash)] })
+      .mockResolvedValueOnce({
+        rows: [{ ...queuedAudit, recovery_audit_actor_available: false }],
+      });
+    const actorlessAudit = await listStoredPublishBatches('workspace-1', batchId);
+    expect(actorlessAudit[0].items[0].recoveryEvidence).toBeUndefined();
 
     const itemQuery = mocks.sql.mock.calls
       .map(([strings]) => Array.isArray(strings) ? strings.join('') : String(strings))
@@ -528,5 +573,7 @@ describe('stored RedNote bootstrap replacement', () => {
     expect(itemQuery).toContain('generation.recovery_id IS NOT NULL');
     expect(itemQuery).toContain('COUNT(*)::integer AS source_count');
     expect(itemQuery).toContain('source.payload_revision = recovery.snapshot_revision');
+    expect(itemQuery).toContain('btrim(recovery.recovered_by)');
+    expect(itemQuery).not.toContain('recovery.recovered_by AS');
   });
 });

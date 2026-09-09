@@ -43,7 +43,7 @@ const snapshot = {
   notionLastEditedTime: input.snapshotRevision,
 };
 
-function row(recovered = false, generation = 1) {
+function row(recovered = false, generation = 1, recoveredBy = actor) {
   return {
     batch_id: input.batchId,
     batch_status: 'approved',
@@ -80,7 +80,7 @@ function row(recovered = false, generation = 1) {
     verified_at: null,
     reconciled_at: null,
     recovery_id: recovered ? recoveryId : null,
-    recovered_by: recovered ? actor : null,
+    recovered_by: recovered ? recoveredBy : null,
     recovered_at: recovered ? '2026-08-04T17:30:00.000Z' : null,
     recovery_batch_id: recovered ? input.batchId : null,
     recovery_manifest_hash: recovered ? input.manifestHash : null,
@@ -391,6 +391,78 @@ describe('stored approved publish job recovery', () => {
     expect(statements.some((value) => value.startsWith('INSERT'))).toBe(false);
     expect(statements.some((value) => value.startsWith('UPDATE'))).toBe(false);
     expect(statements).toContain('COMMIT');
+  });
+
+  it('attributes a missing-lineage repair to the current actor without rewriting the audit', async () => {
+    const originalActor = 'original@example.com';
+    const repairActor = 'repairer@example.com';
+    mocks.query.mockImplementation(async (statement: string) => {
+      if (statement.includes('SELECT workspace_id, notion_page_id')) {
+        return { rows: [{
+          workspace_id: row().workspace_id,
+          notion_page_id: row().notion_page_id,
+        }] };
+      }
+      if (statement.includes('FROM local_publish_jobs AS job')) {
+        return {
+          rows: [{
+            ...row(true, 1, originalActor),
+            recovery_attempt_id: null,
+          }],
+        };
+      }
+      if (statement.includes('AS active_ownership')) {
+        return { rows: [{ active_ownership: false }] };
+      }
+      const generation = generationResponse(statement);
+      if (generation) return generation;
+      return { rows: [], rowCount: 1 };
+    });
+
+    await expect(recoverStoredApprovedPublishJob(input, repairActor))
+      .resolves.toMatchObject({
+        id: recoveryId,
+        recoveredBy: originalActor,
+        alreadyRecovered: true,
+      });
+    const auditInsert = mocks.query.mock.calls.find(([statement]) =>
+      String(statement).includes('INSERT INTO rednote_publish_job_recoveries'));
+    expect(auditInsert).toBeUndefined();
+    const eventCall = mocks.query.mock.calls.find(([statement]) =>
+      String(statement).includes('INSERT INTO rednote_publish_attempt_events'));
+    expect(String(eventCall?.[0])).toContain("'operation', $6::text");
+    expect(String(eventCall?.[0])).toContain("'auditRecoveredBy', $7::text");
+    expect(eventCall?.[1]).toEqual([
+      sourceAttemptId,
+      recoveryAttemptId,
+      repairActor,
+      recoveryId,
+      1,
+      'repair_missing_attempt_lineage',
+      originalActor,
+    ]);
+  });
+
+  it('fails closed when a persisted audit cannot hydrate its original actor', async () => {
+    mocks.query.mockImplementation(async (statement: string) => {
+      if (statement.includes('SELECT workspace_id, notion_page_id')) {
+        return { rows: [{
+          workspace_id: row().workspace_id,
+          notion_page_id: row().notion_page_id,
+        }] };
+      }
+      if (statement.includes('FROM local_publish_jobs AS job')) {
+        return { rows: [{ ...row(true), recovered_by: null }] };
+      }
+      return { rows: [], rowCount: 1 };
+    });
+
+    await expect(recoverStoredApprovedPublishJob(input, 'repairer@example.com'))
+      .rejects.toThrow(/immutable recovery audit is incomplete/i);
+    const statements = mocks.query.mock.calls.map(([statement]) => String(statement));
+    expect(statements.some((statement) =>
+      statement.includes('INSERT INTO rednote_publish_attempts'))).toBe(false);
+    expect(statements).toContain('ROLLBACK');
   });
 
   it('appends and requeues the exact generation-three image-mode hydration failure', async () => {

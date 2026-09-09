@@ -103,6 +103,8 @@ const HISTORICAL_JOB_ID = 'a6cdfa8a-e840-4e48-9776-044a8cd2b093';
 const FROZEN_DIGEST = 'a'.repeat(64);
 const ITEM_HASH = 'b'.repeat(64);
 const RECOVERED_BY = 'day-16-operator';
+const ORIGINAL_AUDIT_ACTOR = 'Original.Operator@example.com';
+const REPAIR_OPERATOR = 'repair.admin@example.com';
 
 function frozenSnapshot(
   notionPageId: string,
@@ -296,10 +298,12 @@ async function insertQueueOnlyRecoveryAudit(
     manifestHash = EXACT_MANIFEST,
     itemHash = ITEM_HASH,
     snapshotRevision = fixture.input.snapshotRevision,
+    recoveredBy = RECOVERED_BY,
   }: {
     manifestHash?: string;
     itemHash?: string;
     snapshotRevision?: string;
+    recoveredBy?: string;
   } = {},
 ) {
   const recoveredAt = new Date().toISOString();
@@ -324,7 +328,7 @@ async function insertQueueOnlyRecoveryAudit(
       snapshotRevision,
       fixture.claimedAt,
       fixture.completedAt,
-      RECOVERED_BY,
+      recoveredBy,
       recoveredAt,
     ],
   );
@@ -670,7 +674,18 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
 
   it('repairs a pre-031 queue-only recovery audit without creating duplicates', async () => {
     const fixture = await insertRecoverableFixture();
-    await insertQueueOnlyRecoveryAudit(fixture);
+    await insertQueueOnlyRecoveryAudit(fixture, {
+      recoveredBy: ORIGINAL_AUDIT_ACTOR,
+    });
+    const auditBefore = await database.query<{
+      id: string;
+      recovered_by: string;
+    }>(
+      `SELECT id, recovered_by
+       FROM rednote_publish_job_recoveries
+       WHERE local_publish_job_id = $1`,
+      [fixture.input.jobId],
+    );
 
     const before = await listStoredPublishBatches(
       fixture.workspaceId,
@@ -693,10 +708,11 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
 
     await expect(recoverStoredApprovedPublishJob(
       fixture.input,
-      RECOVERED_BY,
+      REPAIR_OPERATOR,
     )).resolves.toMatchObject({
       jobId: fixture.jobId,
       priorClaimAttempts: 1,
+      recoveredBy: ORIGINAL_AUDIT_ACTOR,
       alreadyRecovered: true,
     });
     expect(await countRows(
@@ -714,6 +730,52 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
       'WHERE source_attempt_id = $1',
       [fixture.sourceAttemptId],
     )).toBe(1);
+    const lineage = await database.query<{
+      recovery_attempt_id: string;
+    }>(
+      `SELECT recovery_attempt_id
+       FROM rednote_publish_recovery_attempt_generations
+       WHERE source_attempt_id = $1`,
+      [fixture.sourceAttemptId],
+    );
+    const recoveryEvent = await database.query<{
+      actor_type: string;
+      actor_id: string;
+      diagnostics: Record<string, unknown>;
+    }>(
+      `SELECT actor_type, actor_id, diagnostics
+       FROM rednote_publish_attempt_events
+       WHERE attempt_id = $1
+         AND event_type = 'administrative_recovery'`,
+      [lineage.rows[0].recovery_attempt_id],
+    );
+    expect(recoveryEvent.rows).toEqual([{
+      actor_type: 'admin',
+      actor_id: REPAIR_OPERATOR,
+      diagnostics: expect.objectContaining({
+        operation: 'repair_missing_attempt_lineage',
+        recoveryId: auditBefore.rows[0].id,
+        sourceAttemptId: fixture.sourceAttemptId,
+        priorClaimAttempts: 1,
+        auditRecoveredBy: ORIGINAL_AUDIT_ACTOR,
+      }),
+    }]);
+    const auditAfter = await database.query<{
+      id: string;
+      recovered_by: string;
+    }>(
+      `SELECT id, recovered_by
+       FROM rednote_publish_job_recoveries
+       WHERE local_publish_job_id = $1`,
+      [fixture.input.jobId],
+    );
+    expect(auditAfter.rows).toEqual(auditBefore.rows);
+    await expect(database.query(
+      `UPDATE rednote_publish_job_recoveries
+       SET recovered_by = $2
+       WHERE id = $1`,
+      [auditBefore.rows[0].id, REPAIR_OPERATOR],
+    )).rejects.toThrow(/append-only/i);
     const after = await listStoredPublishBatches(
       fixture.workspaceId,
       fixture.batchId,
@@ -721,14 +783,112 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
     expect(after[0].items[0].recoveryEvidence).toBeUndefined();
     await expect(recoverStoredApprovedPublishJob(
       fixture.input,
-      RECOVERED_BY,
+      'third.admin@example.com',
     )).resolves.toMatchObject({
+      recoveredBy: ORIGINAL_AUDIT_ACTOR,
       alreadyRecovered: true,
     });
     expect((await listStoredPublishBatches(
       fixture.workspaceId,
       fixture.batchId,
     ))[0].items[0].recoveryEvidence).toBeUndefined();
+    const claimToken = crypto.randomUUID();
+    await expect(claimNextStoredLocalPublishJob(
+      300,
+      'dispatch',
+      undefined,
+      fixture.workspaceId,
+      claimToken,
+    )).resolves.toMatchObject({
+      id: fixture.jobId,
+      status: 'claimed',
+      claimToken,
+    });
+    await expect(claimNextStoredLocalPublishJob(
+      300,
+      'dispatch',
+      undefined,
+      fixture.workspaceId,
+      crypto.randomUUID(),
+    )).resolves.toBeNull();
+  });
+
+  it('repairs queued lineage after an audit actor case change', async () => {
+    const fixture = await insertRecoverableFixture({
+      jobId: crypto.randomUUID(),
+      batchItemId: crypto.randomUUID(),
+      notionPageId: `page-actor-case-${crypto.randomUUID()}`,
+      workspaceId: `workspace-${crypto.randomUUID()}`,
+    });
+    await insertQueueOnlyRecoveryAudit(fixture, {
+      recoveredBy: 'Operator@Example.com',
+    });
+
+    await expect(recoverStoredApprovedPublishJob(
+      fixture.input,
+      'operator@example.com',
+    )).resolves.toMatchObject({
+      recoveredBy: 'Operator@Example.com',
+      alreadyRecovered: true,
+    });
+    const attributed = await database.query<{
+      actor_id: string;
+      operation: string;
+    }>(
+      `SELECT event.actor_id,
+              event.diagnostics ->> 'operation' AS operation
+       FROM rednote_publish_attempt_events event
+       JOIN rednote_publish_recovery_attempt_generations generation
+         ON generation.recovery_attempt_id = event.attempt_id
+       JOIN rednote_publish_job_recoveries recovery
+         ON recovery.id = generation.recovery_id
+       WHERE recovery.local_publish_job_id = $1
+         AND event.event_type = 'administrative_recovery'`,
+      [fixture.input.jobId],
+    );
+    expect(attributed.rows).toEqual([{
+      actor_id: 'operator@example.com',
+      operation: 'repair_missing_attempt_lineage',
+    }]);
+  });
+
+  it('rejects recovery audits without an available immutable actor', async () => {
+    const fixture = await insertRecoverableFixture({
+      jobId: crypto.randomUUID(),
+      batchItemId: crypto.randomUUID(),
+      notionPageId: `page-missing-actor-${crypto.randomUUID()}`,
+      workspaceId: `workspace-${crypto.randomUUID()}`,
+    });
+
+    await insertQueueOnlyRecoveryAudit(fixture, { recoveredBy: ' ' });
+    expect((await listStoredPublishBatches(
+      fixture.workspaceId,
+      fixture.batchId,
+    ))[0].items[0].recoveryEvidence).toBeUndefined();
+    await expect(recoverStoredApprovedPublishJob(
+      fixture.input,
+      REPAIR_OPERATOR,
+    )).rejects.toMatchObject({
+      code: 'RECOVERY_PRECONDITION_FAILED',
+    });
+    expect(await countRows(
+      'rednote_publish_job_recoveries',
+      'WHERE local_publish_job_id = $1',
+      [fixture.input.jobId],
+    )).toBe(1);
+    expect(await countRows(
+      'rednote_publish_recovery_attempt_generations',
+      `WHERE recovery_id IN (
+         SELECT id FROM rednote_publish_job_recoveries
+         WHERE local_publish_job_id = $1
+       )`,
+      [fixture.input.jobId],
+    )).toBe(0);
+    expect(await countRows(
+       'rednote_publish_attempts',
+       'WHERE source_local_publish_job_id = $1',
+       [fixture.input.jobId],
+    )).toBe(1);
   });
 
   it('hides queued repair actions for mismatched or ambiguous source lineage', async () => {

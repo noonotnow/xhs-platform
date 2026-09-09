@@ -64,13 +64,26 @@ describe('approved publish job recovery route', () => {
     );
   });
 
-  it('rejects unauthenticated and non-exact requests before recovery', async () => {
-    mocks.validateAccess.mockRejectedValueOnce(new Error('Unauthorized'));
+  it.each([
+    'Cloudflare Access assertion is missing',
+    'Unauthorized',
+  ])('rejects %s before reading recovery evidence', async (message) => {
+    mocks.validateAccess.mockRejectedValueOnce(new Error(message));
     expect((await POST(request())).status).toBe(401);
     expect(mocks.recover).not.toHaveBeenCalled();
+    expect(mocks.validateAccess).toHaveBeenCalledTimes(1);
+  });
 
+  it('rejects invalid or actor-spoofing bodies before recovery', async () => {
     const response = await POST(request({ ...body, jobId: 'not-a-uuid' }));
     expect(response.status).toBe(400);
+    expect(mocks.recover).not.toHaveBeenCalled();
+
+    const spoofed = await POST(request({
+      ...body,
+      recoveredBy: 'original@example.com',
+    }));
+    expect(spoofed.status).toBe(400);
     expect(mocks.recover).not.toHaveBeenCalled();
   });
 });

@@ -83,6 +83,7 @@ interface ItemRow extends QueryResultRow {
   recovery_audit_claim_attempts?: number | null;
   recovery_audit_completed_at?: Date | string | null;
   recovery_audit_recovered_at?: Date | string | null;
+  recovery_audit_actor_available?: boolean;
   recovery_has_attempt_generation?: boolean;
   recovery_source_attempt_count?: number | null;
   recovery_no_active_ownership?: boolean;
@@ -147,7 +148,8 @@ function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
     row.recovery_audit_manifest_hash === batch.manifest_hash &&
     row.recovery_audit_item_id === row.id &&
     row.recovery_audit_item_hash === row.item_hash &&
-    row.recovery_audit_snapshot_revision === row.snapshot.notionLastEditedTime
+    row.recovery_audit_snapshot_revision === row.snapshot.notionLastEditedTime &&
+    row.recovery_audit_actor_available === true
   );
   const laterClaimGeneration = Boolean(
     row.recovery_claim_attempts !== null &&
@@ -520,6 +522,10 @@ export async function listStoredPublishBatches(workspaceId: string, batchId?: st
         recovery.prior_claim_attempts AS recovery_audit_claim_attempts,
         recovery.prior_completed_at AS recovery_audit_completed_at,
         recovery.recovered_at AS recovery_audit_recovered_at,
+        COALESCE(
+          char_length(btrim(recovery.recovered_by)) BETWEEN 1 AND 320,
+          false
+        ) AS recovery_audit_actor_available,
         generation.recovery_id IS NOT NULL AS recovery_has_attempt_generation,
         source_attempts.source_count AS recovery_source_attempt_count,
         NOT EXISTS (

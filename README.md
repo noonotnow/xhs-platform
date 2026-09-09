@@ -578,15 +578,22 @@ Use this deployment and operator sequence exactly:
    For a queue-only recovery audit written before migration 031, Admin rebuilds
    the exact request from the latest matching audit only when no attempt lineage
    exists and exactly one approved terminal worker source generation matches.
-   Mismatched or ambiguous history fails closed, and the action disappears once
-   lineage exists.
+   Any currently authenticated authorized Admin may perform that one-time repair.
+   The immutable audit keeps its original actor, while the fresh attempt's
+   append-only `administrative_recovery` event records the current repair
+   operator and identifies the operation as `repair_missing_attempt_lineage`.
+   Mismatched, actor-less, or ambiguous history fails closed, and the action
+   disappears once lineage exists.
 5. Confirm the Day 5 job remains safely queued and do not recover or otherwise
    mutate it. Compare every displayed Vibe Atlas job, batch, item, manifest hash,
    item hash, source revision, and original publish time with the approved change
    record. Select
-   **Confirm exact-job recovery** once for the proven later failure generation and
+   **Repair missing attempt lineage** for an already queued audited recovery, or
+   **Confirm exact-job recovery** once for a proven later failure generation, and
    accept the confirmation that no second batch approval or replacement job is
-   created.
+   created. A later failed-generation recovery remains bound to the original
+   recovery actor; only the missing-lineage repair permits a different authorized
+   Admin.
 6. A first recovery writes one immutable audit row. An exact queue-only repair
    reuses its existing audit instead of writing another. Both create one fresh
    approved worker attempt generation for that claim generation, supersede the
@@ -615,9 +622,12 @@ The authenticated action is
 }
 ```
 
-The action accepts only an allowlisted Cloudflare Access operator. It records that
-operator and the recovery time in `rednote_publish_job_recoveries`. Never call it
-for a different error, after staging/authorization/dispatch/publication evidence,
+The action accepts only an allowlisted Cloudflare Access operator. A new recovery
+records that operator and the recovery time in `rednote_publish_job_recoveries`.
+A queue-only missing-lineage repair never rewrites that immutable provenance; its
+append-only attempt event records the currently authenticated repair operator
+instead. The request and Admin projection never accept or expose an actor field.
+Never call it for a different error, after staging/authorization/dispatch/publication evidence,
 for an unapproved or superseded batch, or while another publish or reconciliation
 lifecycle owns the post. Because an in-flight external reconciliation has no
 canonical page ID until it succeeds, any `processing` external reconciliation

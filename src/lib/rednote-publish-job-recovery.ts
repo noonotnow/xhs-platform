@@ -207,8 +207,11 @@ export function validateRecoveryCandidate(
   state: RecoveryCandidateState,
   input: RednotePublishJobRecoveryInput,
   recoveredBy: string,
-): 'recover' | 'already_recovered' {
+): 'recover' | 'repair_missing_attempt_lineage' {
   assertImmutableEvidence(state, input);
+  if (!recoveredBy.trim() || recoveredBy.length > 320) {
+    throw recoveryError('The authenticated recovery operator is unavailable.');
+  }
   if (state.audit) {
     if (
       state.audit.batchId !== input.batchId ||
@@ -216,10 +219,12 @@ export function validateRecoveryCandidate(
       state.audit.jobId !== input.jobId ||
       state.audit.manifestHash !== input.manifestHash ||
       state.audit.itemHash !== input.itemHash ||
-      state.audit.snapshotRevision !== input.snapshotRevision ||
-      state.audit.recoveredBy !== recoveredBy
+      state.audit.snapshotRevision !== input.snapshotRevision
     ) {
-      throw recoveryError('This job was already recovered with different evidence or actor.');
+      throw recoveryError('This job was already recovered with different evidence.');
+    }
+    if (!state.audit.recoveredBy.trim() || state.audit.recoveredBy.length > 320) {
+      throw recoveryError('The immutable recovery audit actor is unavailable.');
     }
     const safelyQueued =
       state.itemState === 'queued' &&
@@ -233,7 +238,10 @@ export function validateRecoveryCandidate(
       if (state.jobClaimAttempts !== state.audit.priorClaimAttempts) {
         throw recoveryError('The safely queued job does not match the latest audited claim generation.');
       }
-      return 'already_recovered';
+      return 'repair_missing_attempt_lineage';
+    }
+    if (state.audit.recoveredBy !== recoveredBy) {
+      throw recoveryError('This later failed generation is bound to the original recovery actor.');
     }
     const laterClaimGeneration =
       state.jobErrorCode === RECOVERABLE_AMBIGUOUS_CREATOR_ERROR

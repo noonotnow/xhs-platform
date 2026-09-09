@@ -195,7 +195,15 @@ async function ensureRecoveryAttemptGeneration(
   client: Pick<PoolClient, 'query'>,
   recovery: RecoveryAuditRow,
   row: RecoveryRow,
-  recoveredBy: string,
+  {
+    auditRecoveredBy,
+    generationCreatedBy,
+    operation,
+  }: {
+    auditRecoveredBy: string;
+    generationCreatedBy: string;
+    operation: 'recover_failed_job' | 'repair_missing_attempt_lineage';
+  },
 ) {
   const existing = await client.query<RecoveryGenerationRow>(
     `SELECT generation.source_attempt_id, generation.recovery_attempt_id,
@@ -351,15 +359,19 @@ async function ensureRecoveryAttemptGeneration(
          jsonb_build_object(
            'recoveryId', $4::text,
            'sourceAttemptId', $1::text,
-           'priorClaimAttempts', $5::integer
+           'priorClaimAttempts', $5::integer,
+           'operation', $6::text,
+           'auditRecoveredBy', $7::text
          )
        )`,
     [
       sourceAttemptId,
       recoveryAttemptId,
-      recoveredBy,
+      generationCreatedBy,
       recovery.id,
       recovery.prior_claim_attempts,
+      operation,
+      auditRecoveredBy,
     ],
   );
   return recoveryAttemptId;
@@ -486,6 +498,13 @@ export async function recoverStoredApprovedPublishJobTransaction(
         409,
       );
     }
+    const existingAudit = audit(row);
+    if (row.recovery_id && !existingAudit) {
+      throw recoveryError(
+        'The latest immutable recovery audit is incomplete.',
+        'RECOVERY_PRECONDITION_FAILED',
+      );
+    }
     await client.query('LOCK TABLE external_post_reconciliations IN SHARE MODE');
     const ownership = await client.query<OwnershipRow>(
       `SELECT EXISTS (
@@ -520,8 +539,7 @@ export async function recoverStoredApprovedPublishJobTransaction(
         409,
       );
     }
-    const existingAudit = audit(row);
-    if (action === 'already_recovered' && existingAudit) {
+    if (action === 'repair_missing_attempt_lineage' && existingAudit) {
       if (!row.recovery_prior_completed_at_raw) {
         throw recoveryError(
           'The recovery audit is missing its exact completion timestamp.',
@@ -537,7 +555,11 @@ export async function recoverStoredApprovedPublishJobTransaction(
           prior_completed_at_raw: row.recovery_prior_completed_at_raw,
         },
         row,
-        recoveredBy,
+        {
+          auditRecoveredBy: existingAudit.recoveredBy,
+          generationCreatedBy: recoveredBy,
+          operation: 'repair_missing_attempt_lineage',
+        },
       );
       await client.query('COMMIT');
       return result(existingAudit, row.approved_at, true);
@@ -596,7 +618,11 @@ export async function recoverStoredApprovedPublishJobTransaction(
       client,
       inserted.rows[0],
       row,
-      recoveredBy,
+      {
+        auditRecoveredBy: recoveredBy,
+        generationCreatedBy: recoveredBy,
+        operation: 'recover_failed_job',
+      },
     );
     const updated = await client.query(
       `UPDATE local_publish_jobs

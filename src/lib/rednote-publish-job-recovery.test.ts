@@ -100,12 +100,53 @@ describe('bounded publish job recovery validation', () => {
       },
     });
 
-    expect(validateRecoveryCandidate(recovered, input, actor)).toBe('already_recovered');
+    expect(validateRecoveryCandidate(recovered, input, actor))
+      .toBe('repair_missing_attempt_lineage');
+    expect(validateRecoveryCandidate(recovered, input, 'repairer@example.com'))
+      .toBe('repair_missing_attempt_lineage');
+    expect(validateRecoveryCandidate(
+      {
+        ...recovered,
+        audit: { ...recovered.audit!, recoveredBy: 'Operator@Example.com' },
+      },
+      input,
+      'operator@example.com',
+    )).toBe('repair_missing_attempt_lineage');
     expect(() => validateRecoveryCandidate(
       { ...recovered, jobStatus: 'claimed' },
       input,
       actor,
     )).toThrow(/distinct later terminal/i);
+  });
+
+  it('requires immutable audit attribution and retains actor binding for refailures', () => {
+    const audit = {
+      id: '66666666-6666-4666-8666-666666666666',
+      ...input,
+      recoveredBy: actor,
+      recoveredAt: '2026-08-04T17:30:00.000Z',
+      priorClaimAttempts: 1,
+      priorClaimedAt: '2026-08-04T17:04:33.424Z',
+      priorCompletedAt: '2026-08-04T17:04:33.963Z',
+    };
+    expect(() => validateRecoveryCandidate(candidate({
+      itemState: 'queued',
+      jobStatus: 'queued',
+      jobErrorCode: null,
+      jobClaimToken: null,
+      jobClaimedAt: null,
+      jobClaimExpiresAt: null,
+      jobCompletedAt: null,
+      audit: { ...audit, recoveredBy: '' },
+    }), input, 'repairer@example.com')).toThrow(/audit actor is unavailable/i);
+    expect(() => validateRecoveryCandidate(candidate({
+      jobClaimAttempts: 2,
+      jobClaimedAt: '2026-08-04T17:30:08.000Z',
+      jobCompletedAt: '2026-08-04T17:30:08.500Z',
+      audit,
+    }), input, 'repairer@example.com')).toThrow(/bound to the original recovery actor/i);
+    expect(() => validateRecoveryCandidate(candidate(), input, ' '))
+      .toThrow(/authenticated recovery operator is unavailable/i);
   });
 
   it('accepts the 8-second active-drain refailure as a distinct generation', () => {
