@@ -18,6 +18,11 @@ import {
   canonicalEditorialInstant,
   compareReadyPostsBySchedule,
 } from '@/lib/editorial-schedule';
+import {
+  isCanonicalMediaImage,
+  isCanonicalMediaMov,
+  isCanonicalMediaVideo,
+} from '@/lib/canonical-media';
 import { isMovCompatibilityTrialEligible } from '@/lib/mov-compatibility-trial';
 import {
   isRednoteNoteId,
@@ -228,40 +233,11 @@ function urls(value: PageProperty | undefined): string[] {
     .filter((item) => /^https?:\/\//i.test(item));
 }
 
-export function isCanonicalMediaVideo(url: string) {
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === 'https:' &&
-      parsed.hostname === 'images.xhs.justlikekatie.com' &&
-      parsed.pathname.startsWith('/videos/assets/') &&
-      parsed.pathname.toLowerCase().endsWith('.mp4');
-  } catch {
-    return false;
-  }
-}
-
-export function isCanonicalMediaMov(url: string) {
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === 'https:' &&
-      parsed.hostname === 'images.xhs.justlikekatie.com' &&
-      parsed.pathname.startsWith('/videos/assets/') &&
-      parsed.pathname.toLowerCase().endsWith('.mov');
-  } catch {
-    return false;
-  }
-}
-
-export function isCanonicalMediaImage(url: string) {
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === 'https:' &&
-      parsed.hostname === 'images.xhs.justlikekatie.com' &&
-      /\.(?:jpe?g|png|webp)$/i.test(parsed.pathname);
-  } catch {
-    return false;
-  }
-}
+export {
+  isCanonicalMediaImage,
+  isCanonicalMediaMov,
+  isCanonicalMediaVideo,
+} from '@/lib/canonical-media';
 
 function normalized(value: string) {
   return value.trim().toLowerCase();
