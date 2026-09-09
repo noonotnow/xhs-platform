@@ -534,12 +534,22 @@ steps above.
 
 `migrations/010_rednote_publish_job_recoveries.sql` adds the append-only recovery
 audit and `migrations/011_generation_aware_rednote_publish_job_recoveries.sql`
-scopes its uniqueness to each terminal claim generation. This is the only
+scopes its uniqueness to each terminal claim generation.
+`migrations/031_recovery_attempt_generations.sql` adds immutable lineage from
+each recovery audit to its terminal source attempt and fresh approved worker
+attempt generation. Apply migration 031 before deploying code that uses this
+recovery path; a database already through migration 030 needs only migration
+031. The migration does not repair previously recovered jobs by itself. An
+exact replay after the migration and application deploy idempotently creates
+the missing attempt generation for a queue-only recovery audit.
+
+This is the only
 supported recovery for a bounded job that terminal-failed
 with exact error `BOUNDED_BATCH_BYPASS_DISABLED` before staging or dispatch. It
-updates the original `local_publish_jobs` row back to `queued`; it does not create
-a job, replace an item, rebuild or approve a manifest, change the frozen snapshot
-or publish time, or change the original batch approval.
+updates the original `local_publish_jobs` row back to `queued` and creates a
+fresh approved worker attempt while preserving the terminal source attempt. It
+does not create a job, replace an item, rebuild or approve a manifest, change the
+frozen snapshot or publish time, or change the original batch approval.
 
 Use this deployment and operator sequence exactly:
 
@@ -554,10 +564,13 @@ Use this deployment and operator sequence exactly:
      -f migrations/010_rednote_publish_job_recoveries.sql
    psql "$XHS_DATABASE_POSTGRES_URL_NON_POOLING" -v ON_ERROR_STOP=1 \
      -f migrations/011_generation_aware_rednote_publish_job_recoveries.sql
+   psql "$XHS_DATABASE_POSTGRES_URL_NON_POOLING" -v ON_ERROR_STOP=1 \
+     -f migrations/031_recovery_attempt_generations.sql
    ```
 
-3. Deploy the platform release containing the recovery API and UI. Do not rebuild,
-   supersede, or approve a batch and do not create a replacement job.
+3. Deploy the platform release containing the recovery API and UI only after
+   migration 031 succeeds. Do not rebuild, supersede, or approve a batch and do
+   not create a replacement job.
 4. In `/admin`, refresh **Bounded batch approval**. **Eligible pre-dispatch
    recovery** appears only when the approved batch, two-way item/job linkage,
    immutable snapshots, manifest/item hashes, source revision, exact error,
@@ -567,11 +580,13 @@ Use this deployment and operator sequence exactly:
    item hash, source revision, and original publish time with the approved change
    record. Select
    **Confirm exact-job recovery** once for the proven later failure generation and
-   accept the confirmation that no second approval or replacement job is created.
-6. A created response writes one immutable audit row for that claim generation and
-   moves the same job and item to `queued`. An exact repeated request is idempotent
-   only while that job is
-   still safely queued at the latest audited generation. A later recovery is
+   accept the confirmation that no second batch approval or replacement job is
+   created.
+6. A created response writes one immutable audit row and one fresh approved
+   worker attempt generation for that claim generation, supersedes the terminal
+   attempt without erasing it, and moves the same job and item to `queued`. An
+   exact repeated request is idempotent only while that job is still safely
+   queued at the latest audited generation. A later recovery is
    allowed only after a distinct greater claim attempt has later exact claimed and
    completed timestamps and independently satisfies every original precondition.
    Unchanged generations, changed evidence, or a job claimed by a worker fail closed.

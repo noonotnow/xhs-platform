@@ -2634,18 +2634,22 @@ export async function readRednotePublishingOperational(workspaceId: string) {
     getPool().query<{
     id: string; notion_page_id: string; snapshot: Record<string, unknown>;
      status: string; updated_at: Date | string; attempt_id: string | null;
+    job_created_at: Date | string; attempt_created_at: Date | string | null;
     active: boolean | null; payload_revision: string | null;
     terminal_outcome: string | null; receipt_lookup_state: string | null;
     terminal_at: Date | string | null; rednote_note_id: string | null;
      rednote_url: string | null; captured_at: Date | string | null; event_count: string;
      authorization_kind: string | null; approved_at: Date | string | null;
      claim_expires_at: Date | string | null; dispatch_authorized_at: Date | string | null;
+    superseded_by_attempt_id: string | null;
   }>(
     `SELECT job.id,job.notion_page_id,job.snapshot,job.status,job.updated_at,
+      job.created_at AS job_created_at,
       attempt.id AS attempt_id,attempt.active,attempt.payload_revision,
+      attempt.created_at AS attempt_created_at,
       attempt.terminal_outcome,attempt.receipt_lookup_state,attempt.terminal_at,
        attempt.authorization_kind,attempt.approved_at,attempt.claim_expires_at,
-       attempt.dispatch_authorized_at,
+       attempt.dispatch_authorized_at,attempt.superseded_by_attempt_id,
       receipt.rednote_note_id,receipt.rednote_url,receipt.captured_at,
       COALESCE((SELECT count(*) FROM rednote_publish_attempt_events e
         WHERE e.attempt_id=attempt.id),0)::text AS event_count
@@ -2654,7 +2658,15 @@ export async function readRednotePublishingOperational(workspaceId: string) {
        ON attempt.workspace_id=job.workspace_id
       AND attempt.source_local_publish_job_id=job.id
      LEFT JOIN rednote_publish_attempt_receipts receipt ON receipt.attempt_id=attempt.id
-     WHERE job.workspace_id=$1 ORDER BY job.created_at DESC LIMIT 100`,
+     WHERE job.workspace_id=$1
+       AND job.id IN (
+         SELECT recent.id
+         FROM local_publish_jobs recent
+         WHERE recent.workspace_id=$1
+         ORDER BY recent.created_at DESC
+         LIMIT 100
+       )
+     ORDER BY job.created_at DESC,attempt.active DESC,attempt.created_at DESC`,
     [workspaceId],
     ),
     getPool().query<{ count: string }>(
@@ -2684,8 +2696,9 @@ export async function readRednotePublishingOperational(workspaceId: string) {
       mode: snapshot.publishAt ? 'schedule' as const : 'publish' as const,
       state: row.receipt_lookup_state === 'identity_pending' ? 'identity_pending' : row.status,
        eligible: row.status === 'queued' && row.active === true &&
-         (row.authorization_kind !== 'ready_x3' || row.approved_at !== null) &&
-         row.dispatch_authorized_at === null,
+         row.approved_at !== null && row.terminal_outcome === null &&
+         row.dispatch_authorized_at === null &&
+         row.superseded_by_attempt_id === null,
       activeAttempt: row.active === true,
        authorization: row.authorization_kind === 'ready_x3'
          ? { kind: 'ready_x3', state: row.dispatch_authorized_at ? 'consumed' :
@@ -2702,7 +2715,12 @@ export async function readRednotePublishingOperational(workspaceId: string) {
         row.terminal_outcome === 'outcome_unknown' ? 'Publishing outcome requires reconciliation' : null,
     };
   };
-  const queue = result.rows.filter((row) =>
+  const currentByJob = new Map<string, typeof result.rows[number]>();
+  for (const row of result.rows) {
+    if (!currentByJob.has(row.id)) currentByJob.set(row.id, row);
+  }
+  const currentRows = Array.from(currentByJob.values());
+  const queue = currentRows.filter((row) =>
     !['reconciled', 'succeeded', 'failed'].includes(row.status) &&
     row.receipt_lookup_state !== 'identity_pending').map(item);
   const attempts = result.rows.filter((row) => row.attempt_id).map((row) => ({
@@ -2711,7 +2729,7 @@ export async function readRednotePublishingOperational(workspaceId: string) {
     eventCount: Number(row.event_count),
   }));
   const count = (predicate: (row: typeof result.rows[number]) => boolean) =>
-    result.rows.filter(predicate).length;
+    currentRows.filter(predicate).length;
   return {
     contractVersion: 'publishing-v1',
     available: true,

@@ -26,6 +26,8 @@ const input: RednotePublishJobRecoveryInput = {
   snapshotRevision: '2026-08-04T13:12:00.000Z',
 };
 const recoveryId = '55555555-5555-4555-8555-555555555555';
+const sourceAttemptId = '77777777-7777-4777-8777-777777777777';
+const recoveryAttemptId = '88888888-8888-4888-8888-888888888888';
 const actor = 'operator@example.com';
 const snapshot = {
   notionPageId: '44444444-4444-4444-8444-444444444444',
@@ -61,13 +63,13 @@ function row(recovered = false, generation = 1) {
     notion_page_id: snapshot.notionPageId,
     job_error_code: recovered ? null : 'BOUNDED_BATCH_BYPASS_DISABLED',
     job_error_message: recovered ? null : 'Worker bypass is disabled',
-    claim_token: recovered ? null : '66666666-6666-4666-8666-666666666666',
+    claim_token: null,
     claim_attempts: generation,
     claimed_at: recovered ? null : '2026-08-04T17:04:33.424Z',
     claimed_at_raw: recovered ? null : '2026-08-04 17:04:33.424+00',
     claim_expires_at: recovered ? null : '2026-08-04T19:04:33.424Z',
     completed_at: recovered ? null : '2026-08-04T17:04:33.963Z',
-    completed_at_raw: recovered ? null : '2026-08-04 17:04:33.963+00',
+    completed_at_raw: recovered ? null : '2026-08-04 17:04:33.963900+00',
     staged_at: null,
     dispatch_authorized_at: null,
     dispatched_at: null,
@@ -87,8 +89,49 @@ function row(recovered = false, generation = 1) {
     recovery_snapshot_revision: recovered ? input.snapshotRevision : null,
     recovery_prior_claim_attempts: recovered ? 1 : null,
     recovery_prior_claimed_at: recovered ? '2026-08-04T17:04:33.424Z' : null,
-    recovery_prior_completed_at: recovered ? '2026-08-04T17:04:33.963Z' : null,
+    recovery_prior_completed_at_raw: recovered
+      ? '2026-08-04 17:04:33.963900+00'
+      : null,
+    recovery_attempt_id: recovered ? recoveryAttemptId : null,
   };
+}
+
+function generationResponse(
+  statement: string,
+  options: {
+    existing?: boolean;
+    auditId?: string;
+    priorClaimAttempts?: number;
+    priorCompletedAt?: string;
+  } = {},
+) {
+  if (statement.startsWith('SELECT generation.source_attempt_id')) {
+    return {
+      rows: options.existing
+        ? [{
+            source_attempt_id: sourceAttemptId,
+            recovery_attempt_id: recoveryAttemptId,
+            valid: true,
+          }]
+        : [],
+    };
+  }
+  if (statement.startsWith('SELECT attempt.id')) {
+    return { rows: [{ id: sourceAttemptId }] };
+  }
+  if (statement.includes('INSERT INTO rednote_publish_attempts')) {
+    return { rows: [{ id: recoveryAttemptId }] };
+  }
+  if (statement.includes('UPDATE rednote_publish_attempts')) {
+    return { rows: [{ id: sourceAttemptId }], rowCount: 1 };
+  }
+  if (
+    statement.includes('INSERT INTO rednote_publish_recovery_attempt_generations')
+    || statement.includes('INSERT INTO rednote_publish_attempt_events')
+  ) {
+    return { rows: [], rowCount: 1 };
+  }
+  return null;
 }
 
 describe('stored approved publish job recovery', () => {
@@ -114,9 +157,14 @@ describe('stored approved publish job recovery', () => {
           rows: [{
             id: recoveryId,
             recovered_at: '2026-08-04T17:30:00.000Z',
+            snapshot_revision: input.snapshotRevision,
+            prior_claim_attempts: 1,
+            prior_completed_at_raw: '2026-08-04 17:04:33.963900+00',
           }],
         };
       }
+      const generation = generationResponse(statement);
+      if (generation) return generation;
       if (statement.includes('UPDATE local_publish_jobs')) {
         return { rows: [], rowCount: 1 };
       }
@@ -152,6 +200,11 @@ describe('stored approved publish job recovery', () => {
       value.includes('INSERT INTO rednote_publish_job_recoveries'))).toHaveLength(1);
     expect(statements.filter((value) =>
       value.includes('UPDATE local_publish_jobs'))).toHaveLength(1);
+    expect(statements.filter((value) =>
+      value.includes('INSERT INTO rednote_publish_attempts'))).toHaveLength(1);
+    expect(statements.filter((value) =>
+      value.includes('INSERT INTO rednote_publish_recovery_attempt_generations')))
+      .toHaveLength(1);
     expect(statements.some((value) =>
       value.includes('INSERT INTO local_publish_jobs'))).toBe(false);
     expect(statements.some((value) =>
@@ -185,7 +238,7 @@ describe('stored approved publish job recovery', () => {
       'Worker bypass is disabled',
       1,
       '2026-08-04 17:04:33.424+00',
-      '2026-08-04 17:04:33.963+00',
+      '2026-08-04 17:04:33.963900+00',
       actor,
     ]);
     const updateCall = mocks.query.mock.calls.find(([statement]) =>
@@ -195,10 +248,13 @@ describe('stored approved publish job recovery', () => {
       input.itemId,
       1,
       '2026-08-04 17:04:33.424+00',
-      '2026-08-04 17:04:33.963+00',
+      '2026-08-04 17:04:33.963900+00',
       'BOUNDED_BATCH_BYPASS_DISABLED',
       'Worker bypass is disabled',
     ]);
+    const sourceCall = mocks.query.mock.calls.find(([statement]) =>
+      String(statement).startsWith('SELECT attempt.id'));
+    expect(sourceCall?.[1]?.[2]).toBe('2026-08-04 17:04:33.963900+00');
     const ownership = statements.find((value) => value.includes('AS active_ownership'))!;
     expect(ownership).toContain('rednote_publish_revision_blockers');
     const ownershipCall = mocks.query.mock.calls.find(([statement]) =>
@@ -209,12 +265,13 @@ describe('stored approved publish job recovery', () => {
       input.snapshotRevision,
       input.itemId,
       input.jobId,
+      null,
     ]);
     expect(statements).toContain('COMMIT');
   });
 
   it('selects the latest audit and appends generation two after the active-drain race', async () => {
-    const generationTwoId = '77777777-7777-4777-8777-777777777777';
+    const generationTwoId = '99999999-9999-4999-8999-999999999999';
     mocks.query.mockImplementation(async (statement: string) => {
       if (statement.includes('SELECT workspace_id, notion_page_id')) {
         return { rows: [{
@@ -230,7 +287,7 @@ describe('stored approved publish job recovery', () => {
             job_status: 'failed',
             job_error_code: 'BOUNDED_BATCH_BYPASS_DISABLED',
             job_error_message: 'Worker bypass is disabled',
-            claim_token: '88888888-8888-4888-8888-888888888888',
+            claim_token: null,
             claimed_at: new Date('2026-08-04T18:35:27.626Z'),
             claimed_at_raw: '2026-08-04 18:35:27.626710+00',
             claim_expires_at: '2026-08-04T19:30:08.000Z',
@@ -247,9 +304,14 @@ describe('stored approved publish job recovery', () => {
           rows: [{
             id: generationTwoId,
             recovered_at: '2026-08-04T17:31:00.000Z',
+            snapshot_revision: input.snapshotRevision,
+            prior_claim_attempts: 2,
+            prior_completed_at_raw: '2026-08-04 18:35:28.151762+00',
           }],
         };
       }
+      const generation = generationResponse(statement);
+      if (generation) return generation;
       if (statement.includes('UPDATE local_publish_jobs')) return { rows: [], rowCount: 1 };
       if (statement.includes('FROM rednote_publish_batch_items')) {
         return { rows: [{ state: 'queued', local_publish_job_id: input.jobId }] };
@@ -306,13 +368,16 @@ describe('stored approved publish job recovery', () => {
             claim_attempts: 2,
             recovery_prior_claim_attempts: 2,
             recovery_prior_claimed_at: '2026-08-04 18:35:27.626710+00',
-            recovery_prior_completed_at: '2026-08-04 18:35:28.151762+00',
+            recovery_prior_completed_at_raw:
+              '2026-08-04 18:35:28.151762+00',
           }],
         };
       }
       if (statement.includes('AS active_ownership')) {
         return { rows: [{ active_ownership: false }] };
       }
+      const generation = generationResponse(statement, { existing: true });
+      if (generation) return generation;
       return { rows: [], rowCount: 1 };
     });
 
@@ -329,7 +394,7 @@ describe('stored approved publish job recovery', () => {
   });
 
   it('appends and requeues the exact generation-three image-mode hydration failure', async () => {
-    const generationThreeId = '99999999-9999-4999-8999-999999999999';
+    const generationThreeId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
     mocks.query.mockImplementation(async (statement: string) => {
       if (statement.includes('SELECT workspace_id, notion_page_id')) {
         return { rows: [{
@@ -345,7 +410,7 @@ describe('stored approved publish job recovery', () => {
             job_status: 'failed',
             job_error_code: 'AMBIGUOUS_CREATOR_UI',
             job_error_message: 'Could not uniquely identify the image upload mode',
-            claim_token: '88888888-8888-4888-8888-888888888888',
+            claim_token: null,
             claimed_at: new Date('2026-08-04T19:16:27.900Z'),
             claimed_at_raw: '2026-08-04 19:16:27.900123+00',
             claim_expires_at: '2026-08-04T21:16:27.900Z',
@@ -353,7 +418,8 @@ describe('stored approved publish job recovery', () => {
             completed_at_raw: '2026-08-04 19:16:28.333669+00',
             recovery_prior_claim_attempts: 2,
             recovery_prior_claimed_at: '2026-08-04 18:35:27.626710+00',
-            recovery_prior_completed_at: '2026-08-04 18:35:28.151762+00',
+            recovery_prior_completed_at_raw:
+              '2026-08-04 18:35:28.151762+00',
             recovered_at: '2026-08-04T18:40:00.000Z',
           }],
         };
@@ -363,9 +429,17 @@ describe('stored approved publish job recovery', () => {
       }
       if (statement.includes('INSERT INTO rednote_publish_job_recoveries')) {
         return {
-          rows: [{ id: generationThreeId, recovered_at: '2026-08-04T19:30:00.000Z' }],
+          rows: [{
+            id: generationThreeId,
+            recovered_at: '2026-08-04T19:30:00.000Z',
+            snapshot_revision: input.snapshotRevision,
+            prior_claim_attempts: 3,
+            prior_completed_at_raw: '2026-08-04 19:16:28.333669+00',
+          }],
         };
       }
+      const generation = generationResponse(statement);
+      if (generation) return generation;
       if (statement.includes('UPDATE local_publish_jobs')) return { rows: [], rowCount: 1 };
       if (statement.includes('FROM rednote_publish_batch_items')) {
         return { rows: [{ state: 'queued', local_publish_job_id: input.jobId }] };
@@ -405,9 +479,17 @@ describe('stored approved publish job recovery', () => {
       }
       if (statement.includes('INSERT INTO rednote_publish_job_recoveries')) {
         return {
-          rows: [{ id: recoveryId, recovered_at: '2026-08-04T17:30:00.000Z' }],
+          rows: [{
+            id: recoveryId,
+            recovered_at: '2026-08-04T17:30:00.000Z',
+            snapshot_revision: input.snapshotRevision,
+            prior_claim_attempts: 1,
+            prior_completed_at_raw: '2026-08-04 17:04:33.963900+00',
+          }],
         };
       }
+      const generation = generationResponse(statement);
+      if (generation) return generation;
       if (statement.includes('UPDATE local_publish_jobs')) return { rows: [], rowCount: 0 };
       return { rows: [], rowCount: 1 };
     });
