@@ -28,6 +28,7 @@ export interface NewPublishBatchItem {
 
 interface BatchRow extends QueryResultRow {
   id: string;
+  workspace_id: string;
   kind: PublishBatchKind;
   status: PublishBatchStatus;
   manifest_hash: string;
@@ -43,6 +44,7 @@ interface BatchRow extends QueryResultRow {
 
 interface ItemRow extends QueryResultRow {
   id: string;
+  workspace_id: string;
   batch_id: string;
   notion_page_id: string;
   snapshot: LocalPublishSnapshot;
@@ -222,6 +224,7 @@ function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
 function mapBatch(row: BatchRow, items: PublishBatchItem[]): PublishBatch {
   return {
     id: row.id,
+    workspaceId: row.workspace_id,
     kind: row.kind,
     status: row.status,
     manifestHash: row.manifest_hash,
@@ -319,6 +322,7 @@ export async function createStoredPublishBatch(input: {
            SET status = 'superseded',
                superseded_at = CURRENT_TIMESTAMP
            WHERE kind = 'bootstrap'
+             AND workspace_id = $1
              AND status = 'pending_approval'
              AND NOT EXISTS (
                SELECT 1
@@ -327,6 +331,7 @@ export async function createStoredPublishBatch(input: {
                  AND item.state NOT IN ('needs_approval', 'invalidated')
              )
            RETURNING *`,
+          [input.workspaceId],
         )
       : { rows: [] as BatchRow[] };
     if (superseded.rows.length > 0) {
@@ -343,10 +348,11 @@ export async function createStoredPublishBatch(input: {
     }
     const batch = await client.query<BatchRow>(
       `INSERT INTO rednote_publish_batches (
-        kind, manifest_hash, candidate_report, window_start, window_end
-      ) VALUES ($1, $2, $3::jsonb, $4::timestamptz, $5::timestamptz)
+        workspace_id, kind, manifest_hash, candidate_report, window_start, window_end
+      ) VALUES ($1, $2, $3, $4::jsonb, $5::timestamptz, $6::timestamptz)
        RETURNING *`,
       [
+       input.workspaceId,
        input.kind,
        input.manifestHash,
        JSON.stringify(blockedCandidates),
@@ -359,12 +365,14 @@ export async function createStoredPublishBatch(input: {
     for (const item of items) {
       const inserted = await client.query<ItemRow>(
         `INSERT INTO rednote_publish_batch_items (
-           batch_id, notion_page_id, snapshot, item_hash, dispatch_mode, late_by_seconds
-         ) VALUES ($1::uuid, $2, $3::jsonb, $4, $5, $6)
+           batch_id, workspace_id, notion_page_id, snapshot, item_hash,
+           dispatch_mode, late_by_seconds
+         ) VALUES ($1::uuid, $2, $3, $4::jsonb, $5, $6, $7)
          ON CONFLICT DO NOTHING
          RETURNING *`,
         [
           row.id,
+          input.workspaceId,
           item.notionPageId,
           JSON.stringify(item.snapshot),
           item.itemHash,
@@ -408,11 +416,12 @@ export async function createStoredPublishBatch(input: {
   }
 }
 
-export async function listStoredPublishBatches(batchId?: string) {
+export async function listStoredPublishBatches(workspaceId: string, batchId?: string) {
   const batches = await sql<BatchRow>`
     SELECT *
     FROM rednote_publish_batches
-    WHERE (${batchId ?? null}::uuid IS NULL OR id = ${batchId ?? null}::uuid)
+    WHERE workspace_id = ${workspaceId}
+      AND (${batchId ?? null}::uuid IS NULL OR id = ${batchId ?? null}::uuid)
     ORDER BY created_at DESC
     LIMIT 20
   `;
@@ -494,6 +503,7 @@ export async function listStoredPublishBatches(batchId?: string) {
         LIMIT 1
       ) AS recovery ON TRUE
       WHERE item.batch_id = ${batch.id}::uuid
+        AND item.workspace_id = ${workspaceId}
       ORDER BY item.snapshot->>'publishAt' NULLS FIRST, item.created_at
     `;
     output.push(mapBatch(batch, items.rows.map((item) => mapItem(item, batch))));
@@ -519,8 +529,9 @@ export async function approveStoredPublishBatch(
        FROM rednote_publish_batches
        WHERE id = $1::uuid
          AND manifest_hash = $2
+         AND workspace_id = $3
        FOR UPDATE`,
-      [batchId, manifestHash],
+      [batchId, manifestHash, workspaceId],
     );
     const current = locked.rows[0];
     if (!current || current.status !== 'pending_approval') {
@@ -550,6 +561,19 @@ export async function approveStoredPublishBatch(
         );
         continue;
       }
+      const approvedPage = await client.query<{ notion_page_id: string }>(
+        `SELECT notion_page_id
+         FROM rednote_publish_batch_items
+         WHERE id = $1::uuid
+           AND batch_id = $2::uuid
+           AND workspace_id = $3`,
+        [decision.itemId, batchId, workspaceId],
+      );
+      if (!approvedPage.rows[0]) continue;
+      await client.query(
+        'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+        [`${workspaceId}:${approvedPage.rows[0].notion_page_id}`],
+      );
       await client.query(
         `
       WITH approved_item AS (
@@ -558,14 +582,9 @@ export async function approveStoredPublishBatch(
             updated_at = CURRENT_TIMESTAMP
         WHERE id = $1::uuid
           AND batch_id = $2::uuid
+          AND workspace_id = $3
           AND state = 'needs_approval'
         RETURNING *
-      ), page_lock AS (
-        SELECT approved_item.*,
-               pg_advisory_xact_lock(
-                 hashtextextended($3 || ':' || approved_item.notion_page_id, 0)
-               )
-        FROM approved_item
       ), inserted_job AS (
         INSERT INTO local_publish_jobs (
           workspace_id, notion_page_id, snapshot, idempotency_key, batch_item_id
@@ -576,13 +595,13 @@ export async function approveStoredPublishBatch(
           snapshot,
           gen_random_uuid(),
           id
-        FROM page_lock
+        FROM approved_item
         WHERE NOT EXISTS (
           SELECT 1
           FROM rednote_publish_revision_blockers(
             $3,
-            page_lock.notion_page_id,
-            page_lock.snapshot->>'notionLastEditedTime'
+            approved_item.notion_page_id,
+            approved_item.snapshot->>'notionLastEditedTime'
           )
           )
         ON CONFLICT DO NOTHING
@@ -641,7 +660,7 @@ export async function approveStoredPublishBatch(
   } finally {
     client.release();
   }
-  return (await listStoredPublishBatches(batchId))[0];
+  return (await listStoredPublishBatches(workspaceId, batchId))[0];
 }
 
 export async function invalidateStoredBatchItem(

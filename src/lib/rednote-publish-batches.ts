@@ -365,7 +365,7 @@ export async function approvePublishBatch(
   approvedBy: string,
   workspaceId: string,
 ) {
-  const batch = (await listStoredPublishBatches(batchId))[0];
+  const batch = (await listStoredPublishBatches(workspaceId, batchId))[0];
   if (!batch || batch.manifestHash !== expectedManifestHash) {
     throw new Error('The batch manifest changed or no longer exists; refresh before approving.');
   }
@@ -391,7 +391,7 @@ export async function approvePublishBatch(
   }
   if (batch.status !== 'pending_approval') {
     await materializeApprovedBatchAttempts(batch, workspaceId);
-    return (await listStoredPublishBatches(batchId))[0];
+    return (await listStoredPublishBatches(workspaceId, batchId))[0];
   }
   const decisions = await Promise.all(batch.items.map(async (item) => {
     try {
@@ -423,9 +423,9 @@ export async function approvePublishBatch(
     workspaceId,
   );
   await materializeApprovedBatchAttempts(approved, workspaceId);
-  return (await listStoredPublishBatches(batchId))[0];
+  return (await listStoredPublishBatches(workspaceId, batchId))[0];
 }
 
-export async function listPublishBatches(batchId?: string) {
-  return listStoredPublishBatches(batchId);
+export async function listPublishBatches(workspaceId: string, batchId?: string) {
+  return listStoredPublishBatches(workspaceId, batchId);
 }

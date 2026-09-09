@@ -50,9 +50,10 @@ describe('manual post handling service', () => {
   });
 
   it('records current Ready operator truth while preserving automation warnings', async () => {
-    await expect(markManualPostHandled(input, key)).resolves.toMatchObject({
+    await expect(markManualPostHandled(input, key, 'workspace-1')).resolves.toMatchObject({
       created: true,
     });
+    expect(mocks.find).toHaveBeenCalledWith(key, 'workspace-1');
     expect(mocks.insert).toHaveBeenCalledWith({
       notionPageId: input.notionPageId,
       notionVersion: revision,
@@ -61,7 +62,7 @@ describe('manual post handling service', () => {
       warnings: post.manualWarnings,
       recordedBy: 'admin',
       idempotencyKey: key,
-    });
+    }, 'workspace-1');
     expect(mocks.markAwaitingReceipt).toHaveBeenCalledWith(post.id);
   });
 

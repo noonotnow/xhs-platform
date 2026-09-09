@@ -12,13 +12,15 @@ import {
   getXhsPostForManualHandling,
   markXhsPostAwaitingReceipt,
 } from '@/lib/notion-posts';
+import { LEGACY_LOCAL_PUBLISH_WORKSPACE_ID } from '@/lib/workspace-id';
 
 export async function markManualPostHandled(
   rawInput: unknown,
   idempotencyKey: string,
+  workspaceId = LEGACY_LOCAL_PUBLISH_WORKSPACE_ID,
 ) {
   const input = parseManualPostHandlingInput(rawInput);
-  const replay = await findManualPostHandlingByIdempotencyKey(idempotencyKey);
+  const replay = await findManualPostHandlingByIdempotencyKey(idempotencyKey, workspaceId);
   if (replay) {
     if (
       replay.notionPageId !== input.notionPageId
@@ -54,7 +56,7 @@ export async function markManualPostHandled(
     warnings,
     recordedBy: 'admin',
     idempotencyKey,
-  });
+  }, workspaceId);
   if (
     !result.created
     && !isDeepStrictEqual(result.handling.warnings, warnings)
@@ -69,6 +71,8 @@ export async function markManualPostHandled(
   return result;
 }
 
-export async function getManualPostHandlingSummaries() {
-  return listManualPostHandlings();
+export async function getManualPostHandlingSummaries(
+  workspaceId = LEGACY_LOCAL_PUBLISH_WORKSPACE_ID,
+) {
+  return listManualPostHandlings(workspaceId);
 }

@@ -1310,6 +1310,16 @@ describe('canonical local publishing migration chain', () => {
       lifecycle_state: 'local_job:failed',
     }]);
 
+    const olderRevision = await database.query(
+      `SELECT * FROM rednote_publish_revision_blockers($1, $2, $3)`,
+      ['workspace-day-16', pageId, '2026-09-08T15:00:00.000Z'],
+    );
+    expect(olderRevision.rows).toEqual([{
+      notion_page_id: pageId,
+      lifecycle_id: jobId,
+      lifecycle_state: 'local_job:failed',
+    }]);
+
     const otherWorkspace = await database.query(
       `SELECT * FROM rednote_publish_revision_blockers($1, $2, $3)`,
       ['other-workspace', pageId, newRevision],
@@ -1337,6 +1347,82 @@ describe('canonical local publishing migration chain', () => {
       lifecycle_id: jobId,
       lifecycle_state: 'local_job:failed',
     }]);
+  });
+
+  it('keeps page-wide receipt and reconciliation evidence as permanent barriers', async () => {
+    const revision = '2026-09-08T23:36:51.638Z';
+    const receiptPageId = 'page-wide-receipt-evidence';
+    const reconciliationPageId = 'page-wide-reconciliation-evidence';
+    const scheduledPageId = 'page-wide-operator-scheduled-evidence';
+
+    await database.query(
+      `INSERT INTO xhs_publish_receipts(
+         workspace_id, notion_page_id, status, note_id, share_url
+       ) VALUES (
+         'workspace-page-wide-evidence', $1, 'published',
+         'note_receipt_evidence',
+         'https://www.xiaohongshu.com/explore/note_receipt_evidence'
+       )`,
+      [receiptPageId],
+    );
+    await database.query(
+      `INSERT INTO external_post_reconciliations(
+         workspace_id, note_id, share_url, snapshot, status,
+         idempotency_key, notion_page_id
+       ) VALUES (
+         'workspace-page-wide-evidence', 'note_page_wide',
+         'https://www.xiaohongshu.com/explore/note_page_wide',
+         '{}'::jsonb, 'failed', $1, $2
+       )`,
+      [randomUUID(), reconciliationPageId],
+    );
+    await database.query(
+      `INSERT INTO plan_operator_scheduled_posts(
+         workspace_id, notion_page_id, idempotency_key,
+         notion_last_edited_time, scheduled_at
+       ) VALUES (
+         'workspace-page-wide-evidence', $1, $2, $3,
+         '2026-09-11T23:20:00.000Z'
+       )`,
+      [scheduledPageId, randomUUID(), revision],
+    );
+
+    await expect(database.query(
+      `SELECT * FROM rednote_publish_revision_blockers($1, $2, $3)`,
+      ['workspace-page-wide-evidence', receiptPageId, revision],
+    )).resolves.toMatchObject({
+      rows: [{
+        notion_page_id: receiptPageId,
+        lifecycle_id: receiptPageId,
+        lifecycle_state: 'publish_receipt:published',
+      }],
+    });
+    await expect(database.query(
+      `SELECT * FROM rednote_publish_revision_blockers($1, $2, $3)`,
+      ['workspace-page-wide-evidence', reconciliationPageId, revision],
+    )).resolves.toMatchObject({
+      rows: [{
+        notion_page_id: reconciliationPageId,
+        lifecycle_state: 'external_reconciliation:failed',
+      }],
+    });
+    await expect(database.query(
+      `SELECT * FROM rednote_publish_revision_blockers($1, $2, $3)`,
+      ['workspace-page-wide-evidence', scheduledPageId, revision],
+    )).resolves.toMatchObject({
+      rows: [{
+        notion_page_id: scheduledPageId,
+        lifecycle_state: 'operator_scheduled',
+      }],
+    });
+
+    for (const pageId of [receiptPageId, reconciliationPageId, scheduledPageId]) {
+      const otherWorkspace = await database.query(
+        `SELECT * FROM rednote_publish_revision_blockers($1, $2, $3)`,
+        ['other-workspace', pageId, revision],
+      );
+      expect(otherWorkspace.rows).toEqual([]);
+    }
   });
 
   it('fails closed for malformed revisions and evaluates standalone attempts', async () => {

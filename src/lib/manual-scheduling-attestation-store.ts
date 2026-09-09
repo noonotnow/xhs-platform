@@ -15,6 +15,7 @@ import { manifestHash } from '@/lib/rednote-publish-batches';
 import type { LocalPublishSnapshot } from '@/types/local-publish-job';
 
 interface ManualCandidateRow extends QueryResultRow {
+  workspace_id: string;
   batch_id: string;
   batch_status: string;
   manifest_hash: string;
@@ -30,6 +31,7 @@ interface ManualCandidateRow extends QueryResultRow {
 
 interface ManualJobRow extends QueryResultRow {
   id: string;
+  workspace_id: string;
   notion_page_id: string;
   snapshot: LocalPublishSnapshot;
   status: string;
@@ -153,6 +155,7 @@ function validateCandidate(
 
 function assertSafeQueuedJob(job: ManualJobRow, row: ManualCandidateRow) {
   if (
+    job.workspace_id !== row.workspace_id ||
     job.notion_page_id !== row.notion_page_id ||
     job.batch_item_id !== row.item_id ||
     !isDeepStrictEqual(job.snapshot, row.snapshot)
@@ -218,6 +221,7 @@ export async function insertManualSchedulingAttestation(
 
     const candidate = await client.query<ManualCandidateRow>(
       `SELECT
+         batch.workspace_id,
          batch.id AS batch_id,
          batch.status AS batch_status,
          batch.manifest_hash,
@@ -231,7 +235,9 @@ export async function insertManualSchedulingAttestation(
          item.local_publish_job_id
        FROM rednote_publish_batch_items AS item
        JOIN rednote_publish_batches AS batch ON batch.id = item.batch_id
-       WHERE item.id = $1::uuid AND batch.id = $2::uuid
+       WHERE item.id = $1::uuid
+         AND batch.id = $2::uuid
+         AND item.workspace_id = batch.workspace_id
        FOR UPDATE OF item, batch`,
       [input.itemId, input.batchId],
     );
@@ -244,7 +250,7 @@ export async function insertManualSchedulingAttestation(
     }
     await client.query(
       'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
-      [row.notion_page_id],
+      [`${row.workspace_id}:${row.notion_page_id}`],
     );
     validateCandidate(row, input);
 
@@ -252,8 +258,12 @@ export async function insertManualSchedulingAttestation(
     let priorJobStatus = 'no_worker_job';
     if (row.local_publish_job_id) {
       const lockedJob = await client.query<ManualJobRow>(
-        'SELECT * FROM local_publish_jobs WHERE id = $1::uuid FOR UPDATE',
-        [row.local_publish_job_id],
+        `SELECT *
+         FROM local_publish_jobs
+         WHERE id = $1::uuid
+           AND workspace_id = $2
+         FOR UPDATE`,
+        [row.local_publish_job_id, row.workspace_id],
       );
       job = lockedJob.rows[0];
       if (!job) {
@@ -273,6 +283,7 @@ export async function insertManualSchedulingAttestation(
          EXISTS (
            SELECT 1 FROM local_publish_jobs AS other
            WHERE other.notion_page_id = $1
+             AND other.workspace_id = $4
              AND ($2::uuid IS NULL OR other.id <> $2::uuid)
              AND (
                other.status NOT IN ('reconciled', 'failed')
@@ -286,23 +297,27 @@ export async function insertManualSchedulingAttestation(
          OR EXISTS (
            SELECT 1 FROM rednote_publish_batch_items AS other
            WHERE other.notion_page_id = $1
+             AND other.workspace_id = $4
              AND other.id <> $3::uuid
              AND other.state NOT IN ('invalidated', 'reconciled', 'failed')
          )
          OR EXISTS (
            SELECT 1 FROM manual_reconciliation_requests
            WHERE notion_page_id = $1
+             AND workspace_id = $4
          )
          OR EXISTS (
            SELECT 1 FROM external_post_reconciliations
            WHERE notion_page_id = $1
+             AND workspace_id = $4
          )
          OR EXISTS (
            SELECT 1 FROM xhs_publish_receipts
            WHERE notion_page_id = $1
+             AND workspace_id = $4
          )
        ) AS conflict`,
-      [row.notion_page_id, job?.id ?? null, row.item_id],
+      [row.notion_page_id, job?.id ?? null, row.item_id, row.workspace_id],
     );
     if (ownership.rows[0]?.conflict) {
       throw conflict(
@@ -333,10 +348,11 @@ export async function insertManualSchedulingAttestation(
     if (!job) {
       const insertedJob = await client.query<ManualJobRow>(
         `INSERT INTO local_publish_jobs (
-           notion_page_id, snapshot, status, idempotency_key, batch_item_id
-         ) VALUES ($1, $2::jsonb, 'queued', gen_random_uuid(), $3::uuid)
+           notion_page_id, snapshot, status, idempotency_key, batch_item_id,
+           workspace_id
+         ) VALUES ($1, $2::jsonb, 'queued', gen_random_uuid(), $3::uuid, $4)
          RETURNING *`,
-        [row.notion_page_id, JSON.stringify(row.snapshot), row.item_id],
+        [row.notion_page_id, JSON.stringify(row.snapshot), row.item_id, row.workspace_id],
       );
       job = insertedJob.rows[0];
       if (!job) {

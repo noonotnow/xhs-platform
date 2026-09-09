@@ -6,6 +6,7 @@ import {
 } from '@/lib/notion-posts';
 import { requireXhsOperator } from '@/lib/xhs-operator-auth';
 import { listManualPostHandlings } from '@/lib/manual-post-handling-store';
+import { parseWorkspaceId } from '@/lib/workspace-id';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -31,11 +32,12 @@ export async function GET(request: NextRequest) {
   }
 
   try {
+    const workspaceId = parseWorkspaceId(request.headers.get('x-workspace-id'));
     const result = await listReadyXhsPosts({
       requestId,
       includePublishedCandidates: true,
     });
-    const handlings = await listManualPostHandlings();
+    const handlings = await listManualPostHandlings(workspaceId);
     const handlingByPage = new Map(handlings.map((handling) => [
       handling.notionPageId,
       handling,

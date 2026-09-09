@@ -13,6 +13,7 @@ import type {
 } from '@/types/local-publish-job';
 
 interface RecoveryRow extends QueryResultRow {
+  workspace_id: string;
   batch_id: string;
   batch_status: string;
   manifest_hash: string;
@@ -177,6 +178,7 @@ export async function recoverStoredApprovedPublishJob(
     );
     const locked = await client.query<RecoveryRow>(
       `SELECT
+         job.workspace_id,
          batch.id AS batch_id,
          batch.status AS batch_status,
          batch.manifest_hash,
@@ -251,7 +253,7 @@ export async function recoverStoredApprovedPublishJob(
     }
     await client.query(
       'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
-      [row.notion_page_id],
+      [`${row.workspace_id}:${row.notion_page_id}`],
     );
     await client.query('LOCK TABLE external_post_reconciliations IN SHARE MODE');
     const ownership = await client.query<OwnershipRow>(

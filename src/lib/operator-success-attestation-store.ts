@@ -26,6 +26,7 @@ import type {
 
 export interface OperatorSuccessCandidateRow extends QueryResultRow {
   job_id: string;
+  workspace_id: string;
   notion_page_id: string;
   job_snapshot: LocalPublishSnapshot;
   job_status: string;
@@ -278,6 +279,7 @@ async function lockedCandidate(client: PoolClient, jobId: string) {
   const result = await client.query<OperatorSuccessCandidateRow>(
     `SELECT
        job.id AS job_id,
+       job.workspace_id,
        job.notion_page_id,
        job.snapshot AS job_snapshot,
        job.status AS job_status,
@@ -420,7 +422,7 @@ export async function insertOperatorSuccessAttestation(
     const row = await lockedCandidate(client, input.jobId);
     await client.query(
       'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
-      [row.notion_page_id],
+      [`${row.workspace_id}:${row.notion_page_id}`],
     );
     await client.query('LOCK TABLE external_post_reconciliations IN SHARE MODE');
     await client.query('LOCK TABLE xhs_publish_receipts IN SHARE MODE');

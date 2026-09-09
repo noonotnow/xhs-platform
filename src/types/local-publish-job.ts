@@ -271,6 +271,7 @@ export interface PublishLifecycleBlocker {
 
 export interface PublishBatch {
   id: string;
+  workspaceId: string;
   kind: PublishBatchKind;
   status: PublishBatchStatus;
   manifestHash: string;

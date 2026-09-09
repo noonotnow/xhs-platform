@@ -16,9 +16,14 @@ const NO_STORE_HEADERS = { 'Cache-Control': 'private, no-store, max-age=0, must-
 export async function GET(request: NextRequest) {
   try {
     await validateCloudflareAccessRequest(request);
-    parseWorkspaceId(request.headers.get('x-workspace-id'));
+    const workspaceId = parseWorkspaceId(request.headers.get('x-workspace-id'));
     return NextResponse.json(
-      { batches: await listPublishBatches(request.nextUrl.searchParams.get('id') ?? undefined) },
+      {
+        batches: await listPublishBatches(
+          workspaceId,
+          request.nextUrl.searchParams.get('id') ?? undefined,
+        ),
+      },
       { headers: NO_STORE_HEADERS },
     );
   } catch (error) {

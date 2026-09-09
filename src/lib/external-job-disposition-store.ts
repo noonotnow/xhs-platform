@@ -18,6 +18,7 @@ import type {
 
 interface TargetJobRow extends QueryResultRow {
   id: string;
+  workspace_id: string;
   notion_page_id: string;
   snapshot: LocalPublishSnapshot;
   status: string;
@@ -553,7 +554,7 @@ export async function insertExternalJobDisposition(
     const job = await lockedJob(client, input.localJobId);
     await client.query(
       'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
-      [input.notionPageId],
+      [`${job.workspace_id}:${input.notionPageId}`],
     );
     const existing = await client.query<RequestRow>(
       `SELECT *,

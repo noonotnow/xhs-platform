@@ -29,6 +29,7 @@ function request(method = 'POST') {
     headers: {
       'Content-Type': 'application/json',
       'Idempotency-Key': key,
+      'X-Workspace-Id': 'workspace-1',
     },
     ...(method === 'POST' ? { body: JSON.stringify(body) } : {}),
   });
@@ -49,7 +50,7 @@ describe('manual post handling Admin route', () => {
     const response = await POST(request());
     expect(response.status).toBe(201);
     expect(response.headers.get('cache-control')).toContain('no-store');
-    expect(mocks.mark).toHaveBeenCalledWith(body, key);
+    expect(mocks.mark).toHaveBeenCalledWith(body, key, 'workspace-1');
   });
 
   it('returns durable handling state to authenticated Admin', async () => {
@@ -58,6 +59,7 @@ describe('manual post handling Admin route', () => {
     await expect(response.json()).resolves.toEqual({
       handlings: [{ id: 'handling', receiptStatus: 'pending' }],
     });
+    expect(mocks.list).toHaveBeenCalledWith('workspace-1');
   });
 
   it('does not read or write state when authentication fails', async () => {

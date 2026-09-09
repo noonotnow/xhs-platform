@@ -9,6 +9,8 @@ import type {
   ManualReceiptStatus,
 } from '@/types/manual-post-handling';
 
+const LEGACY_MANUAL_POST_WORKSPACE_ID = 'legacy-local-publish';
+
 interface ManualPostHandlingRow extends QueryResultRow {
   id: string;
   notion_page_id: string;
@@ -115,42 +117,55 @@ function hasLiveUnsafeOwnership(job: LocalOwnershipRow, now: number) {
 
 export async function findManualPostHandlingByIdempotencyKey(
   idempotencyKey: string,
+  workspaceId = LEGACY_MANUAL_POST_WORKSPACE_ID,
 ) {
   const result = await sql<ManualPostHandlingRow>`
     SELECT *
     FROM plan_operator_scheduled_posts
-    WHERE idempotency_key = ${idempotencyKey}::uuid
+    WHERE workspace_id = ${workspaceId}
+      AND idempotency_key = ${idempotencyKey}::uuid
     LIMIT 1
   `;
   return result.rows[0] ? mapRow(result.rows[0]) : null;
 }
 
-export async function loadManualPostHandlingByPage(notionPageId: string) {
+export async function loadManualPostHandlingByPage(
+  notionPageId: string,
+  workspaceId = LEGACY_MANUAL_POST_WORKSPACE_ID,
+) {
   const result = await sql<ManualPostHandlingRow>`
     SELECT *
     FROM plan_operator_scheduled_posts
-    WHERE notion_page_id = ${notionPageId}
+    WHERE workspace_id = ${workspaceId}
+      AND notion_page_id = ${notionPageId}
     LIMIT 1
   `;
   return result.rows[0] ? mapRow(result.rows[0]) : null;
 }
 
-export async function listManualPostHandlings() {
+export async function listManualPostHandlings(
+  workspaceId = LEGACY_MANUAL_POST_WORKSPACE_ID,
+) {
   const result = await sql<ManualPostHandlingRow>`
     SELECT *
     FROM plan_operator_scheduled_posts
+    WHERE workspace_id = ${workspaceId}
     ORDER BY recorded_at DESC
     LIMIT 200
   `;
   return result.rows.map(mapRow);
 }
 
-export async function loadManualPostHandlingsByPages(notionPageIds: string[]) {
+export async function loadManualPostHandlingsByPages(
+  notionPageIds: string[],
+  workspaceId = LEGACY_MANUAL_POST_WORKSPACE_ID,
+) {
   if (notionPageIds.length === 0) return [];
   const result = await sql<ManualPostHandlingRow>`
     SELECT *
     FROM plan_operator_scheduled_posts
-    WHERE notion_page_id = ANY(${notionPageIds}::text[])
+    WHERE workspace_id = ${workspaceId}
+      AND notion_page_id = ANY(${notionPageIds}::text[])
     ORDER BY recorded_at DESC
   `;
   return result.rows.map(mapRow);
@@ -164,7 +179,7 @@ export async function insertManualPostHandling(input: {
   warnings: string[];
   recordedBy: 'admin' | 'plan';
   idempotencyKey: string;
-}) {
+}, workspaceId = LEGACY_MANUAL_POST_WORKSPACE_ID) {
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
@@ -173,15 +188,16 @@ export async function insertManualPostHandling(input: {
     );
     await client.query(
       'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
-      [input.notionPageId],
+      [`${workspaceId}:${input.notionPageId}`],
     );
 
     const replay = await client.query<ManualPostHandlingRow>(
       `SELECT *
        FROM plan_operator_scheduled_posts
        WHERE idempotency_key = $1::uuid
+         AND workspace_id = $2
        FOR UPDATE`,
-      [input.idempotencyKey],
+      [input.idempotencyKey, workspaceId],
     );
     if (replay.rows[0]) {
       const handling = mapRow(replay.rows[0]);
@@ -207,8 +223,9 @@ export async function insertManualPostHandling(input: {
       `SELECT *
        FROM plan_operator_scheduled_posts
        WHERE notion_page_id = $1
+         AND workspace_id = $2
        FOR UPDATE`,
-      [input.notionPageId],
+      [input.notionPageId, workspaceId],
     );
     if (existing.rows[0]) {
       throw new ManualPostHandlingError(
@@ -224,9 +241,10 @@ export async function insertManualPostHandling(input: {
               success_attestation_id
        FROM local_publish_jobs
        WHERE notion_page_id = $1
+         AND workspace_id = $2
        ORDER BY created_at DESC
        FOR UPDATE`,
-      [input.notionPageId],
+      [input.notionPageId, workspaceId],
     );
     if (jobs.rows.some((job) => hasLiveUnsafeOwnership(job, Date.now()))) {
       throw new ManualPostHandlingError(
@@ -240,6 +258,7 @@ export async function insertManualPostHandling(input: {
       `SELECT 1
        FROM xhs_publish_receipts
        WHERE notion_page_id = $1
+         AND workspace_id = $2
          AND status = 'published'
          AND note_id IS NOT NULL
          AND share_url IS NOT NULL
@@ -247,9 +266,10 @@ export async function insertManualPostHandling(input: {
        SELECT 1
        FROM external_post_reconciliations
        WHERE notion_page_id = $1
+         AND workspace_id = $2
          AND status = 'succeeded'
        LIMIT 1`,
-      [input.notionPageId],
+      [input.notionPageId, workspaceId],
     );
     if (incompatibleReceipt.rows[0]) {
       throw new ManualPostHandlingError(
@@ -263,9 +283,10 @@ export async function insertManualPostHandling(input: {
       `SELECT id, state
        FROM rednote_publish_batch_items
        WHERE notion_page_id = $1
+         AND workspace_id = $2
          AND state NOT IN ('invalidated', 'reconciled', 'failed')
        FOR UPDATE`,
-      [input.notionPageId],
+      [input.notionPageId, workspaceId],
     );
     if (activeBatch.rows.some((item) =>
       ['submitted', 'scheduled', 'verification_pending', 'verified']
@@ -287,6 +308,7 @@ export async function insertManualPostHandling(input: {
            completed_at = CURRENT_TIMESTAMP,
            updated_at = CURRENT_TIMESTAMP
        WHERE notion_page_id = $1
+         AND workspace_id = $4
          AND status NOT IN ('failed', 'reconciled', 'succeeded')`,
       [
         input.notionPageId,
@@ -296,6 +318,7 @@ export async function insertManualPostHandling(input: {
         input.recordedBy === 'plan'
          ? 'Operator scheduled outside the local worker by PLAN'
          : 'Operator handling superseded inactive local automation',
+        workspaceId,
       ],
     );
     await client.query(
@@ -304,12 +327,14 @@ export async function insertManualPostHandling(input: {
            invalidation_reason = 'Operator handling superseded inactive local automation',
            updated_at = CURRENT_TIMESTAMP
        WHERE notion_page_id = $1
+         AND workspace_id = $2
          AND state IN ('needs_approval', 'approved', 'queued', 'claimed', 'staged')`,
-      [input.notionPageId],
+      [input.notionPageId, workspaceId],
     );
 
     const inserted = await client.query<ManualPostHandlingRow>(
       `INSERT INTO plan_operator_scheduled_posts (
+         workspace_id,
          notion_page_id,
          scheduled_at,
          notion_last_edited_time,
@@ -318,9 +343,10 @@ export async function insertManualPostHandling(input: {
          receipt_status,
          warnings,
          idempotency_key
-       ) VALUES ($1, $2::timestamptz, $3, $4, $5, 'pending', $6::jsonb, $7::uuid)
+       ) VALUES ($1, $2, $3::timestamptz, $4, $5, $6, 'pending', $7::jsonb, $8::uuid)
        RETURNING *`,
       [
+        workspaceId,
         input.notionPageId,
         input.scheduledAt ?? null,
         input.notionVersion,

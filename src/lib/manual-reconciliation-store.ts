@@ -182,7 +182,7 @@ export async function insertManualReconciliation(input: {
   try {
     await client.query('BEGIN');
     await client.query(
-      'SELECT pg_advisory_xact_lock(hashtextextended($1 || E\'\\x1f\' || $2, 0))',
+      "SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2, 0))",
       [workspaceId, input.notionPageId],
     );
     const jobs = await client.query<{
@@ -904,7 +904,7 @@ export async function retryManualReconciliation(
     ),
     page_lock AS (
       SELECT pg_advisory_xact_lock(
-        hashtextextended(target.workspace_id || E'\x1f' || target.notion_page_id, 0)
+        hashtextextended(target.workspace_id || ':' || target.notion_page_id, 0)
       )
       FROM target
     )

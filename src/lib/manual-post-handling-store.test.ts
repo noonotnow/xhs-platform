@@ -83,7 +83,7 @@ describe('manual post handling store', () => {
       reconciled_at: null,
       success_attestation_id: null,
     }]);
-    await expect(insertManualPostHandling(input)).resolves.toMatchObject({
+    await expect(insertManualPostHandling(input, 'workspace-1')).resolves.toMatchObject({
       created: true,
       handling: { receiptStatus: 'pending' },
     });
@@ -95,6 +95,25 @@ describe('manual post handling store', () => {
       expect.stringContaining('INSERT INTO plan_operator_scheduled_posts'),
       'COMMIT',
     ]));
+    const pageLock = mocks.query.mock.calls.find(([query]) =>
+      String(query).includes('pg_advisory_xact_lock')
+      && !String(query).includes('rednote-bootstrap-batch'));
+    expect(pageLock?.[1]).toEqual([
+      `workspace-1:${input.notionPageId}`,
+    ]);
+    for (const [query, params] of mocks.query.mock.calls) {
+      const statement = String(query);
+      if (
+        statement.includes('local_publish_jobs')
+        || statement.includes('xhs_publish_receipts')
+        || statement.includes('external_post_reconciliations')
+        || statement.includes('rednote_publish_batch_items')
+        || statement.includes('plan_operator_scheduled_posts')
+      ) {
+        expect(statement).toContain('workspace_id');
+        expect(params).toContain('workspace-1');
+      }
+    }
   });
 
   it('rejects only a live unsafe claim', async () => {

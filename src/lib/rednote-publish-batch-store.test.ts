@@ -178,6 +178,9 @@ describe('stored RedNote bootstrap replacement', () => {
       if (statement.includes('FOR UPDATE')) {
         return { rows: [batchRow(batchId, 'pending_approval', manifestHash)] };
       }
+      if (statement.includes('SELECT notion_page_id')) {
+        return { rows: [{ notion_page_id: snapshot.notionPageId }] };
+      }
       if (statement.includes('UPDATE rednote_publish_batches AS batch')) {
         return { rows: [batchRow(batchId, 'approved', manifestHash)] };
       }
@@ -292,7 +295,7 @@ describe('stored RedNote bootstrap replacement', () => {
     mocks.sql
       .mockResolvedValueOnce({ rows: [batchRow(batchId, 'approved', hash)] })
       .mockResolvedValueOnce({ rows: [item] });
-    await expect(listStoredPublishBatches(batchId)).resolves.toMatchObject([{
+    await expect(listStoredPublishBatches('workspace-1', batchId)).resolves.toMatchObject([{
       items: [{
         recoveryEvidence: {
           batchId,
@@ -328,7 +331,7 @@ describe('stored RedNote bootstrap replacement', () => {
           recovery_audit_recovered_at: '2026-08-04T18:40:00.000Z',
         }],
       });
-    await expect(listStoredPublishBatches(batchId)).resolves.toMatchObject([{
+    await expect(listStoredPublishBatches('workspace-1', batchId)).resolves.toMatchObject([{
       items: [{
         recoveryEvidence: {
           priorErrorCode: 'AMBIGUOUS_CREATOR_UI',
@@ -343,7 +346,7 @@ describe('stored RedNote bootstrap replacement', () => {
       .mockResolvedValueOnce({
         rows: [{ ...item, recovery_job_error_code: 'STAGING_FAILED' }],
       });
-    const unsafe = await listStoredPublishBatches(batchId);
+    const unsafe = await listStoredPublishBatches('workspace-1', batchId);
     expect(unsafe[0].items[0].recoveryEvidence).toBeUndefined();
 
     mocks.sql
@@ -359,7 +362,7 @@ describe('stored RedNote bootstrap replacement', () => {
           recovery_audit_snapshot_revision: snapshot.notionLastEditedTime,
         }],
       });
-    const alreadyAudited = await listStoredPublishBatches(batchId);
+    const alreadyAudited = await listStoredPublishBatches('workspace-1', batchId);
     expect(alreadyAudited[0].items[0].recoveryEvidence).toBeUndefined();
 
     mocks.sql
@@ -381,7 +384,7 @@ describe('stored RedNote bootstrap replacement', () => {
           recovery_audit_recovered_at: '2026-08-04T17:30:00.000Z',
         }],
       });
-    await expect(listStoredPublishBatches(batchId)).resolves.toMatchObject([{
+    await expect(listStoredPublishBatches('workspace-1', batchId)).resolves.toMatchObject([{
       items: [{
         recoveryEvidence: {
           claimAttempts: 2,
@@ -411,7 +414,7 @@ describe('stored RedNote bootstrap replacement', () => {
           recovery_audit_recovered_at: '2026-08-04T18:40:00.000Z',
         }],
       });
-    const changedAudit = await listStoredPublishBatches(batchId);
+    const changedAudit = await listStoredPublishBatches('workspace-1', batchId);
     expect(changedAudit[0].items[0].recoveryEvidence).toBeUndefined();
 
     const itemQuery = mocks.sql.mock.calls

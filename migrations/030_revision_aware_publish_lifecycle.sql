@@ -19,6 +19,44 @@ EXCEPTION
 END;
 $$;
 
+ALTER TABLE rednote_publish_batches
+  ADD COLUMN IF NOT EXISTS workspace_id TEXT;
+
+UPDATE rednote_publish_batches
+SET workspace_id = 'legacy-local-publish'
+WHERE workspace_id IS NULL;
+
+ALTER TABLE rednote_publish_batches
+  ALTER COLUMN workspace_id SET DEFAULT 'legacy-local-publish',
+  ALTER COLUMN workspace_id SET NOT NULL;
+
+ALTER TABLE rednote_publish_batches
+  ADD CONSTRAINT rednote_publish_batches_workspace_check
+  CHECK (char_length(workspace_id) BETWEEN 1 AND 128);
+
+ALTER TABLE rednote_publish_batch_items
+  ADD COLUMN IF NOT EXISTS workspace_id TEXT;
+
+UPDATE rednote_publish_batch_items AS item
+SET workspace_id = batch.workspace_id
+FROM rednote_publish_batches AS batch
+WHERE batch.id = item.batch_id
+  AND item.workspace_id IS NULL;
+
+ALTER TABLE rednote_publish_batch_items
+  ALTER COLUMN workspace_id SET DEFAULT 'legacy-local-publish',
+  ALTER COLUMN workspace_id SET NOT NULL;
+
+ALTER TABLE rednote_publish_batch_items
+  ADD CONSTRAINT rednote_publish_batch_items_workspace_check
+  CHECK (char_length(workspace_id) BETWEEN 1 AND 128);
+
+DROP INDEX IF EXISTS rednote_publish_batch_items_active_page_idx;
+
+CREATE UNIQUE INDEX rednote_publish_batch_items_active_page_idx
+  ON rednote_publish_batch_items (workspace_id, notion_page_id)
+  WHERE state NOT IN ('invalidated', 'reconciled', 'failed');
+
 CREATE OR REPLACE FUNCTION rednote_publish_revision_blocks(
   frozen_revision TEXT,
   candidate_revision TEXT
