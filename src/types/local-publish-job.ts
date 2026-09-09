@@ -263,6 +263,12 @@ export interface PublishBatchBlockedCandidate {
   reason: string;
 }
 
+export interface PublishLifecycleBlocker {
+  notionPageId: string;
+  lifecycleId: string;
+  lifecycleState: string;
+}
+
 export interface PublishBatch {
   id: string;
   kind: PublishBatchKind;

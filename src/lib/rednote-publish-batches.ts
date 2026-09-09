@@ -9,10 +9,7 @@ import {
   listReadyXhsPosts,
   NotionPostsError,
 } from '@/lib/notion-posts';
-import {
-  jobSummary,
-  listPublishOwningLocalJobs,
-} from '@/lib/local-publish-job-store';
+import { listPublishLifecycleBlockers } from '@/lib/local-publish-job-store';
 import {
   approveStoredPublishBatch,
   createStoredPublishBatch,
@@ -24,12 +21,11 @@ import {
   getLinkedRednotePublishAttempt,
   linkedAttemptMatchesApprovedBatch,
 } from '@/lib/rednote-publishing-attempt-store';
-import { listPlanOperatorScheduledPageIds } from '@/lib/plan-operator-scheduled-store';
 import type {
   LocalPublishSnapshot,
-  LocalPublishJobSummary,
   PublishBatchBlockedCandidate,
   PublishBatchKind,
+  PublishLifecycleBlocker,
 } from '@/types/local-publish-job';
 import type { ReadyXhsPost } from '@/types/ready-post';
 
@@ -200,16 +196,18 @@ export function buildBatchCandidateAccounting(
   posts: ReadyXhsPost[],
   kind: PublishBatchKind,
   now: Date,
-  localJobs: LocalPublishJobSummary[] = [],
+  lifecycleBlockers: PublishLifecycleBlocker[] = [],
   expectedAccountId?: string,
 ) {
   const weekly = weeklyWindow(now);
-  const owningJobs = new Map<string, LocalPublishJobSummary>();
-  for (const job of localJobs) {
-    if (!owningJobs.has(job.notionPageId)) owningJobs.set(job.notionPageId, job);
+  const blockerByPage = new Map<string, PublishLifecycleBlocker>();
+  for (const blocker of lifecycleBlockers) {
+    if (!blockerByPage.has(blocker.notionPageId)) {
+      blockerByPage.set(blocker.notionPageId, blocker);
+    }
   }
   const items = buildBatchItems(posts, kind, now, expectedAccountId)
-    .filter((item) => !owningJobs.has(item.notionPageId));
+    .filter((item) => !blockerByPage.has(item.notionPageId));
   const included = new Set(items.map((item) => item.notionPageId));
   const blockedCandidates = posts.flatMap((post): PublishBatchBlockedCandidate[] => {
     if (included.has(post.id)) return [];
@@ -224,14 +222,29 @@ export function buildBatchCandidateAccounting(
     }
 
     let reason: string;
-    const owningJob = owningJobs.get(post.id);
+    const lifecycleBlocker = blockerByPage.get(post.id);
     if (post.status.trim().toLowerCase() === 'published') {
       reason =
         'Canonical Notion Status is Published. This record is already post-dispatch and is not authorized for another batch.';
-    } else if (owningJob) {
-      reason =
-        `Local publish job ${owningJob.id} is ${owningJob.status}. ` +
-        'An existing active or post-dispatch lifecycle owns this record; do not publish it again.';
+    } else if (lifecycleBlocker) {
+      if (lifecycleBlocker.lifecycleState === 'candidate_revision:invalid') {
+        reason =
+          'The Notion source revision is missing or malformed; automatic dispatch fails closed.';
+        return [{
+          notionPageId: post.id,
+          headline: post.headline,
+          ...(post.publishAt ? { publishAt: post.publishAt } : {}),
+          reason,
+        }];
+      }
+      const localJobState = lifecycleBlocker.lifecycleState.startsWith('local_job:')
+        ? lifecycleBlocker.lifecycleState.slice('local_job:'.length)
+        : null;
+      reason = localJobState
+        ? `Local publish job ${lifecycleBlocker.lifecycleId} is ${localJobState}. ` +
+          'The frozen revision or evidence-bearing lifecycle owns this record; do not publish it again.'
+        : `Publish lifecycle ${lifecycleBlocker.lifecycleId} is ` +
+          `${lifecycleBlocker.lifecycleState}. Evidence for this record exists; do not publish it again.`;
     } else if (!publishAt) {
       reason = 'Needs publish time: set an exact ScheduledDate instant with timezone.';
     } else if (
@@ -277,23 +290,23 @@ export async function createPublishBatch(
   if (selectedPageIds.size === 0) return null;
   const { posts } = await listReadyXhsPosts({ includePublishedCandidates: true });
   const selectedPosts = posts.filter((post) => selectedPageIds.has(post.id));
-  const handled = await listPlanOperatorScheduledPageIds(
-    selectedPosts.map((post) => post.id),
-  );
-  const dispatchablePosts = selectedPosts.filter((post) => !handled.has(post.id));
-  const jobs = await listPublishOwningLocalJobs(
-    dispatchablePosts.map((post) => post.id),
+  const lifecycleBlockers = await listPublishLifecycleBlockers(
+    selectedPosts.map((post) => ({
+      notionPageId: post.id,
+      notionLastEditedTime: post.lastEditedTime,
+    })),
     workspaceId,
   );
   const { items, blockedCandidates } = buildBatchCandidateAccounting(
-    dispatchablePosts,
+    selectedPosts,
     kind,
     now,
-    jobs.map(jobSummary),
+    lifecycleBlockers,
     expectedAccountId,
   );
   const window = kind === 'weekly' ? weeklyWindow(now) : undefined;
   return createStoredPublishBatch({
+    workspaceId,
     kind,
     manifestHash: manifestHash(items.map((item) => ({
       notionPageId: item.notionPageId,
@@ -407,6 +420,7 @@ export async function approvePublishBatch(
     expectedManifestHash,
     approvedBy,
     decisions,
+    workspaceId,
   );
   await materializeApprovedBatchAttempts(approved, workspaceId);
   return (await listStoredPublishBatches(batchId))[0];

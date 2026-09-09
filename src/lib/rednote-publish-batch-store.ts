@@ -81,15 +81,24 @@ interface ItemRow extends QueryResultRow {
   recovery_no_active_ownership?: boolean;
 }
 
-interface OwningJobRow extends QueryResultRow {
+interface LifecycleBlockerRow extends QueryResultRow {
   notion_page_id: string;
-  id: string;
-  status: string;
+  lifecycle_id: string;
+  lifecycle_state: string;
 }
 
-function owningJobReason(job: OwningJobRow) {
-  return `Local publish job ${job.id} is ${job.status}. ` +
-    'An existing active or post-dispatch lifecycle owns this record; do not publish it again.';
+function lifecycleBlockerReason(blocker: LifecycleBlockerRow) {
+  if (blocker.lifecycle_state === 'candidate_revision:invalid') {
+    return 'The Notion source revision is missing or malformed; automatic dispatch fails closed.';
+  }
+  const localJobState = blocker.lifecycle_state.startsWith('local_job:')
+    ? blocker.lifecycle_state.slice('local_job:'.length)
+    : null;
+  return localJobState
+    ? `Local publish job ${blocker.lifecycle_id} is ${localJobState}. ` +
+      'The frozen revision or evidence-bearing lifecycle owns this record; do not publish it again.'
+    : `Publish lifecycle ${blocker.lifecycle_id} is ${blocker.lifecycle_state}. ` +
+      'Evidence for this record exists; do not publish it again.';
 }
 
 function timestamp(value: Date | string) {
@@ -231,6 +240,7 @@ function mapBatch(row: BatchRow, items: PublishBatchItem[]): PublishBatch {
 }
 
 export async function createStoredPublishBatch(input: {
+  workspaceId: string;
   kind: PublishBatchKind;
   manifestHash: string;
   windowStart?: string;
@@ -253,60 +263,48 @@ export async function createStoredPublishBatch(input: {
     for (const pageId of pageIds) {
       await client.query(
         'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
-        [pageId],
+        [`${input.workspaceId}:${pageId}`],
       );
     }
-    const owningJobs = pageIds.length === 0
-      ? { rows: [] as OwningJobRow[] }
-      : await client.query<OwningJobRow>(
-          `SELECT DISTINCT ON (notion_page_id) notion_page_id, id, status
-           FROM local_publish_jobs
-           WHERE notion_page_id = ANY($1::text[])
-             AND (
-               status <> 'failed'
-               OR dispatch_authorized_at IS NOT NULL
-               OR dispatched_at IS NOT NULL
-               OR note_id IS NOT NULL
-               OR share_url IS NOT NULL
-             )
-           ORDER BY notion_page_id, created_at DESC`,
-          [pageIds],
+    const lifecycleBlockers = pageIds.length === 0
+      ? { rows: [] as LifecycleBlockerRow[] }
+      : await client.query<LifecycleBlockerRow>(
+         `SELECT blocker.*
+          FROM jsonb_to_recordset($1::jsonb) AS candidate(
+            "notionPageId" text,
+            "notionLastEditedTime" text
+          )
+          CROSS JOIN LATERAL rednote_publish_revision_blockers(
+            $2,
+            candidate."notionPageId",
+            candidate."notionLastEditedTime"
+          ) blocker`,
+         [
+           JSON.stringify(input.items.map((item) => ({
+             notionPageId: item.notionPageId,
+             notionLastEditedTime: item.snapshot.notionLastEditedTime,
+           }))),
+           input.workspaceId,
+         ],
         );
-    const operatorScheduled = pageIds.length === 0
-      ? { rows: [] as Array<{ notion_page_id: string }> }
-      : await client.query<{ notion_page_id: string }>(
-         `SELECT notion_page_id
-          FROM plan_operator_scheduled_posts
-          WHERE notion_page_id = ANY($1::text[])`,
-         [pageIds],
-        );
-    const operatorScheduledPages = new Set(
-      operatorScheduled.rows.map((row) => row.notion_page_id),
-    );
-    const ownershipByPage = new Map(
-      owningJobs.rows.map((job) => [job.notion_page_id, job]),
-    );
+    const blockerByPage = new Map<string, LifecycleBlockerRow>();
+    for (const blocker of lifecycleBlockers.rows) {
+      if (!blockerByPage.has(blocker.notion_page_id)) {
+        blockerByPage.set(blocker.notion_page_id, blocker);
+      }
+    }
     const items = input.items.filter((item) =>
-      !ownershipByPage.has(item.notionPageId) &&
-      !operatorScheduledPages.has(item.notionPageId));
+      !blockerByPage.has(item.notionPageId));
     const blockedCandidates = [
       ...input.blockedCandidates,
       ...input.items.flatMap((item): PublishBatchBlockedCandidate[] => {
-        const job = ownershipByPage.get(item.notionPageId);
-        if (operatorScheduledPages.has(item.notionPageId)) {
-          return [{
-            notionPageId: item.notionPageId,
-            headline: item.snapshot.headline,
-            ...(item.snapshot.publishAt ? { publishAt: item.snapshot.publishAt } : {}),
-            reason: 'PLAN recorded operator scheduling; automatic dispatch is closed.',
-          }];
-        }
-        return job
+        const blocker = blockerByPage.get(item.notionPageId);
+        return blocker
           ? [{
               notionPageId: item.notionPageId,
               headline: item.snapshot.headline,
               ...(item.snapshot.publishAt ? { publishAt: item.snapshot.publishAt } : {}),
-              reason: owningJobReason(job),
+              reason: lifecycleBlockerReason(blocker),
             }]
           : [];
       }),
@@ -508,6 +506,7 @@ export async function approveStoredPublishBatch(
   manifestHash: string,
   approvedBy: string,
   decisions: Array<{ itemId: string; approved: boolean; reason?: string }>,
+  workspaceId: string,
 ) {
   const client = await getPool().connect();
   try {
@@ -560,22 +559,19 @@ export async function approveStoredPublishBatch(
         WHERE id = $1::uuid
           AND batch_id = $2::uuid
           AND state = 'needs_approval'
-          AND NOT EXISTS (
-            SELECT 1
-            FROM plan_operator_scheduled_posts operator_scheduled
-            WHERE operator_scheduled.notion_page_id =
-              rednote_publish_batch_items.notion_page_id
-          )
         RETURNING *
       ), page_lock AS (
         SELECT approved_item.*,
-               pg_advisory_xact_lock(hashtextextended(approved_item.notion_page_id, 0))
+               pg_advisory_xact_lock(
+                 hashtextextended($3 || ':' || approved_item.notion_page_id, 0)
+               )
         FROM approved_item
       ), inserted_job AS (
         INSERT INTO local_publish_jobs (
-          notion_page_id, snapshot, idempotency_key, batch_item_id
+          workspace_id, notion_page_id, snapshot, idempotency_key, batch_item_id
         )
         SELECT
+          $3,
           notion_page_id,
           snapshot,
           gen_random_uuid(),
@@ -583,26 +579,11 @@ export async function approveStoredPublishBatch(
         FROM page_lock
         WHERE NOT EXISTS (
           SELECT 1
-          FROM plan_operator_scheduled_posts operator_scheduled
-          WHERE operator_scheduled.notion_page_id = page_lock.notion_page_id
-        )
-          AND NOT EXISTS (
-          SELECT 1
-          FROM local_publish_jobs existing
-          WHERE existing.notion_page_id = page_lock.notion_page_id
-            AND (
-              existing.status <> 'failed'
-              OR existing.dispatch_authorized_at IS NOT NULL
-              OR existing.dispatched_at IS NOT NULL
-              OR existing.note_id IS NOT NULL
-              OR existing.share_url IS NOT NULL
-            )
-        )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM manual_reconciliation_requests reconciliation
-            WHERE reconciliation.notion_page_id = page_lock.notion_page_id
-              AND reconciliation.status IN ('queued', 'verifying')
+          FROM rednote_publish_revision_blockers(
+            $3,
+            page_lock.notion_page_id,
+            page_lock.snapshot->>'notionLastEditedTime'
+          )
           )
         ON CONFLICT DO NOTHING
         RETURNING id, batch_item_id
@@ -614,7 +595,7 @@ export async function approveStoredPublishBatch(
       FROM inserted_job
       WHERE item.id = inserted_job.batch_item_id
         `,
-        [decision.itemId, batchId],
+        [decision.itemId, batchId, workspaceId],
       );
       await client.query(
         `

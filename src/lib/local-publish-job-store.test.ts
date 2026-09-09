@@ -17,7 +17,7 @@ import {
   heartbeatStoredLocalPublishJob,
   insertLocalPublishJob,
   listLocalPublishJobs,
-  listPublishOwningLocalJobs,
+  listPublishLifecycleBlockers,
   normalizeStoredLocalPublishSnapshot,
   prepareStoredLocalPublishVerification,
   recordStoredAcknowledgedPublication,
@@ -45,25 +45,25 @@ const snapshot: LocalPublishSnapshot = {
 };
 
 describe('publish ownership lookup', () => {
-  it('keeps active and post-dispatch failures while allowing pre-dispatch retry', async () => {
+  it('returns revision-aware lifecycle blockers from the canonical database predicate', async () => {
     mocks.sql.mockResolvedValue({
       rows: [
-        { ...claimedRow(), id: 'active', status: 'scheduled' },
         {
-          ...claimedRow(),
-          id: 'dispatch-authorized-failure',
-          status: 'failed',
-          dispatch_authorized_at: '2026-08-01T12:59:00.000Z',
+          notion_page_id: snapshot.notionPageId,
+          lifecycle_id: 'active',
+          lifecycle_state: 'local_job:scheduled',
         },
-        { ...claimedRow(), id: 'pre-dispatch-failure', status: 'failed' },
       ],
-      rowCount: 3,
+      rowCount: 1,
     });
 
-    await expect(listPublishOwningLocalJobs([snapshot.notionPageId]))
+    await expect(listPublishLifecycleBlockers([snapshot]))
       .resolves.toEqual([
-        expect.objectContaining({ id: 'active', status: 'scheduled' }),
-        expect.objectContaining({ id: 'dispatch-authorized-failure', status: 'failed' }),
+        {
+          notionPageId: snapshot.notionPageId,
+          lifecycleId: 'active',
+          lifecycleState: 'local_job:scheduled',
+        },
       ]);
   });
 });

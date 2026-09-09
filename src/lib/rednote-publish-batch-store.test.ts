@@ -92,7 +92,7 @@ describe('stored RedNote bootstrap replacement', () => {
     const oldHash = 'a'.repeat(64);
     const newHash = 'b'.repeat(64);
     mocks.query.mockImplementation(async (statement: string) => {
-      if (statement.includes('SELECT DISTINCT ON')) return { rows: [] };
+      if (statement.includes('rednote_publish_revision_blockers')) return { rows: [] };
       if (statement.includes("SET status = 'superseded'")) {
         return { rows: [batchRow(oldId, 'superseded', oldHash)] };
       }
@@ -122,6 +122,7 @@ describe('stored RedNote bootstrap replacement', () => {
     });
 
     const result = await createStoredPublishBatch({
+      workspaceId: 'workspace-1',
       kind: 'bootstrap',
       manifestHash: newHash,
       items: [{
@@ -162,6 +163,7 @@ describe('stored RedNote bootstrap replacement', () => {
       oldHash,
       'operator@example.com',
       [],
+      'workspace-1',
     )).rejects.toThrow(/superseded and can never be approved/i);
     const statements = mocks.query.mock.calls.map(([statement]) => String(statement));
     expect(statements).toContain('ROLLBACK');
@@ -195,6 +197,7 @@ describe('stored RedNote bootstrap replacement', () => {
         itemId: '44444444-4444-4444-8444-444444444444',
         approved: true,
       }],
+      'workspace-1',
     )).resolves.toMatchObject({ id: batchId, status: 'approved' });
 
     const statements = mocks.query.mock.calls.map(([statement]) => String(statement));
@@ -202,7 +205,7 @@ describe('stored RedNote bootstrap replacement', () => {
       expect.stringContaining("hashtextextended('rednote-bootstrap-batch', 0)"),
       expect.stringContaining('FOR UPDATE'),
       expect.stringContaining('INSERT INTO local_publish_jobs'),
-      expect.stringContaining('plan_operator_scheduled_posts'),
+      expect.stringContaining('rednote_publish_revision_blockers'),
       'COMMIT',
     ]));
   });
@@ -223,6 +226,7 @@ describe('stored RedNote bootstrap replacement', () => {
     });
 
     await expect(createStoredPublishBatch({
+      workspaceId: 'workspace-1',
       kind: 'bootstrap',
       manifestHash: emptyHash,
       items: [],

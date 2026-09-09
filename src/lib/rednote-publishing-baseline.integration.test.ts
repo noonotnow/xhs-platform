@@ -36,6 +36,7 @@ const migrationFiles = [
   '027_expired_batch_claim_reclassification.sql',
   '028_legacy_ready_x3_batch_fallback_reclassification.sql',
   '029_terminal_expired_batch_claim_reclassification.sql',
+  '030_revision_aware_publish_lifecycle.sql',
 ] as const;
 
 function stable(value: unknown): string {
@@ -1236,5 +1237,185 @@ describe('canonical local publishing migration chain', () => {
        )`,
       [attemptId],
     )).resolves.toBeDefined();
+  });
+
+  it('allows the exact revised Day 16 page only while the old failure is evidence-free', async () => {
+    const pageId = '432411de-071a-498e-9833-ff7b6c238374';
+    const jobId = 'a6cdfa8a-e840-4e48-9776-044a8cd2b093';
+    const attemptId = 'b6cdfa8a-e840-4e48-9776-044a8cd2b093';
+    const oldRevision = '2026-09-08T16:37:00.000Z';
+    const newRevision = '2026-09-08T23:36:51.638Z';
+    const frozenSnapshot = {
+      notionPageId: pageId,
+      notionLastEditedTime: oldRevision,
+      publishAt: '2026-09-08T23:20:00.000Z',
+      mediaUrl: 'https://images.xhs.justlikekatie.com/videos/day-16.mp4',
+      thumbnailUrl: 'https://images.xhs.justlikekatie.com/thumbnails/day-16.jpg',
+    };
+
+    await database.query(
+      `INSERT INTO local_publish_jobs(
+         id, workspace_id, notion_page_id, snapshot, status, idempotency_key,
+         error_code, error_message, completed_at
+       ) VALUES (
+         $1, 'workspace-day-16', $2, $3::jsonb, 'failed', $4,
+         'CLAIM_LEASE_EXPIRED', 'Claim lease expired before execution',
+         '2026-09-08T23:25:00.000Z'
+       )`,
+      [jobId, pageId, JSON.stringify(frozenSnapshot), randomUUID()],
+    );
+    await database.query(
+      `INSERT INTO rednote_publish_attempts(
+         id, workspace_id, idempotency_key, contract_revision,
+         source_notion_page_id, source_local_publish_job_id,
+         frozen_payload, payload_digest, payload_revision,
+         executor_type, executor_kind, executor_id, target_publish_at,
+         requested_at, terminal_outcome, terminal_at,
+         receipt_lookup_state, active
+       ) VALUES (
+         $1, 'workspace-day-16', $2, 'rednote-publishing/v1',
+         $3, $4, $5::jsonb, $6, $7,
+         'worker', 'playwright', 'worker-day-16',
+         '2026-09-08T23:20:00.000Z', '2026-09-08T23:19:00.000Z',
+         'known_failed', '2026-09-08T23:25:00.000Z',
+         'not_required', false
+       )`,
+      [
+        attemptId,
+        randomUUID(),
+        pageId,
+        jobId,
+        JSON.stringify(frozenSnapshot),
+        'd'.repeat(64),
+        oldRevision,
+      ],
+    );
+
+    const revised = await database.query(
+      `SELECT * FROM rednote_publish_revision_blockers($1, $2, $3)`,
+      ['workspace-day-16', pageId, newRevision],
+    );
+    expect(revised.rows).toEqual([]);
+
+    const sameRevision = await database.query<{
+      lifecycle_id: string;
+      lifecycle_state: string;
+    }>(
+      `SELECT * FROM rednote_publish_revision_blockers($1, $2, $3)`,
+      ['workspace-day-16', pageId, oldRevision],
+    );
+    expect(sameRevision.rows).toEqual([{
+      notion_page_id: pageId,
+      lifecycle_id: jobId,
+      lifecycle_state: 'local_job:failed',
+    }]);
+
+    const otherWorkspace = await database.query(
+      `SELECT * FROM rednote_publish_revision_blockers($1, $2, $3)`,
+      ['other-workspace', pageId, newRevision],
+    );
+    expect(otherWorkspace.rows).toEqual([]);
+
+    await database.query(
+      `INSERT INTO rednote_publish_attempt_events(
+         attempt_id, event_type, occurred_at, actor_type, actor_id
+       ) VALUES (
+         $1, 'execution_started', '2026-09-08T23:19:30.000Z',
+         'worker', 'worker-day-16'
+       )`,
+      [attemptId],
+    );
+    const withExecutionEvidence = await database.query<{
+      lifecycle_id: string;
+      lifecycle_state: string;
+    }>(
+      `SELECT * FROM rednote_publish_revision_blockers($1, $2, $3)`,
+      ['workspace-day-16', pageId, newRevision],
+    );
+    expect(withExecutionEvidence.rows).toEqual([{
+      notion_page_id: pageId,
+      lifecycle_id: jobId,
+      lifecycle_state: 'local_job:failed',
+    }]);
+  });
+
+  it('fails closed for malformed revisions and evaluates standalone attempts', async () => {
+    const pageId = 'revision-boundary-page';
+    const attemptId = 'c6cdfa8a-e840-4e48-9776-044a8cd2b093';
+    const oldRevision = '2026-09-08T16:37:00.000Z';
+    const newRevision = '2026-09-08T23:36:51.638Z';
+
+    const malformedCandidate = await database.query(
+      `SELECT * FROM rednote_publish_revision_blockers($1, $2, $3)`,
+      ['workspace-revision-boundary', pageId, 'not-a-revision'],
+    );
+    expect(malformedCandidate.rows).toEqual([{
+      notion_page_id: pageId,
+      lifecycle_id: pageId,
+      lifecycle_state: 'candidate_revision:invalid',
+    }]);
+
+    await database.query(
+      `INSERT INTO rednote_publish_attempts(
+         id, workspace_id, idempotency_key, contract_revision,
+         source_notion_page_id, frozen_payload, payload_digest, payload_revision,
+         executor_type, executor_kind, executor_id, target_publish_at,
+         requested_at, terminal_outcome, terminal_at,
+         receipt_lookup_state, active
+       ) VALUES (
+         $1, 'workspace-revision-boundary', $2, 'rednote-publishing/v1',
+         $3, '{}'::jsonb, $4, $5,
+         'operator', 'operator', 'operator-revision-boundary',
+         '2026-09-08T23:20:00.000Z', '2026-09-08T23:19:00.000Z',
+         'known_failed', '2026-09-08T23:25:00.000Z',
+         'not_required', false
+       )`,
+      [attemptId, randomUUID(), pageId, 'e'.repeat(64), oldRevision],
+    );
+
+    const revised = await database.query(
+      `SELECT * FROM rednote_publish_revision_blockers($1, $2, $3)`,
+      ['workspace-revision-boundary', pageId, newRevision],
+    );
+    expect(revised.rows).toEqual([]);
+
+    const sameRevision = await database.query(
+      `SELECT * FROM rednote_publish_revision_blockers($1, $2, $3)`,
+      ['workspace-revision-boundary', pageId, oldRevision],
+    );
+    expect(sameRevision.rows).toEqual([{
+      notion_page_id: pageId,
+      lifecycle_id: attemptId,
+      lifecycle_state: 'publish_attempt:known_failed',
+    }]);
+
+    const malformedAttemptId = 'd6cdfa8a-e840-4e48-9776-044a8cd2b093';
+    const malformedPageId = 'malformed-frozen-revision-page';
+    await database.query(
+      `INSERT INTO rednote_publish_attempts(
+         id, workspace_id, idempotency_key, contract_revision,
+         source_notion_page_id, frozen_payload, payload_digest, payload_revision,
+         executor_type, executor_kind, executor_id, target_publish_at,
+         requested_at, terminal_outcome, terminal_at,
+         receipt_lookup_state, active
+       ) VALUES (
+         $1, 'workspace-revision-boundary', $2, 'rednote-publishing/v1',
+         $3, '{}'::jsonb, $4, 'not-a-revision',
+         'operator', 'operator', 'operator-revision-boundary',
+         '2026-09-08T23:20:00.000Z', '2026-09-08T23:19:00.000Z',
+         'known_failed', '2026-09-08T23:25:00.000Z',
+         'not_required', false
+       )`,
+      [malformedAttemptId, randomUUID(), malformedPageId, 'f'.repeat(64)],
+    );
+    const malformedFrozenRevision = await database.query(
+      `SELECT * FROM rednote_publish_revision_blockers($1, $2, $3)`,
+      ['workspace-revision-boundary', malformedPageId, newRevision],
+    );
+    expect(malformedFrozenRevision.rows).toEqual([{
+      notion_page_id: malformedPageId,
+      lifecycle_id: malformedAttemptId,
+      lifecycle_state: 'publish_attempt:known_failed',
+    }]);
   });
 });

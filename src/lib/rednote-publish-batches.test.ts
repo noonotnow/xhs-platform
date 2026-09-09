@@ -8,7 +8,7 @@ import {
   weeklyWindow,
 } from '@/lib/rednote-publish-batches';
 import type { ReadyXhsPost } from '@/types/ready-post';
-import type { LocalPublishJobSummary } from '@/types/local-publish-job';
+import type { PublishLifecycleBlocker } from '@/types/local-publish-job';
 import { rednoteMediaIdentity } from '@/lib/rednote-publish-authorization';
 
 function post(
@@ -41,18 +41,15 @@ function post(
   };
 }
 
-function localJob(
+function localJobBlocker(
   notionPageId: string,
-  status: LocalPublishJobSummary['status'],
+  status: string,
   id: string,
-): LocalPublishJobSummary {
+): PublishLifecycleBlocker {
   return {
-    id,
     notionPageId,
-    status,
-    createdAt: '2026-08-04T12:00:00.000Z',
-    updatedAt: '2026-08-04T12:00:00.000Z',
-    verificationAttempts: 0,
+    lifecycleId: id,
+    lifecycleState: `local_job:${status}`,
   };
 }
 
@@ -147,6 +144,40 @@ describe('bounded RedNote publish batches', () => {
     });
   });
 
+  it('admits the exact revised Day 16 page when no lifecycle blocker remains', () => {
+    const revisedDay16 = post('2026-09-11T23:20:00.000Z', {
+      id: '432411de-071a-498e-9833-ff7b6c238374',
+      headline: 'Day 16',
+      lastEditedTime: '2026-09-08T23:36:51.638Z',
+      mediaUrls: [
+        'https://images.xhs.justlikekatie.com/videos/assets/day-16.mp4',
+        'https://images.xhs.justlikekatie.com/images/assets/day-16.jpg',
+      ],
+      videoUrls: ['https://images.xhs.justlikekatie.com/videos/assets/day-16.mp4'],
+      imageUrls: ['https://images.xhs.justlikekatie.com/images/assets/day-16.jpg'],
+      thumbnailUrl: 'https://images.xhs.justlikekatie.com/images/assets/day-16.jpg',
+    });
+
+    const accounting = buildBatchCandidateAccounting(
+      [revisedDay16],
+      'bootstrap',
+      new Date('2026-09-09T12:00:00.000Z'),
+      [],
+    );
+
+    expect(accounting.blockedCandidates).toEqual([]);
+    expect(accounting.items).toEqual([
+      expect.objectContaining({
+        notionPageId: revisedDay16.id,
+        snapshot: expect.objectContaining({
+          notionLastEditedTime: '2026-09-08T23:36:51.638Z',
+          publishAt: '2026-09-11T23:20:00.000Z',
+          mediaUrl: 'https://images.xhs.justlikekatie.com/videos/assets/day-16.mp4',
+        }),
+      }),
+    ]);
+  });
+
   it('never dispatches a publication-confirmed post under a legacy Ready status', () => {
     const now = new Date('2026-08-04T13:00:00.000Z');
     const published = post('2026-08-04T14:00:00.000Z', {
@@ -214,8 +245,8 @@ describe('bounded RedNote publish batches', () => {
       'bootstrap',
       now,
       [
-        localJob(scheduled.id, 'scheduled', 'job-scheduled'),
-        localJob(submitted.id, 'submitted', 'job-submitted'),
+        localJobBlocker(scheduled.id, 'scheduled', 'job-scheduled'),
+        localJobBlocker(submitted.id, 'submitted', 'job-submitted'),
       ],
     );
 

@@ -23,6 +23,7 @@ import type {
   BatchAuthorization,
   LocalPublishWorkLane,
   OperatorSuccessAttestationSummary,
+  PublishLifecycleBlocker,
 } from '@/types/local-publish-job';
 
 export const CLAIM_LEASE_EXPIRED_MESSAGE =
@@ -532,28 +533,35 @@ export async function listLocalPublishJobs(workspaceId = 'legacy-local-publish')
   }));
 }
 
-export async function listPublishOwningLocalJobs(
-  notionPageIds: string[],
+export async function listPublishLifecycleBlockers(
+  candidates: Array<Pick<
+    LocalPublishSnapshot,
+    'notionPageId' | 'notionLastEditedTime'
+  >>,
   workspaceId = 'legacy-local-publish',
 ) {
-  if (notionPageIds.length === 0) return [];
-  const result = await sql<LocalPublishJobRow>`
-    SELECT *
-    FROM local_publish_jobs
-    WHERE workspace_id = ${workspaceId}
-      AND notion_page_id = ANY(${notionPageIds}::text[])
-    ORDER BY created_at DESC
+  if (candidates.length === 0) return [];
+  const result = await sql<{
+    notion_page_id: string;
+    lifecycle_id: string;
+    lifecycle_state: string;
+  }>`
+    SELECT blocker.*
+    FROM jsonb_to_recordset(${JSON.stringify(candidates)}::jsonb) AS candidate(
+      "notionPageId" text,
+      "notionLastEditedTime" text
+    )
+    CROSS JOIN LATERAL rednote_publish_revision_blockers(
+      ${workspaceId},
+      candidate."notionPageId",
+      candidate."notionLastEditedTime"
+    ) blocker
   `;
-  return result.rows
-    .filter((row) =>
-      canonicalStatus(row.status) !== 'failed' ||
-      Boolean(
-        row.dispatch_authorized_at ||
-        row.dispatched_at ||
-        row.note_id ||
-        row.share_url,
-      ))
-    .map(mapRow);
+  return result.rows.map((row): PublishLifecycleBlocker => ({
+    notionPageId: row.notion_page_id,
+    lifecycleId: row.lifecycle_id,
+    lifecycleState: row.lifecycle_state,
+  }));
 }
 
 export async function claimNextStoredLocalPublishJob(
