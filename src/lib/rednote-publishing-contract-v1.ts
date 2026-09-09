@@ -292,6 +292,7 @@ export const REDNOTE_ATTEMPT_EVENT_TYPES = [
   'terminal_outcome_recorded',
   'receipt_lookup',
   'superseded',
+  'administrative_recovery',
 ] as const;
 export type RednoteAttemptEventType =
   (typeof REDNOTE_ATTEMPT_EVENT_TYPES)[number];

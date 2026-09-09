@@ -13,6 +13,7 @@ const PROCESSING_LEASE_MS = 5 * 60 * 1000;
 
 interface ExternalReconciliationRow extends QueryResultRow {
   id: string;
+  workspace_id: string;
   note_id: string;
   share_url: string;
   snapshot: ExternalPostSnapshot;
@@ -30,6 +31,7 @@ interface ExternalReconciliationRow extends QueryResultRow {
 
 export interface StoredExternalReconciliation {
   id: string;
+  workspaceId: string;
   noteId: string;
   shareUrl: string;
   snapshot: ExternalPostSnapshot;
@@ -51,6 +53,7 @@ function timestamp(value: Date | string) {
 function mapRow(row: ExternalReconciliationRow): StoredExternalReconciliation {
   return {
     id: row.id,
+    workspaceId: row.workspace_id,
     noteId: row.note_id,
     shareUrl: row.share_url,
     snapshot: row.snapshot,
@@ -110,6 +113,7 @@ export async function beginExternalReconciliation(
   targetDispositionId?: string,
   source: 'automation' | 'manual' | 'recovery' = 'automation',
   targetNotionPageId?: string,
+  workspaceId = 'legacy-local-publish',
 ) {
   const client = await getPool().connect();
   try {
@@ -121,6 +125,7 @@ export async function beginExternalReconciliation(
     );
     const inserted = await client.query<ExternalReconciliationRow>(
       `INSERT INTO external_post_reconciliations (
+         workspace_id,
          note_id,
          share_url,
          snapshot,
@@ -129,6 +134,7 @@ export async function beginExternalReconciliation(
         manual_handling_id
        )
        SELECT
+         $8,
          $1,
          $2,
          $3::jsonb,
@@ -137,7 +143,8 @@ export async function beginExternalReconciliation(
          (
            SELECT id
            FROM plan_operator_scheduled_posts
-           WHERE notion_page_id = $7
+           WHERE workspace_id = $8
+             AND notion_page_id = $7
            LIMIT 1
          )
        WHERE NOT EXISTS (
@@ -165,6 +172,7 @@ export async function beginExternalReconciliation(
         targetDispositionId ?? null,
         source,
         targetNotionPageId ?? null,
+        workspaceId,
       ],
     );
     if (inserted.rows[0]) {
@@ -221,6 +229,13 @@ export async function beginExternalReconciliation(
       );
     }
     const existing = mapRow(conflicts.rows[0]);
+    if (existing.workspaceId !== workspaceId) {
+      throw new LocalPublishJobError(
+        'The verified post or Idempotency-Key is owned by another workspace',
+        'RECONCILIATION_CONFLICT',
+        409,
+      );
+    }
     if (!isDeepStrictEqual(existing.snapshot, snapshot)) {
       throw new LocalPublishJobError(
         'The verified post or Idempotency-Key was already reconciled with different content',
@@ -252,6 +267,7 @@ export async function beginExternalReconciliation(
            completed_at = NULL,
            updated_at = CURRENT_TIMESTAMP
        WHERE id = $1::uuid
+         AND workspace_id = $2
          AND (
            status = 'failed'
            OR (
@@ -260,7 +276,7 @@ export async function beginExternalReconciliation(
            )
          )
        RETURNING *`,
-      [existing.id],
+      [existing.id, workspaceId],
     );
     if (!reclaimed.rows[0]) {
       throw new LocalPublishJobError(

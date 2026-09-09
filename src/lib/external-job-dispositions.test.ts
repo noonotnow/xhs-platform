@@ -31,6 +31,7 @@ import {
 
 const stored = {
   id: '11111111-1111-4111-8111-111111111111',
+  workspaceId: 'workspace-a',
   notionPageId: 'notion-page',
   sourceLocalJobId: '22222222-2222-4222-8222-222222222222',
   noteId: 'note_123',
@@ -99,6 +100,7 @@ describe('external job disposition orchestration', () => {
       stored.id,
       stored.claimToken,
       snapshot,
+      stored.workspaceId,
     )).resolves.toMatchObject({ status: 'reconciled' });
 
     expect(mocks.prepare.mock.invocationCallOrder[0])
@@ -110,6 +112,7 @@ describe('external job disposition orchestration', () => {
       idempotencyKey: stored.id,
       targetNotionPageId: stored.notionPageId,
       targetDispositionId: stored.id,
+      workspaceId: stored.workspaceId,
     });
   });
 

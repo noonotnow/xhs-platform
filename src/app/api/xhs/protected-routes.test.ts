@@ -82,7 +82,9 @@ describe('protected XHS route handlers', () => {
   it('returns the ready queue as JSON', async () => {
     mocks.listReadyPosts.mockResolvedValue({ posts: [], warnings: [] });
 
-    const response = await getReadyPosts(request('/api/xhs/ready-posts'));
+    const response = await getReadyPosts(request('/api/xhs/ready-posts', {
+      headers: { 'X-Workspace-Id': 'workspace-1' },
+    }));
 
     expect(response.status).toBe(200);
     expect(mocks.listReadyPosts).toHaveBeenCalledWith(expect.objectContaining({
@@ -94,7 +96,9 @@ describe('protected XHS route handlers', () => {
   it('serializes unexpected ready queue failures as JSON', async () => {
     mocks.listReadyPosts.mockRejectedValue(new Error('Notion unavailable'));
 
-    const response = await getReadyPosts(request('/api/xhs/ready-posts'));
+    const response = await getReadyPosts(request('/api/xhs/ready-posts', {
+      headers: { 'X-Workspace-Id': 'workspace-1' },
+    }));
 
     expect(response.status).toBe(502);
     expect(response.headers.get('content-type')).toContain('application/json');
@@ -112,7 +116,9 @@ describe('protected XHS route handlers', () => {
       503,
     ));
 
-    const response = await getReadyPosts(request('/api/xhs/ready-posts'));
+    const response = await getReadyPosts(request('/api/xhs/ready-posts', {
+      headers: { 'X-Workspace-Id': 'workspace-1' },
+    }));
 
     expect(response.status).toBe(503);
     expect(response.headers.get('content-type')).toContain('application/json');

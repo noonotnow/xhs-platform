@@ -6,6 +6,7 @@ import {
   getManualPostHandlingSummaries,
   markManualPostHandled,
 } from '@/lib/manual-post-handlings';
+import { parseWorkspaceId } from '@/lib/workspace-id';
 import { requireXhsOperator } from '@/lib/xhs-operator-auth';
 
 export const dynamic = 'force-dynamic';
@@ -41,8 +42,9 @@ export async function GET(request: NextRequest) {
   const unauthorized = await authorize(request);
   if (unauthorized) return unauthorized;
   try {
+    const workspaceId = parseWorkspaceId(request.headers.get('x-workspace-id'));
     return NextResponse.json(
-      { handlings: await getManualPostHandlingSummaries() },
+      { handlings: await getManualPostHandlingSummaries(workspaceId) },
       { headers: NO_STORE_HEADERS },
     );
   } catch (error) {
@@ -54,6 +56,7 @@ export async function POST(request: NextRequest) {
   const unauthorized = await authorize(request);
   if (unauthorized) return unauthorized;
   try {
+    const workspaceId = parseWorkspaceId(request.headers.get('x-workspace-id'));
     const idempotencyKey = parseIdempotencyKey(
       request.headers.get('idempotency-key'),
     );
@@ -67,7 +70,7 @@ export async function POST(request: NextRequest) {
         400,
       );
     }
-    const result = await markManualPostHandled(body, idempotencyKey);
+    const result = await markManualPostHandled(body, idempotencyKey, workspaceId);
     return NextResponse.json(
       { handling: result.handling },
       { status: result.created ? 201 : 200, headers: NO_STORE_HEADERS },

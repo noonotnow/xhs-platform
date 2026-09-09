@@ -1,4 +1,4 @@
-import type { QueryResultRow } from 'pg';
+import type { PoolClient, QueryResultRow } from 'pg';
 import { getPool } from '@/lib/db';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
 import {
@@ -13,6 +13,7 @@ import type {
 } from '@/types/local-publish-job';
 
 interface RecoveryRow extends QueryResultRow {
+  workspace_id: string;
   batch_id: string;
   batch_status: string;
   manifest_hash: string;
@@ -165,18 +166,40 @@ function result(
   };
 }
 
-export async function recoverStoredApprovedPublishJob(
+export async function recoverStoredApprovedPublishJobTransaction(
+  client: Pick<PoolClient, 'query'>,
   input: RednotePublishJobRecoveryInput,
   recoveredBy: string,
 ) {
-  const client = await getPool().connect();
   try {
     await client.query('BEGIN');
     await client.query(
       "SELECT pg_advisory_xact_lock(hashtextextended('rednote-bootstrap-batch', 0))",
     );
+    const identity = await client.query<{
+      workspace_id: string;
+      notion_page_id: string;
+    }>(
+      `SELECT workspace_id, notion_page_id
+       FROM local_publish_jobs
+       WHERE id = $1::uuid`,
+      [input.jobId],
+    );
+    const target = identity.rows[0];
+    if (!target) {
+      throw new LocalPublishJobError(
+        'Recovery evidence does not identify an existing bounded publish job.',
+        'RECOVERY_PRECONDITION_FAILED',
+        409,
+      );
+    }
+    await client.query(
+      'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+      [`${target.workspace_id}:${target.notion_page_id}`],
+    );
     const locked = await client.query<RecoveryRow>(
       `SELECT
+         job.workspace_id,
          batch.id AS batch_id,
          batch.status AS batch_status,
          batch.manifest_hash,
@@ -236,7 +259,8 @@ export async function recoverStoredApprovedPublishJob(
          AND NOT EXISTS (
            SELECT 1
            FROM plan_operator_scheduled_posts operator_scheduled
-           WHERE operator_scheduled.notion_page_id = job.notion_page_id
+           WHERE operator_scheduled.workspace_id = job.workspace_id
+             AND operator_scheduled.notion_page_id = job.notion_page_id
          )
        FOR UPDATE OF batch, item, job`,
       [input.jobId],
@@ -249,50 +273,36 @@ export async function recoverStoredApprovedPublishJob(
         409,
       );
     }
-    await client.query(
-      'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
-      [row.notion_page_id],
-    );
+    if (
+      row.workspace_id !== target.workspace_id ||
+      row.notion_page_id !== target.notion_page_id
+    ) {
+      throw new LocalPublishJobError(
+        'Recovery ownership changed while acquiring the page lock.',
+        'RECOVERY_PRECONDITION_FAILED',
+        409,
+      );
+    }
     await client.query('LOCK TABLE external_post_reconciliations IN SHARE MODE');
     const ownership = await client.query<OwnershipRow>(
-      `SELECT (
-         EXISTS (
-           SELECT 1
-           FROM local_publish_jobs AS other_job
-           WHERE other_job.notion_page_id = $1
-             AND other_job.id <> $2::uuid
-             AND (
-               other_job.batch_item_id IS NOT NULL
-               OR other_job.status NOT IN ('reconciled', 'failed')
-               OR other_job.dispatch_authorized_at IS NOT NULL
-               OR other_job.dispatched_at IS NOT NULL
-               OR other_job.note_id IS NOT NULL
-               OR other_job.share_url IS NOT NULL
-             )
-         )
-         OR EXISTS (
-           SELECT 1
-           FROM rednote_publish_batch_items AS other_item
-           WHERE other_item.notion_page_id = $1
-             AND other_item.id <> $3::uuid
-             AND (
-               other_item.local_publish_job_id IS NOT NULL
-               OR other_item.state NOT IN ('invalidated', 'reconciled', 'failed')
-             )
-         )
-         OR EXISTS (
-           SELECT 1
-           FROM manual_reconciliation_requests
-           WHERE notion_page_id = $1
-             AND status IN ('queued', 'verifying')
-         )
-         OR EXISTS (
-           SELECT 1
-           FROM external_post_reconciliations
-           WHERE status = 'processing'
+      `SELECT EXISTS (
+         SELECT 1
+         FROM rednote_publish_revision_blockers(
+           $1,
+           $2,
+           $3,
+           $4::uuid,
+           $5::uuid,
+           NULL::uuid
          )
        ) AS active_ownership`,
-      [row.notion_page_id, row.job_id, row.item_id],
+      [
+        row.workspace_id,
+        row.notion_page_id,
+        row.item_snapshot.notionLastEditedTime,
+        row.item_id,
+        row.job_id,
+      ],
     );
     const action = validateRecoveryCandidate(
       candidate(row, ownership.rows[0]?.active_ownership === true),
@@ -427,6 +437,20 @@ export async function recoverStoredApprovedPublishJob(
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
+  }
+}
+
+export async function recoverStoredApprovedPublishJob(
+  input: RednotePublishJobRecoveryInput,
+  recoveredBy: string,
+) {
+  const client = await getPool().connect();
+  try {
+    return await recoverStoredApprovedPublishJobTransaction(
+      client,
+      input,
+      recoveredBy,
+    );
   } finally {
     client.release();
   }

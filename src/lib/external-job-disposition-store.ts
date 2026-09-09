@@ -18,6 +18,7 @@ import type {
 
 interface TargetJobRow extends QueryResultRow {
   id: string;
+  workspace_id: string;
   notion_page_id: string;
   snapshot: LocalPublishSnapshot;
   status: string;
@@ -39,6 +40,7 @@ interface TargetJobRow extends QueryResultRow {
 
 interface RequestRow extends QueryResultRow {
   id: string;
+  workspace_id: string;
   notion_page_id: string;
   source_local_job_id: string | null;
   requested_note_id: string;
@@ -53,6 +55,7 @@ interface RequestRow extends QueryResultRow {
 }
 
 interface ReceiptRow extends QueryResultRow {
+  workspace_id: string;
   notion_page_id: string;
   status: 'publishing' | 'published';
   note_id: string | null;
@@ -252,6 +255,27 @@ async function assertEligibleDispositionJob(
   await assertBatchLinkage(client, job, ['queued', 'claimed']);
 }
 
+async function jobIdentity(client: PoolClient, id: string) {
+  const result = await client.query<{
+    workspace_id: string;
+    notion_page_id: string;
+  }>(
+    `SELECT workspace_id, notion_page_id
+     FROM local_publish_jobs
+     WHERE id = $1::uuid`,
+    [id],
+  );
+  const identity = result.rows[0];
+  if (!identity) {
+    throw new LocalPublishJobError(
+      'Local publish job was not found',
+      'JOB_NOT_FOUND',
+      404,
+    );
+  }
+  return identity;
+}
+
 async function ensureVerifiedPublishedReceipt(
   client: PoolClient,
   job: TargetJobRow,
@@ -263,13 +287,14 @@ async function ensureVerifiedPublishedReceipt(
     request.requested_share_url,
   );
   const receipts = await client.query<ReceiptRow>(
-    `SELECT notion_page_id, status, note_id, share_url
+    `SELECT workspace_id, notion_page_id, status, note_id, share_url
      FROM xhs_publish_receipts
-     WHERE notion_page_id = $1
-        OR note_id = $2
-        OR share_url = $3
+     WHERE (workspace_id = $1 AND notion_page_id = $2)
+        OR note_id = $3
+        OR share_url = $4
      FOR UPDATE`,
     [
+      request.workspace_id,
       request.notion_page_id,
       request.requested_note_id,
       request.requested_share_url,
@@ -278,9 +303,10 @@ async function ensureVerifiedPublishedReceipt(
   if (receipts.rows.length === 0) {
     await client.query(
       `INSERT INTO xhs_publish_receipts (
-         notion_page_id, status, note_id, share_url
-       ) VALUES ($1, 'published', $2, $3)`,
+         workspace_id, notion_page_id, status, note_id, share_url
+       ) VALUES ($1, $2, 'published', $3, $4)`,
       [
+        request.workspace_id,
         request.notion_page_id,
         request.requested_note_id,
         request.requested_share_url,
@@ -290,6 +316,7 @@ async function ensureVerifiedPublishedReceipt(
   }
   if (
     receipts.rows.length !== 1 ||
+    receipts.rows[0].workspace_id !== request.workspace_id ||
     receipts.rows[0].notion_page_id !== job.notion_page_id ||
     receipts.rows[0].status !== 'published' ||
     receipts.rows[0].note_id !== request.requested_note_id ||
@@ -308,14 +335,16 @@ async function assertExactPublishedReceipt(
   request: RequestRow,
 ) {
   const receipt = await client.query<ReceiptRow>(
-    `SELECT notion_page_id, status, note_id, share_url
+    `SELECT workspace_id, notion_page_id, status, note_id, share_url
      FROM xhs_publish_receipts
-     WHERE notion_page_id = $1
+     WHERE workspace_id = $1
+       AND notion_page_id = $2
      FOR SHARE`,
-    [request.notion_page_id],
+    [request.workspace_id, request.notion_page_id],
   );
   if (
     receipt.rowCount !== 1 ||
+    receipt.rows[0].workspace_id !== request.workspace_id ||
     receipt.rows[0].notion_page_id !== job.notion_page_id ||
     receipt.rows[0].status !== 'published' ||
     receipt.rows[0].note_id !== request.requested_note_id ||
@@ -335,18 +364,19 @@ async function assertReceiptAndIdentitySafety(
   snapshot: ExternalPostSnapshot,
 ) {
   const receipts = await client.query<{
+    workspace_id: string;
     notion_page_id: string;
     status: 'publishing' | 'published';
     note_id: string | null;
     share_url: string | null;
   }>(
-    `SELECT notion_page_id, status, note_id, share_url
+    `SELECT workspace_id, notion_page_id, status, note_id, share_url
      FROM xhs_publish_receipts
-     WHERE notion_page_id = $1
-        OR note_id = $2
-        OR share_url = $3
+     WHERE (workspace_id = $1 AND notion_page_id = $2)
+        OR note_id = $3
+        OR share_url = $4
      FOR UPDATE`,
-    [input.notionPageId, input.noteId, input.shareUrl],
+    [job.workspace_id, input.notionPageId, input.noteId, input.shareUrl],
   );
   if (job.status === 'operator_attested' && receipts.rows.length > 0) {
     throw dispositionError(
@@ -356,6 +386,7 @@ async function assertReceiptAndIdentitySafety(
   }
   for (const receipt of receipts.rows) {
     const exact = receipt.status === 'published' &&
+      receipt.workspace_id === job.workspace_id &&
       receipt.notion_page_id === input.notionPageId &&
       receipt.note_id === input.noteId &&
       receipt.share_url === input.shareUrl;
@@ -548,20 +579,33 @@ export async function insertExternalJobDisposition(
   const client = await getPool().connect();
   let existingId: string | undefined;
   let createdId: string | undefined;
+  let requestWorkspaceId: string | undefined;
   try {
     await client.query('BEGIN');
-    const job = await lockedJob(client, input.localJobId);
+    const identity = await jobIdentity(client, input.localJobId);
     await client.query(
       'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
-      [input.notionPageId],
+      [`${identity.workspace_id}:${identity.notion_page_id}`],
     );
+    const job = await lockedJob(client, input.localJobId);
+    requestWorkspaceId = job.workspace_id;
+    if (
+      job.workspace_id !== identity.workspace_id ||
+      job.notion_page_id !== identity.notion_page_id
+    ) {
+      throw dispositionError(
+        'The local job changed ownership while dispositioning',
+        'DISPOSITION_JOB_PAGE_MISMATCH',
+      );
+    }
     const existing = await client.query<RequestRow>(
       `SELECT *,
          claim_expires_at > CURRENT_TIMESTAMP AS claim_valid
        FROM manual_reconciliation_requests
        WHERE idempotency_key = $1::uuid
+         AND workspace_id = $2
        FOR UPDATE`,
-      [idempotencyKey],
+      [idempotencyKey, job.workspace_id],
     );
     if (existing.rows[0]) {
       assertExactRequest(existing.rows[0], input, idempotencyKey);
@@ -584,6 +628,7 @@ export async function insertExternalJobDisposition(
       await assertReceiptAndIdentitySafety(client, job, input, snapshot);
       const inserted = await client.query<{ id: string }>(
         `INSERT INTO manual_reconciliation_requests (
+           workspace_id,
            notion_page_id,
            source_local_job_id,
            requested_note_id,
@@ -591,10 +636,14 @@ export async function insertExternalJobDisposition(
            expected_snapshot,
            request_kind,
            idempotency_key
-         ) VALUES ($1, $2::uuid, $3, $4, $5::jsonb, 'targeted_local_job', $6::uuid)
+         ) VALUES (
+           $1, $2, $3::uuid, $4, $5, $6::jsonb,
+           'targeted_local_job', $7::uuid
+         )
          ON CONFLICT DO NOTHING
          RETURNING id`,
         [
+          job.workspace_id,
           input.notionPageId,
           input.localJobId,
           input.noteId,
@@ -617,9 +666,10 @@ export async function insertExternalJobDisposition(
              claim_expires_at = CURRENT_TIMESTAMP,
              updated_at = CURRENT_TIMESTAMP
          WHERE id = $2::uuid
+           AND workspace_id = $3
            AND external_disposition_request_id IS NULL
          RETURNING id`,
-        [createdId, job.id],
+        [createdId, job.id, job.workspace_id],
       );
       if (quarantined.rowCount !== 1) {
         throw dispositionError(
@@ -635,7 +685,10 @@ export async function insertExternalJobDisposition(
   } finally {
     client.release();
   }
-  const request = await loadManualReconciliation(existingId ?? createdId!);
+  const request = await loadManualReconciliation(
+    existingId ?? createdId!,
+    requestWorkspaceId!,
+  );
   return { request, created: Boolean(createdId) };
 }
 
@@ -645,12 +698,17 @@ export async function prepareExternalJobDisposition(
   snapshot: ExternalPostSnapshot,
 ) {
   const client = await getPool().connect();
+  let requestWorkspaceId: string | undefined;
   try {
     await client.query('BEGIN');
     const job = await lockedJob(client, await dispositionJobId(client, id));
     const request = await lockedRequest(client, id);
+    requestWorkspaceId = request.workspace_id;
     assertDispositionOwnership(job, request.id);
-    if (request.source_local_job_id !== job.id) {
+    if (
+      request.source_local_job_id !== job.id ||
+      request.workspace_id !== job.workspace_id
+    ) {
       throw dispositionError(
         'The disposition request no longer matches its local job',
         'DISPOSITION_REQUEST_CONFLICT',
@@ -658,7 +716,7 @@ export async function prepareExternalJobDisposition(
     }
     if (request.status === 'reconciled') {
       await client.query('COMMIT');
-      return loadManualReconciliation(id);
+      return loadManualReconciliation(id, request.workspace_id);
     }
     assertCurrentRequestClaim(request, claimToken);
     if (!isDeepStrictEqual(snapshot, verifiedSnapshot(request))) {
@@ -733,7 +791,7 @@ export async function prepareExternalJobDisposition(
   } finally {
     client.release();
   }
-  return loadManualReconciliation(id);
+  return loadManualReconciliation(id, requestWorkspaceId!);
 }
 
 export async function completeExternalJobDisposition(
@@ -742,12 +800,17 @@ export async function completeExternalJobDisposition(
   externalReconciliationId: string,
 ) {
   const client = await getPool().connect();
+  let requestWorkspaceId: string | undefined;
   try {
     await client.query('BEGIN');
     const job = await lockedJob(client, await dispositionJobId(client, id));
     const request = await lockedRequest(client, id);
+    requestWorkspaceId = request.workspace_id;
     assertDispositionOwnership(job, request.id);
-    if (request.source_local_job_id !== job.id) {
+    if (
+      request.source_local_job_id !== job.id ||
+      request.workspace_id !== job.workspace_id
+    ) {
       throw dispositionError(
         'The disposition request no longer matches its local job',
         'DISPOSITION_REQUEST_CONFLICT',
@@ -758,7 +821,7 @@ export async function completeExternalJobDisposition(
       request.external_reconciliation_id === externalReconciliationId
     ) {
       await client.query('COMMIT');
-      return loadManualReconciliation(id);
+      return loadManualReconciliation(id, request.workspace_id);
     }
     assertCurrentRequestClaim(request, claimToken);
     if (
@@ -813,10 +876,11 @@ export async function completeExternalJobDisposition(
            completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
            updated_at = CURRENT_TIMESTAMP
        WHERE id = $2::uuid
+         AND workspace_id = $4
          AND status = 'verifying'
          AND claim_token = $3::uuid
        RETURNING id`,
-      [externalReconciliationId, id, claimToken],
+      [externalReconciliationId, id, claimToken, request.workspace_id],
     );
     if (completed.rowCount !== 1) {
       throw dispositionError(
@@ -831,17 +895,22 @@ export async function completeExternalJobDisposition(
   } finally {
     client.release();
   }
-  return loadManualReconciliation(id);
+  return loadManualReconciliation(id, requestWorkspaceId!);
 }
 
 export async function retryExternalJobDisposition(id: string) {
   const client = await getPool().connect();
+  let requestWorkspaceId: string | undefined;
   try {
     await client.query('BEGIN');
     const job = await lockedJob(client, await dispositionJobId(client, id));
     const request = await lockedRequest(client, id);
+    requestWorkspaceId = request.workspace_id;
     assertDispositionOwnership(job, request.id);
-    if (request.source_local_job_id !== job.id) {
+    if (
+      request.source_local_job_id !== job.id ||
+      request.workspace_id !== job.workspace_id
+    ) {
       throw dispositionError(
         'The disposition request no longer matches its local job',
         'DISPOSITION_REQUEST_CONFLICT',
@@ -849,7 +918,7 @@ export async function retryExternalJobDisposition(id: string) {
     }
     if (request.status === 'reconciled') {
       await client.query('COMMIT');
-      return loadManualReconciliation(id);
+      return loadManualReconciliation(id, request.workspace_id);
     }
     if (request.status !== 'failed') {
       throw dispositionError(
@@ -900,8 +969,9 @@ export async function retryExternalJobDisposition(id: string) {
            error_message = NULL,
            completed_at = NULL,
            updated_at = CURRENT_TIMESTAMP
-       WHERE id = $1::uuid`,
-      [id],
+       WHERE id = $1::uuid
+         AND workspace_id = $2`,
+      [id, request.workspace_id],
     );
     await client.query('COMMIT');
   } catch (error) {
@@ -910,7 +980,7 @@ export async function retryExternalJobDisposition(id: string) {
   } finally {
     client.release();
   }
-  return loadManualReconciliation(id);
+  return loadManualReconciliation(id, requestWorkspaceId!);
 }
 
 export function externalJobDispositionSummary(

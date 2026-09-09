@@ -26,6 +26,7 @@ import type {
 
 export interface OperatorSuccessCandidateRow extends QueryResultRow {
   job_id: string;
+  workspace_id: string;
   notion_page_id: string;
   job_snapshot: LocalPublishSnapshot;
   job_status: string;
@@ -278,6 +279,7 @@ async function lockedCandidate(client: PoolClient, jobId: string) {
   const result = await client.query<OperatorSuccessCandidateRow>(
     `SELECT
        job.id AS job_id,
+       job.workspace_id,
        job.notion_page_id,
        job.snapshot AS job_snapshot,
        job.status AS job_status,
@@ -324,10 +326,30 @@ async function lockedCandidate(client: PoolClient, jobId: string) {
   return result.rows[0];
 }
 
+async function candidateIdentity(client: PoolClient, jobId: string) {
+  const result = await client.query<{
+    workspace_id: string;
+    notion_page_id: string;
+  }>(
+    `SELECT workspace_id, notion_page_id
+     FROM local_publish_jobs
+     WHERE id = $1::uuid`,
+    [jobId],
+  );
+  if (!result.rows[0]) {
+    throw conflict(
+      'Attestation evidence does not identify an exact bounded local job',
+      'SUCCESS_ATTESTATION_NOT_FOUND',
+    );
+  }
+  return result.rows[0];
+}
+
 export const OPERATOR_SUCCESS_ATTESTATION_OWNERSHIP_SQL = `SELECT (
        EXISTS (
          SELECT 1 FROM local_publish_jobs AS other
-         WHERE other.notion_page_id = $1
+         WHERE other.workspace_id = $4
+           AND other.notion_page_id = $1
            AND other.id <> $2::uuid
            AND (
              other.status NOT IN ('reconciled', 'failed')
@@ -345,21 +367,25 @@ export const OPERATOR_SUCCESS_ATTESTATION_OWNERSHIP_SQL = `SELECT (
        )
        OR EXISTS (
          SELECT 1 FROM rednote_publish_batch_items AS other
-         WHERE other.notion_page_id = $1
+         WHERE other.workspace_id = $4
+           AND other.notion_page_id = $1
            AND other.id <> $3::uuid
            AND other.state NOT IN ('invalidated', 'reconciled', 'failed')
        )
        OR EXISTS (
          SELECT 1 FROM manual_reconciliation_requests
-         WHERE notion_page_id = $1
+         WHERE workspace_id = $4
+           AND notion_page_id = $1
        )
        OR EXISTS (
          SELECT 1 FROM external_post_reconciliations
-         WHERE notion_page_id = $1
+         WHERE workspace_id = $4
+           AND notion_page_id = $1
        )
        OR EXISTS (
          SELECT 1 FROM xhs_publish_receipts
-         WHERE notion_page_id = $1
+         WHERE workspace_id = $4
+           AND notion_page_id = $1
        )
      ) AS conflict`;
 
@@ -369,7 +395,7 @@ async function assertNoConflictingOwnership(
 ) {
   const ownership = await client.query<{ conflict: boolean }>(
     OPERATOR_SUCCESS_ATTESTATION_OWNERSHIP_SQL,
-    [row.notion_page_id, row.job_id, row.item_id],
+    [row.notion_page_id, row.job_id, row.item_id, row.workspace_id],
   );
   if (ownership.rows[0]?.conflict) {
     throw conflict(
@@ -417,11 +443,21 @@ export async function insertOperatorSuccessAttestation(
       await client.query('COMMIT');
       return { attestation: summary(byKey.rows[0]), created: false };
     }
-    const row = await lockedCandidate(client, input.jobId);
+    const identity = await candidateIdentity(client, input.jobId);
     await client.query(
       'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
-      [row.notion_page_id],
+      [`${identity.workspace_id}:${identity.notion_page_id}`],
     );
+    const row = await lockedCandidate(client, input.jobId);
+    if (
+      row.workspace_id !== identity.workspace_id ||
+      row.notion_page_id !== identity.notion_page_id
+    ) {
+      throw conflict(
+        'Attestation ownership changed while acquiring the page lock',
+        'SUCCESS_ATTESTATION_INELIGIBLE',
+      );
+    }
     await client.query('LOCK TABLE external_post_reconciliations IN SHARE MODE');
     await client.query('LOCK TABLE xhs_publish_receipts IN SHARE MODE');
     validateOperatorSuccessCandidate(row, input);

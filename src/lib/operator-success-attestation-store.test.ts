@@ -54,6 +54,7 @@ const input = {
 function candidate(overrides: Record<string, unknown> = {}) {
   return {
     job_id: input.jobId,
+    workspace_id: 'legacy-local-publish',
     notion_page_id: snapshot.notionPageId,
     job_snapshot: snapshot,
     job_status: 'staged',
@@ -202,8 +203,12 @@ describe('operator success attestation store', () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [row] })
+      .mockResolvedValueOnce({ rows: [{
+        workspace_id: row.workspace_id,
+        notion_page_id: row.notion_page_id,
+      }] })
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [row] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ conflict: false }] })
@@ -232,6 +237,16 @@ describe('operator success attestation store', () => {
       publishMode: 'scheduled',
     });
     const statements = mocks.query.mock.calls.map(([statement]) => statement);
+    const identity = statements.findIndex((statement) =>
+      String(statement).includes('SELECT workspace_id, notion_page_id'));
+    const pageLock = statements.findIndex((statement, index) =>
+      index > identity &&
+      String(statement).includes('pg_advisory_xact_lock') &&
+      String(statement).includes('hashtextextended($1'));
+    const lockedJob = statements.findIndex((statement) =>
+      String(statement).includes('FROM local_publish_jobs AS job'));
+    expect(identity).toBeLessThan(pageLock);
+    expect(pageLock).toBeLessThan(lockedJob);
     expect(statements.some((statement) =>
       statement.includes("status = 'operator_attested'") &&
       statement.includes('claim_token = NULL') &&

@@ -56,6 +56,7 @@ const snapshot = {
 function job(overrides: Record<string, unknown> = {}) {
   return {
     id: input.localJobId,
+    workspace_id: 'workspace-a',
     notion_page_id: input.notionPageId,
     snapshot,
     status: 'queued',
@@ -80,6 +81,7 @@ function job(overrides: Record<string, unknown> = {}) {
 function request(overrides: Record<string, unknown> = {}) {
   return {
     id: requestId,
+    workspace_id: 'workspace-a',
     notion_page_id: input.notionPageId,
     source_local_job_id: input.localJobId,
     requested_note_id: input.noteId,
@@ -129,8 +131,12 @@ function queueCreation(options: {
 } = {}) {
   mocks.query
     .mockResolvedValueOnce(result())
-    .mockResolvedValueOnce(result([options.targetJob ?? job()]))
+    .mockResolvedValueOnce(result([{
+      workspace_id: 'workspace-a',
+      notion_page_id: input.notionPageId,
+    }]))
     .mockResolvedValueOnce(result())
+    .mockResolvedValueOnce(result([options.targetJob ?? job()]))
     .mockResolvedValueOnce(result());
   if (options.targetJob?.status === 'operator_attested') {
     mocks.query.mockResolvedValueOnce(result(options.release ?? [{
@@ -141,6 +147,7 @@ function queueCreation(options: {
   mocks.query
     .mockResolvedValueOnce(result(options.batch ?? [{
       id: batchItemId,
+      workspace_id: 'workspace-a',
       notion_page_id: input.notionPageId,
       local_publish_job_id: input.localJobId,
       state: options.targetJob?.status ?? 'queued',
@@ -169,6 +176,7 @@ describe('external job disposition persistence', () => {
   it('atomically creates ownership for an exact queued job and linked batch item', async () => {
     queueCreation({
       receipts: [{
+        workspace_id: 'workspace-a',
         notion_page_id: input.notionPageId,
         status: 'published',
         note_id: input.noteId,
@@ -189,6 +197,18 @@ describe('external job disposition persistence', () => {
     expect(queries.some((text) =>
       text.includes('SET external_disposition_request_id'))).toBe(true);
     expect(queries.some((text) => text.includes('xhs_publish_receipts'))).toBe(true);
+    const identity = queries.findIndex((text) =>
+      text.includes('SELECT workspace_id, notion_page_id'));
+    const pageLock = queries.findIndex((text) =>
+      text.includes('pg_advisory_xact_lock'));
+    const lockedJob = queries.findIndex((text) =>
+      text.includes('FROM local_publish_jobs') && text.includes('FOR UPDATE'));
+    expect(identity).toBeLessThan(pageLock);
+    expect(pageLock).toBeLessThan(lockedJob);
+    const insert = mocks.query.mock.calls.find(([text]) =>
+      String(text).includes('INSERT INTO manual_reconciliation_requests'));
+    expect(insert?.[1]?.[0]).toBe('workspace-a');
+    expect(mocks.load).toHaveBeenCalledWith(requestId, 'workspace-a');
   });
 
   it('accepts an expired claim but rejects active ownership and dispatch evidence', async () => {
@@ -217,11 +237,15 @@ describe('external job disposition persistence', () => {
     mocks.connect.mockResolvedValue({ query: mocks.query, release: mocks.release });
     mocks.query
       .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result([{
+        workspace_id: 'workspace-a',
+        notion_page_id: input.notionPageId,
+      }]))
+      .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result([job({
         status: 'claimed',
         claim_expired: false,
       })]))
-      .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result());
     await expect(insertExternalJobDisposition(input, idempotencyKey))
@@ -231,10 +255,14 @@ describe('external job disposition persistence', () => {
     mocks.connect.mockResolvedValue({ query: mocks.query, release: mocks.release });
     mocks.query
       .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result([{
+        workspace_id: 'workspace-a',
+        notion_page_id: input.notionPageId,
+      }]))
+      .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result([job({
         staged_at: '2026-08-04T12:01:00.000Z',
       })]))
-      .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result());
     await expect(insertExternalJobDisposition(input, idempotencyKey))
@@ -318,6 +346,7 @@ describe('external job disposition persistence', () => {
 
   it.each([
     ['receipt', { receipts: [{
+      workspace_id: 'workspace-a',
       notion_page_id: input.notionPageId,
       status: 'publishing',
       note_id: null,
@@ -335,10 +364,14 @@ describe('external job disposition persistence', () => {
   it('returns only an exact idempotent replay', async () => {
     mocks.query
       .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result([{
+        workspace_id: 'workspace-a',
+        notion_page_id: input.notionPageId,
+      }]))
+      .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result([job({
         external_disposition_request_id: requestId,
       })]))
-      .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result([request({ status: 'queued' })]))
       .mockResolvedValueOnce(result());
     await expect(insertExternalJobDisposition(input, idempotencyKey))
@@ -348,10 +381,14 @@ describe('external job disposition persistence', () => {
     mocks.connect.mockResolvedValue({ query: mocks.query, release: mocks.release });
     mocks.query
       .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result([{
+        workspace_id: 'workspace-a',
+        notion_page_id: input.notionPageId,
+      }]))
+      .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result([job({
         external_disposition_request_id: requestId,
       })]))
-      .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result([request({ requested_note_id: 'different' })]))
       .mockResolvedValueOnce(result());
     await expect(insertExternalJobDisposition(input, idempotencyKey))
@@ -361,8 +398,12 @@ describe('external job disposition persistence', () => {
   it('rejects a notion-only key reused for a targeted disposition', async () => {
     mocks.query
       .mockResolvedValueOnce(result())
-      .mockResolvedValueOnce(result([job()]))
+      .mockResolvedValueOnce(result([{
+        workspace_id: 'workspace-a',
+        notion_page_id: input.notionPageId,
+      }]))
       .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result([job()]))
       .mockResolvedValueOnce(result([request({
         request_kind: 'notion_only',
         source_local_job_id: null,
@@ -416,6 +457,7 @@ describe('external job disposition persistence', () => {
     expect(verifyBatch).toBeGreaterThan(verifyJob);
     expect(receipt).toBeGreaterThan(verifyBatch);
     expect(commit).toBeGreaterThan(receipt);
+    expect(mocks.query.mock.calls[receipt][1]?.[0]).toBe('workspace-a');
   });
 
   it('rechecks release ownership before verifying an operator-attested job', async () => {
@@ -487,6 +529,7 @@ describe('external job disposition persistence', () => {
         state: 'verified',
       }]))
       .mockResolvedValueOnce(result([{
+        workspace_id: 'workspace-a',
         notion_page_id: input.notionPageId,
         status: 'published',
         note_id: input.noteId,

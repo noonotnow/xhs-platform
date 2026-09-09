@@ -1,4 +1,4 @@
-import type { QueryResultRow } from 'pg';
+import type { PoolClient, QueryResultRow } from 'pg';
 import { createHash } from 'crypto';
 import { isDeepStrictEqual } from 'util';
 import { getPool, sql } from '@/lib/db';
@@ -28,6 +28,7 @@ export interface NewPublishBatchItem {
 
 interface BatchRow extends QueryResultRow {
   id: string;
+  workspace_id: string;
   kind: PublishBatchKind;
   status: PublishBatchStatus;
   manifest_hash: string;
@@ -43,6 +44,7 @@ interface BatchRow extends QueryResultRow {
 
 interface ItemRow extends QueryResultRow {
   id: string;
+  workspace_id: string;
   batch_id: string;
   notion_page_id: string;
   snapshot: LocalPublishSnapshot;
@@ -81,15 +83,31 @@ interface ItemRow extends QueryResultRow {
   recovery_no_active_ownership?: boolean;
 }
 
-interface OwningJobRow extends QueryResultRow {
+interface LifecycleBlockerRow extends QueryResultRow {
   notion_page_id: string;
-  id: string;
-  status: string;
+  lifecycle_id: string;
+  lifecycle_state: string;
 }
 
-function owningJobReason(job: OwningJobRow) {
-  return `Local publish job ${job.id} is ${job.status}. ` +
-    'An existing active or post-dispatch lifecycle owns this record; do not publish it again.';
+function lifecycleBlockerReason(blocker: LifecycleBlockerRow) {
+  if (blocker.lifecycle_state === 'candidate_revision:invalid') {
+    return 'The Notion source revision is missing or malformed; automatic dispatch fails closed.';
+  }
+  const batchItemState = blocker.lifecycle_state.startsWith('batch_item:')
+    ? blocker.lifecycle_state.slice('batch_item:'.length)
+    : null;
+  if (batchItemState) {
+    return `Publish batch item ${blocker.lifecycle_id} is ${batchItemState}. ` +
+      'Its frozen revision or linked lifecycle still owns this record; do not publish it again.';
+  }
+  const localJobState = blocker.lifecycle_state.startsWith('local_job:')
+    ? blocker.lifecycle_state.slice('local_job:'.length)
+    : null;
+  return localJobState
+    ? `Local publish job ${blocker.lifecycle_id} is ${localJobState}. ` +
+      'The frozen revision or evidence-bearing lifecycle owns this record; do not publish it again.'
+    : `Publish lifecycle ${blocker.lifecycle_id} is ${blocker.lifecycle_state}. ` +
+      'Evidence for this record exists; do not publish it again.';
 }
 
 function timestamp(value: Date | string) {
@@ -213,6 +231,7 @@ function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
 function mapBatch(row: BatchRow, items: PublishBatchItem[]): PublishBatch {
   return {
     id: row.id,
+    workspaceId: row.workspace_id,
     kind: row.kind,
     status: row.status,
     manifestHash: row.manifest_hash,
@@ -231,6 +250,7 @@ function mapBatch(row: BatchRow, items: PublishBatchItem[]): PublishBatch {
 }
 
 export async function createStoredPublishBatch(input: {
+  workspaceId: string;
   kind: PublishBatchKind;
   manifestHash: string;
   windowStart?: string;
@@ -253,60 +273,48 @@ export async function createStoredPublishBatch(input: {
     for (const pageId of pageIds) {
       await client.query(
         'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
-        [pageId],
+        [`${input.workspaceId}:${pageId}`],
       );
     }
-    const owningJobs = pageIds.length === 0
-      ? { rows: [] as OwningJobRow[] }
-      : await client.query<OwningJobRow>(
-          `SELECT DISTINCT ON (notion_page_id) notion_page_id, id, status
-           FROM local_publish_jobs
-           WHERE notion_page_id = ANY($1::text[])
-             AND (
-               status <> 'failed'
-               OR dispatch_authorized_at IS NOT NULL
-               OR dispatched_at IS NOT NULL
-               OR note_id IS NOT NULL
-               OR share_url IS NOT NULL
-             )
-           ORDER BY notion_page_id, created_at DESC`,
-          [pageIds],
+    const lifecycleBlockers = pageIds.length === 0
+      ? { rows: [] as LifecycleBlockerRow[] }
+      : await client.query<LifecycleBlockerRow>(
+         `SELECT blocker.*
+          FROM jsonb_to_recordset($1::jsonb) AS candidate(
+            "notionPageId" text,
+            "notionLastEditedTime" text
+          )
+          CROSS JOIN LATERAL rednote_publish_revision_blockers(
+            $2,
+            candidate."notionPageId",
+            candidate."notionLastEditedTime"
+          ) blocker`,
+         [
+           JSON.stringify(input.items.map((item) => ({
+             notionPageId: item.notionPageId,
+             notionLastEditedTime: item.snapshot.notionLastEditedTime,
+           }))),
+           input.workspaceId,
+         ],
         );
-    const operatorScheduled = pageIds.length === 0
-      ? { rows: [] as Array<{ notion_page_id: string }> }
-      : await client.query<{ notion_page_id: string }>(
-         `SELECT notion_page_id
-          FROM plan_operator_scheduled_posts
-          WHERE notion_page_id = ANY($1::text[])`,
-         [pageIds],
-        );
-    const operatorScheduledPages = new Set(
-      operatorScheduled.rows.map((row) => row.notion_page_id),
-    );
-    const ownershipByPage = new Map(
-      owningJobs.rows.map((job) => [job.notion_page_id, job]),
-    );
+    const blockerByPage = new Map<string, LifecycleBlockerRow>();
+    for (const blocker of lifecycleBlockers.rows) {
+      if (!blockerByPage.has(blocker.notion_page_id)) {
+        blockerByPage.set(blocker.notion_page_id, blocker);
+      }
+    }
     const items = input.items.filter((item) =>
-      !ownershipByPage.has(item.notionPageId) &&
-      !operatorScheduledPages.has(item.notionPageId));
+      !blockerByPage.has(item.notionPageId));
     const blockedCandidates = [
       ...input.blockedCandidates,
       ...input.items.flatMap((item): PublishBatchBlockedCandidate[] => {
-        const job = ownershipByPage.get(item.notionPageId);
-        if (operatorScheduledPages.has(item.notionPageId)) {
-          return [{
-            notionPageId: item.notionPageId,
-            headline: item.snapshot.headline,
-            ...(item.snapshot.publishAt ? { publishAt: item.snapshot.publishAt } : {}),
-            reason: 'PLAN recorded operator scheduling; automatic dispatch is closed.',
-          }];
-        }
-        return job
+        const blocker = blockerByPage.get(item.notionPageId);
+        return blocker
           ? [{
               notionPageId: item.notionPageId,
               headline: item.snapshot.headline,
               ...(item.snapshot.publishAt ? { publishAt: item.snapshot.publishAt } : {}),
-              reason: owningJobReason(job),
+              reason: lifecycleBlockerReason(blocker),
             }]
           : [];
       }),
@@ -321,6 +329,7 @@ export async function createStoredPublishBatch(input: {
            SET status = 'superseded',
                superseded_at = CURRENT_TIMESTAMP
            WHERE kind = 'bootstrap'
+             AND workspace_id = $1
              AND status = 'pending_approval'
              AND NOT EXISTS (
                SELECT 1
@@ -329,6 +338,7 @@ export async function createStoredPublishBatch(input: {
                  AND item.state NOT IN ('needs_approval', 'invalidated')
              )
            RETURNING *`,
+          [input.workspaceId],
         )
       : { rows: [] as BatchRow[] };
     if (superseded.rows.length > 0) {
@@ -345,10 +355,11 @@ export async function createStoredPublishBatch(input: {
     }
     const batch = await client.query<BatchRow>(
       `INSERT INTO rednote_publish_batches (
-        kind, manifest_hash, candidate_report, window_start, window_end
-      ) VALUES ($1, $2, $3::jsonb, $4::timestamptz, $5::timestamptz)
+        workspace_id, kind, manifest_hash, candidate_report, window_start, window_end
+      ) VALUES ($1, $2, $3, $4::jsonb, $5::timestamptz, $6::timestamptz)
        RETURNING *`,
       [
+       input.workspaceId,
        input.kind,
        input.manifestHash,
        JSON.stringify(blockedCandidates),
@@ -361,12 +372,13 @@ export async function createStoredPublishBatch(input: {
     for (const item of items) {
       const inserted = await client.query<ItemRow>(
         `INSERT INTO rednote_publish_batch_items (
-           batch_id, notion_page_id, snapshot, item_hash, dispatch_mode, late_by_seconds
-         ) VALUES ($1::uuid, $2, $3::jsonb, $4, $5, $6)
-         ON CONFLICT DO NOTHING
-         RETURNING *`,
+           batch_id, workspace_id, notion_page_id, snapshot, item_hash,
+           dispatch_mode, late_by_seconds
+         ) VALUES ($1::uuid, $2, $3, $4::jsonb, $5, $6, $7)
+           RETURNING *`,
         [
           row.id,
+          input.workspaceId,
           item.notionPageId,
           JSON.stringify(item.snapshot),
           item.itemHash,
@@ -374,7 +386,7 @@ export async function createStoredPublishBatch(input: {
           item.lateBySeconds,
         ],
       );
-      if (inserted.rows[0]) storedItems.push(mapItem(inserted.rows[0]));
+      storedItems.push(mapItem(inserted.rows[0]));
     }
     if (storedItems.length === 0 && input.kind !== 'bootstrap') {
       await client.query('ROLLBACK');
@@ -410,11 +422,12 @@ export async function createStoredPublishBatch(input: {
   }
 }
 
-export async function listStoredPublishBatches(batchId?: string) {
+export async function listStoredPublishBatches(workspaceId: string, batchId?: string) {
   const batches = await sql<BatchRow>`
     SELECT *
     FROM rednote_publish_batches
-    WHERE (${batchId ?? null}::uuid IS NULL OR id = ${batchId ?? null}::uuid)
+    WHERE workspace_id = ${workspaceId}
+      AND (${batchId ?? null}::uuid IS NULL OR id = ${batchId ?? null}::uuid)
     ORDER BY created_at DESC
     LIMIT 20
   `;
@@ -449,41 +462,15 @@ export async function listStoredPublishBatches(batchId?: string) {
         recovery.prior_claim_attempts AS recovery_audit_claim_attempts,
         recovery.prior_completed_at AS recovery_audit_completed_at,
         recovery.recovered_at AS recovery_audit_recovered_at,
-        NOT (
-          EXISTS (
-            SELECT 1
-            FROM local_publish_jobs AS other_job
-            WHERE other_job.notion_page_id = item.notion_page_id
-              AND other_job.id <> job.id
-              AND (
-                other_job.batch_item_id IS NOT NULL
-                OR other_job.status NOT IN ('reconciled', 'failed')
-                OR other_job.dispatch_authorized_at IS NOT NULL
-                OR other_job.dispatched_at IS NOT NULL
-                OR other_job.note_id IS NOT NULL
-                OR other_job.share_url IS NOT NULL
-              )
-          )
-          OR EXISTS (
-            SELECT 1
-            FROM rednote_publish_batch_items AS other_item
-            WHERE other_item.notion_page_id = item.notion_page_id
-              AND other_item.id <> item.id
-              AND (
-                other_item.local_publish_job_id IS NOT NULL
-                OR other_item.state NOT IN ('invalidated', 'reconciled', 'failed')
-              )
-          )
-          OR EXISTS (
-            SELECT 1
-            FROM manual_reconciliation_requests
-            WHERE notion_page_id = item.notion_page_id
-              AND status IN ('queued', 'verifying')
-          )
-          OR EXISTS (
-            SELECT 1
-            FROM external_post_reconciliations
-            WHERE status = 'processing'
+        NOT EXISTS (
+          SELECT 1
+          FROM rednote_publish_revision_blockers(
+            item.workspace_id,
+            item.notion_page_id,
+            item.snapshot->>'notionLastEditedTime',
+            item.id,
+            job.id,
+            NULL::uuid
           )
         ) AS recovery_no_active_ownership
       FROM rednote_publish_batch_items AS item
@@ -496,6 +483,7 @@ export async function listStoredPublishBatches(batchId?: string) {
         LIMIT 1
       ) AS recovery ON TRUE
       WHERE item.batch_id = ${batch.id}::uuid
+        AND item.workspace_id = ${workspaceId}
       ORDER BY item.snapshot->>'publishAt' NULLS FIRST, item.created_at
     `;
     output.push(mapBatch(batch, items.rows.map((item) => mapItem(item, batch))));
@@ -503,25 +491,71 @@ export async function listStoredPublishBatches(batchId?: string) {
   return output;
 }
 
-export async function approveStoredPublishBatch(
+export async function approveStoredPublishBatchTransaction(
+  client: Pick<PoolClient, 'query'>,
   batchId: string,
   manifestHash: string,
   approvedBy: string,
   decisions: Array<{ itemId: string; approved: boolean; reason?: string }>,
+  workspaceId: string,
 ) {
-  const client = await getPool().connect();
   try {
     await client.query('BEGIN');
     await client.query(
       "SELECT pg_advisory_xact_lock(hashtextextended('rednote-bootstrap-batch', 0))",
     );
+    const observed = await client.query<BatchRow>(
+      `SELECT *
+       FROM rednote_publish_batches
+       WHERE id = $1::uuid
+         AND manifest_hash = $2
+         AND workspace_id = $3`,
+      [batchId, manifestHash, workspaceId],
+    );
+    const observedBatch = observed.rows[0];
+    if (!observedBatch || observedBatch.status !== 'pending_approval') {
+      throw new Error(
+        observedBatch?.status === 'superseded'
+          ? 'This batch was superseded and can never be approved. Refresh to review its replacement manifest.'
+          : 'The batch is no longer pending approval; refresh before approving.',
+      );
+    }
+    const approvedItemIds = Array.from(
+      new Set(
+        decisions
+          .filter((decision) => decision.approved)
+          .map((decision) => decision.itemId),
+      ),
+    );
+    if (approvedItemIds.length > 0) {
+      const approvedPages = await client.query<{ notion_page_id: string }>(
+        `SELECT notion_page_id
+         FROM rednote_publish_batch_items
+         WHERE id = ANY($1::uuid[])
+           AND batch_id = $2::uuid
+           AND workspace_id = $3
+           AND state = 'needs_approval'
+         ORDER BY notion_page_id`,
+        [approvedItemIds, batchId, workspaceId],
+      );
+      let previousPageId: string | undefined;
+      for (const { notion_page_id: pageId } of approvedPages.rows) {
+        if (pageId === previousPageId) continue;
+        await client.query(
+          'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+          [`${workspaceId}:${pageId}`],
+        );
+        previousPageId = pageId;
+      }
+    }
     const locked = await client.query<BatchRow>(
       `SELECT *
        FROM rednote_publish_batches
        WHERE id = $1::uuid
          AND manifest_hash = $2
+         AND workspace_id = $3
        FOR UPDATE`,
-      [batchId, manifestHash],
+      [batchId, manifestHash, workspaceId],
     );
     const current = locked.rows[0];
     if (!current || current.status !== 'pending_approval') {
@@ -559,50 +593,28 @@ export async function approveStoredPublishBatch(
             updated_at = CURRENT_TIMESTAMP
         WHERE id = $1::uuid
           AND batch_id = $2::uuid
+          AND workspace_id = $3
           AND state = 'needs_approval'
-          AND NOT EXISTS (
-            SELECT 1
-            FROM plan_operator_scheduled_posts operator_scheduled
-            WHERE operator_scheduled.notion_page_id =
-              rednote_publish_batch_items.notion_page_id
-          )
         RETURNING *
-      ), page_lock AS (
-        SELECT approved_item.*,
-               pg_advisory_xact_lock(hashtextextended(approved_item.notion_page_id, 0))
-        FROM approved_item
       ), inserted_job AS (
         INSERT INTO local_publish_jobs (
-          notion_page_id, snapshot, idempotency_key, batch_item_id
+          workspace_id, notion_page_id, snapshot, idempotency_key, batch_item_id
         )
         SELECT
+          $3,
           notion_page_id,
           snapshot,
           gen_random_uuid(),
           id
-        FROM page_lock
+        FROM approved_item
         WHERE NOT EXISTS (
           SELECT 1
-          FROM plan_operator_scheduled_posts operator_scheduled
-          WHERE operator_scheduled.notion_page_id = page_lock.notion_page_id
-        )
-          AND NOT EXISTS (
-          SELECT 1
-          FROM local_publish_jobs existing
-          WHERE existing.notion_page_id = page_lock.notion_page_id
-            AND (
-              existing.status <> 'failed'
-              OR existing.dispatch_authorized_at IS NOT NULL
-              OR existing.dispatched_at IS NOT NULL
-              OR existing.note_id IS NOT NULL
-              OR existing.share_url IS NOT NULL
-            )
-        )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM manual_reconciliation_requests reconciliation
-            WHERE reconciliation.notion_page_id = page_lock.notion_page_id
-              AND reconciliation.status IN ('queued', 'verifying')
+          FROM rednote_publish_revision_blockers(
+            $3,
+            approved_item.notion_page_id,
+            approved_item.snapshot->>'notionLastEditedTime',
+            approved_item.id
+          )
           )
         ON CONFLICT DO NOTHING
         RETURNING id, batch_item_id
@@ -614,7 +626,7 @@ export async function approveStoredPublishBatch(
       FROM inserted_job
       WHERE item.id = inserted_job.batch_item_id
         `,
-        [decision.itemId, batchId],
+        [decision.itemId, batchId, workspaceId],
       );
       await client.query(
         `
@@ -657,10 +669,30 @@ export async function approveStoredPublishBatch(
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
+  }
+}
+
+export async function approveStoredPublishBatch(
+  batchId: string,
+  manifestHash: string,
+  approvedBy: string,
+  decisions: Array<{ itemId: string; approved: boolean; reason?: string }>,
+  workspaceId: string,
+) {
+  const client = await getPool().connect();
+  try {
+    await approveStoredPublishBatchTransaction(
+      client,
+      batchId,
+      manifestHash,
+      approvedBy,
+      decisions,
+      workspaceId,
+    );
   } finally {
     client.release();
   }
-  return (await listStoredPublishBatches(batchId))[0];
+  return (await listStoredPublishBatches(workspaceId, batchId))[0];
 }
 
 export async function invalidateStoredBatchItem(

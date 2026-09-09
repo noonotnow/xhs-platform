@@ -53,6 +53,7 @@ describe('ready posts route', () => {
   it('keeps handled receipt-pending posts visible with durable state', async () => {
     const response = await GET(new NextRequest(
       'https://xhs.justlikekatie.com/api/xhs/ready-posts',
+      { headers: { 'X-Workspace-Id': 'workspace-1' } },
     ));
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
@@ -66,7 +67,7 @@ describe('ready posts route', () => {
         manualWarnings: ['Publish packet is not ready'],
       }],
     });
-    expect(mocks.loadHandlings).toHaveBeenCalledWith();
+    expect(mocks.loadHandlings).toHaveBeenCalledWith('workspace-1');
     expect(mocks.getPost).not.toHaveBeenCalled();
   });
 
@@ -80,6 +81,7 @@ describe('ready posts route', () => {
 
     const response = await GET(new NextRequest(
       'https://xhs.justlikekatie.com/api/xhs/ready-posts',
+      { headers: { 'X-Workspace-Id': 'workspace-1' } },
     ));
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({

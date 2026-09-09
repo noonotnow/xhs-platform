@@ -25,6 +25,7 @@ import { GET as listExternal } from '@/app/admin/api/external-post-reconciliatio
 
 const workerToken = 'worker-token-that-is-at-least-32-characters';
 const idempotencyKey = '33333333-3333-4333-8333-333333333333';
+const workspaceId = 'workspace-1';
 const body = {
   noteId: 'note_123',
   shareUrl: 'https://www.rednote.com/explore/note_123',
@@ -77,6 +78,7 @@ describe('external reconciliation routes', () => {
           Authorization: `Bearer ${workerToken}`,
           'Content-Type': 'application/json',
           'Idempotency-Key': idempotencyKey,
+          'X-Workspace-Id': workspaceId,
         },
         body: JSON.stringify(body),
       },
@@ -85,6 +87,7 @@ describe('external reconciliation routes', () => {
     expect(mocks.reconcile).toHaveBeenCalledWith({
       snapshot: body,
       idempotencyKey,
+      workspaceId,
     });
     expect(response.headers.get('cache-control')).toContain('no-store');
 
@@ -96,6 +99,7 @@ describe('external reconciliation routes', () => {
           Authorization: `Bearer ${workerToken}`,
           'Content-Type': 'application/json',
           'Idempotency-Key': idempotencyKey,
+          'X-Workspace-Id': workspaceId,
         },
         body: JSON.stringify({ ...body, mediaUrl: 'https://untrusted.example/video.mp4' }),
       },

@@ -208,6 +208,7 @@ describe('local publish job display selection', () => {
     };
     const batch: PublishBatch = {
       id: 'batch',
+      workspaceId: 'workspace-1',
       kind: 'bootstrap',
       status: 'approved',
       manifestHash: 'a'.repeat(64),

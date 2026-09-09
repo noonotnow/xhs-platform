@@ -57,6 +57,7 @@ function row(recovered = false, generation = 1) {
     job_batch_item_id: input.itemId,
     job_status: recovered ? 'queued' : 'failed',
     job_snapshot: snapshot,
+    workspace_id: 'legacy-local-publish',
     notion_page_id: snapshot.notionPageId,
     job_error_code: recovered ? null : 'BOUNDED_BATCH_BYPASS_DISABLED',
     job_error_message: recovered ? null : 'Worker bypass is disabled',
@@ -98,6 +99,12 @@ describe('stored approved publish job recovery', () => {
 
   it('writes one audit and requeues the same job without changing approval or identity', async () => {
     mocks.query.mockImplementation(async (statement: string) => {
+      if (statement.includes('SELECT workspace_id, notion_page_id')) {
+        return { rows: [{
+          workspace_id: row().workspace_id,
+          notion_page_id: row().notion_page_id,
+        }] };
+      }
       if (statement.includes('FROM local_publish_jobs AS job')) return { rows: [row()] };
       if (statement.includes('AS active_ownership')) {
         return { rows: [{ active_ownership: false }] };
@@ -133,6 +140,14 @@ describe('stored approved publish job recovery', () => {
     });
 
     const statements = mocks.query.mock.calls.map(([statement]) => String(statement));
+    const identity = statements.findIndex((value) =>
+      value.includes('SELECT workspace_id, notion_page_id'));
+    const pageLock = statements.findIndex((value) =>
+      value.includes('pg_advisory_xact_lock(hashtextextended($1'));
+    const lockedJob = statements.findIndex((value) =>
+      value.includes('FROM local_publish_jobs AS job'));
+    expect(identity).toBeLessThan(pageLock);
+    expect(pageLock).toBeLessThan(lockedJob);
     expect(statements.filter((value) =>
       value.includes('INSERT INTO rednote_publish_job_recoveries'))).toHaveLength(1);
     expect(statements.filter((value) =>
@@ -185,16 +200,28 @@ describe('stored approved publish job recovery', () => {
       'Worker bypass is disabled',
     ]);
     const ownership = statements.find((value) => value.includes('AS active_ownership'))!;
-    expect(ownership).toContain('manual_reconciliation_requests');
-    expect(ownership).toContain('external_post_reconciliations');
-    expect(ownership).toContain('other_job');
-    expect(ownership).toContain('other_item');
+    expect(ownership).toContain('rednote_publish_revision_blockers');
+    const ownershipCall = mocks.query.mock.calls.find(([statement]) =>
+      String(statement).includes('AS active_ownership'));
+    expect(ownershipCall?.[1]).toEqual([
+      'legacy-local-publish',
+      snapshot.notionPageId,
+      input.snapshotRevision,
+      input.itemId,
+      input.jobId,
+    ]);
     expect(statements).toContain('COMMIT');
   });
 
   it('selects the latest audit and appends generation two after the active-drain race', async () => {
     const generationTwoId = '77777777-7777-4777-8777-777777777777';
     mocks.query.mockImplementation(async (statement: string) => {
+      if (statement.includes('SELECT workspace_id, notion_page_id')) {
+        return { rows: [{
+          workspace_id: row().workspace_id,
+          notion_page_id: row().notion_page_id,
+        }] };
+      }
       if (statement.includes('FROM local_publish_jobs AS job')) {
         return {
           rows: [{
@@ -236,6 +263,10 @@ describe('stored approved publish job recovery', () => {
       alreadyRecovered: false,
     });
     const statements = mocks.query.mock.calls.map(([statement]) => String(statement));
+    const ownershipQuery = statements.find((value) =>
+      value.includes('AS active_ownership'))!;
+    expect(ownershipQuery).toContain('SELECT EXISTS (');
+    expect(ownershipQuery).not.toContain('SELECT (\n         SELECT 1');
     const candidateQuery = statements.find((value) =>
       value.includes('FROM local_publish_jobs AS job'))!;
     expect(candidateQuery).toContain('LEFT JOIN LATERAL');
@@ -262,6 +293,12 @@ describe('stored approved publish job recovery', () => {
 
   it('returns the same audit for an exact queued retry without another write', async () => {
     mocks.query.mockImplementation(async (statement: string) => {
+      if (statement.includes('SELECT workspace_id, notion_page_id')) {
+        return { rows: [{
+          workspace_id: row().workspace_id,
+          notion_page_id: row().notion_page_id,
+        }] };
+      }
       if (statement.includes('FROM local_publish_jobs AS job')) {
         return {
           rows: [{
@@ -294,6 +331,12 @@ describe('stored approved publish job recovery', () => {
   it('appends and requeues the exact generation-three image-mode hydration failure', async () => {
     const generationThreeId = '99999999-9999-4999-8999-999999999999';
     mocks.query.mockImplementation(async (statement: string) => {
+      if (statement.includes('SELECT workspace_id, notion_page_id')) {
+        return { rows: [{
+          workspace_id: row().workspace_id,
+          notion_page_id: row().notion_page_id,
+        }] };
+      }
       if (statement.includes('FROM local_publish_jobs AS job')) {
         return {
           rows: [{
@@ -350,6 +393,12 @@ describe('stored approved publish job recovery', () => {
 
   it('rolls back the audit when the exact timestamp compare-and-set fails', async () => {
     mocks.query.mockImplementation(async (statement: string) => {
+      if (statement.includes('SELECT workspace_id, notion_page_id')) {
+        return { rows: [{
+          workspace_id: row().workspace_id,
+          notion_page_id: row().notion_page_id,
+        }] };
+      }
       if (statement.includes('FROM local_publish_jobs AS job')) return { rows: [row()] };
       if (statement.includes('AS active_ownership')) {
         return { rows: [{ active_ownership: false }] };

@@ -51,6 +51,7 @@ const input = {
 const key = '33333333-3333-4333-8333-333333333333';
 const jobId = '55555555-5555-4555-8555-555555555555';
 const attestationId = '66666666-6666-4666-8666-666666666666';
+const workspaceId = 'workspace-1';
 
 function result(rows: unknown[] = [], rowCount = rows.length) {
   return { rows, rowCount };
@@ -58,6 +59,7 @@ function result(rows: unknown[] = [], rowCount = rows.length) {
 
 function candidate(overrides: Record<string, unknown> = {}) {
   return {
+    workspace_id: workspaceId,
     batch_id: input.batchId,
     batch_status: 'approved',
     manifest_hash: input.manifestHash,
@@ -73,9 +75,18 @@ function candidate(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function identity(overrides: Record<string, unknown> = {}) {
+  return {
+    workspace_id: workspaceId,
+    notion_page_id: snapshot.notionPageId,
+    ...overrides,
+  };
+}
+
 function job(overrides: Record<string, unknown> = {}) {
   return {
     id: jobId,
+    workspace_id: workspaceId,
     notion_page_id: snapshot.notionPageId,
     snapshot,
     status: 'queued',
@@ -134,8 +145,9 @@ describe('manual scheduling attestation store', () => {
       .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result())
-      .mockResolvedValueOnce(result([candidate()]))
+      .mockResolvedValueOnce(result([identity()]))
       .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result([candidate()]))
       .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result([{ conflict: false }]))
@@ -157,6 +169,10 @@ describe('manual scheduling attestation store', () => {
     const statements = mocks.query.mock.calls.map(([text]) => String(text));
     expect(statements.some((text) =>
       text.includes('INSERT INTO local_publish_jobs'))).toBe(true);
+    const insertedJob = mocks.query.mock.calls.find(([text]) =>
+      String(text).includes('INSERT INTO local_publish_jobs'));
+    expect(insertedJob?.[0]).toContain('workspace_id');
+    expect(insertedJob?.[1]).toContain(workspaceId);
     expect(statements.some((text) =>
       text.includes("status = 'operator_attested'") &&
       text.includes('next_verification_at = NULL'))).toBe(true);
@@ -164,6 +180,13 @@ describe('manual scheduling attestation store', () => {
       text.includes("'manual_scheduled'"))).toBe(true);
     expect(statements.filter((text) =>
       text.includes('UPDATE local_publish_jobs'))).toHaveLength(1);
+    const pageLockIndex = statements.findIndex((text) =>
+      text.includes('pg_advisory_xact_lock') &&
+      !text.includes('manual-scheduling:'));
+    const candidateRowLockIndex = statements.findIndex((text) =>
+      text.includes('FOR UPDATE OF item, batch'));
+    expect(pageLockIndex).toBeGreaterThan(-1);
+    expect(candidateRowLockIndex).toBeGreaterThan(pageLockIndex);
   });
 
   it('converts only the exact unclaimed queued job and rejects a worker collision', async () => {
@@ -171,11 +194,12 @@ describe('manual scheduling attestation store', () => {
       .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result([identity()]))
+      .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result([candidate({
         item_state: 'queued',
         local_publish_job_id: jobId,
       })]))
-      .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result([job({ status: 'claimed', claim_token: key })]))
       .mockResolvedValueOnce(result());
 
@@ -207,8 +231,9 @@ describe('manual scheduling attestation store', () => {
       .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result())
-      .mockResolvedValueOnce(result([candidate()]))
+      .mockResolvedValueOnce(result([identity()]))
       .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result([candidate()]))
       .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result([{ conflict: true }]))

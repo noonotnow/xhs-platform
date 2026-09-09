@@ -64,6 +64,7 @@ export async function reconcileVerifiedExternalPost(input: {
   targetDispositionId?: string;
   manualHandling?: Record<string, never>;
   source?: 'automation' | 'manual' | 'recovery';
+  workspaceId?: string;
 }) {
   const started = await beginExternalReconciliation(
     input.snapshot,
@@ -71,6 +72,7 @@ export async function reconcileVerifiedExternalPost(input: {
     input.targetDispositionId,
     input.source ?? (input.manualHandling ? 'manual' : 'automation'),
     input.targetNotionPageId,
+    input.workspaceId,
   );
   if (!started.acquired) {
     return completedResult(started.record, input.targetNotionPageId);

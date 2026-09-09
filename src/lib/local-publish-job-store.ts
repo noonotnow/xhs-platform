@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'crypto';
 import type { QueryResultRow } from 'pg';
 import { isDeepStrictEqual } from 'util';
-import { sql } from '@/lib/db';
+import { getPool, sql } from '@/lib/db';
 import {
   LocalPublishJobError,
   normalizeLocalPublishTags,
@@ -23,6 +23,7 @@ import type {
   BatchAuthorization,
   LocalPublishWorkLane,
   OperatorSuccessAttestationSummary,
+  PublishLifecycleBlocker,
 } from '@/types/local-publish-job';
 
 export const CLAIM_LEASE_EXPIRED_MESSAGE =
@@ -373,133 +374,74 @@ export async function insertLocalPublishJob(
   idempotencyKey: string,
   workspaceId = 'legacy-local-publish',
 ) {
-  const inserted = await sql<LocalPublishJobRow>`
-    WITH page_lock AS (
-      SELECT pg_advisory_xact_lock(
-        hashtextextended(${workspaceId} || E'\x1f' || ${snapshot.notionPageId}, 0)
-      )
-    )
-    INSERT INTO local_publish_jobs (
-      notion_page_id,
-      snapshot,
-      idempotency_key,
-      workspace_id
-    )
-    SELECT
-      ${snapshot.notionPageId},
-      ${JSON.stringify(snapshot)}::jsonb,
-      ${idempotencyKey}::uuid,
-      ${workspaceId}
-    FROM page_lock
-    WHERE NOT EXISTS (
-      SELECT 1
-      FROM plan_operator_scheduled_posts
-      WHERE workspace_id = ${workspaceId}
-        AND notion_page_id = ${snapshot.notionPageId}
-    )
-      AND NOT EXISTS (
-      SELECT 1
-      FROM manual_reconciliation_requests
-      WHERE workspace_id = ${workspaceId}
-        AND notion_page_id = ${snapshot.notionPageId}
-        AND status IN ('queued', 'verifying')
-    )
-      AND NOT EXISTS (
-        SELECT 1
-        FROM local_publish_jobs existing
-        WHERE existing.workspace_id = ${workspaceId}
-          AND existing.notion_page_id = ${snapshot.notionPageId}
-          AND (
-            existing.status NOT IN ('reconciled', 'succeeded', 'failed')
-            OR existing.dispatch_authorized_at IS NOT NULL
-            OR existing.dispatched_at IS NOT NULL
-            OR existing.note_id IS NOT NULL
-            OR existing.share_url IS NOT NULL
-          )
-      )
-    ON CONFLICT DO NOTHING
-    RETURNING *
-  `;
-  if (inserted.rows[0]) {
-    return { job: mapRow(inserted.rows[0]), created: true };
-  }
-
-  const existingKey = await sql<LocalPublishJobRow>`
-    SELECT *
-    FROM local_publish_jobs
-    WHERE workspace_id = ${workspaceId}
-      AND idempotency_key = ${idempotencyKey}::uuid
-    LIMIT 1
-  `;
-  if (existingKey.rows[0]) {
-    const job = mapRow(existingKey.rows[0]);
-    if (!sameSnapshot(job.snapshot, snapshot)) {
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+      [`${workspaceId}:${snapshot.notionPageId}`],
+    );
+    const existingKey = await client.query<LocalPublishJobRow>(
+      `SELECT *
+       FROM local_publish_jobs
+       WHERE workspace_id = $1
+         AND idempotency_key = $2::uuid
+       LIMIT 1`,
+      [workspaceId, idempotencyKey],
+    );
+    if (existingKey.rows[0]) {
+      const job = mapRow(existingKey.rows[0]);
+      if (!sameSnapshot(job.snapshot, snapshot)) {
+        throw new LocalPublishJobError(
+          'Idempotency-Key was already used for a different request',
+          'IDEMPOTENCY_CONFLICT',
+          409,
+        );
+      }
+      await client.query('COMMIT');
+      return { job, created: false };
+    }
+    const blocker = await client.query<PublishLifecycleBlocker>(
+      `SELECT *
+       FROM rednote_publish_revision_blockers($1, $2, $3)
+       LIMIT 1`,
+      [workspaceId, snapshot.notionPageId, snapshot.notionLastEditedTime],
+    );
+    if (blocker.rows[0]) {
       throw new LocalPublishJobError(
-        'Idempotency-Key was already used for a different request',
-        'IDEMPOTENCY_CONFLICT',
+        'This Notion revision already has a lifecycle owner or prior dispatch evidence',
+        'ACTIVE_JOB_EXISTS',
         409,
       );
     }
-    return { job, created: false };
-  }
-
-  const operatorScheduled = await sql`
-    SELECT id
-    FROM plan_operator_scheduled_posts
-    WHERE workspace_id = ${workspaceId}
-      AND notion_page_id = ${snapshot.notionPageId}
-    LIMIT 1
-  `;
-  if (operatorScheduled.rows[0]) {
-    throw new LocalPublishJobError(
-      'PLAN already recorded this post as operator scheduled',
-      'OPERATOR_SCHEDULED_NON_DISPATCHABLE',
-      409,
+    const inserted = await client.query<LocalPublishJobRow>(
+      `INSERT INTO local_publish_jobs (
+         notion_page_id, snapshot, idempotency_key, workspace_id
+       ) VALUES ($1, $2::jsonb, $3::uuid, $4)
+       ON CONFLICT DO NOTHING
+       RETURNING *`,
+      [
+        snapshot.notionPageId,
+        JSON.stringify(snapshot),
+        idempotencyKey,
+        workspaceId,
+      ],
     );
+    if (!inserted.rows[0]) {
+      throw new LocalPublishJobError(
+        'The local publish job could not be created',
+        'QUEUE_WRITE_FAILED',
+        503,
+      );
+    }
+    await client.query('COMMIT');
+    return { job: mapRow(inserted.rows[0]), created: true };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
-
-  const active = await sql<LocalPublishJobRow>`
-    SELECT *
-    FROM local_publish_jobs
-    WHERE workspace_id = ${workspaceId}
-      AND notion_page_id = ${snapshot.notionPageId}
-      AND (
-        status NOT IN ('reconciled', 'succeeded', 'failed')
-        OR dispatch_authorized_at IS NOT NULL
-        OR dispatched_at IS NOT NULL
-        OR note_id IS NOT NULL
-        OR share_url IS NOT NULL
-      )
-    ORDER BY created_at DESC
-    LIMIT 1
-  `;
-  if (active.rows[0]) {
-    throw new LocalPublishJobError(
-      'This Notion post already has an active local publish job',
-      'ACTIVE_JOB_EXISTS',
-      409,
-    );
-  }
-  const activeReconciliation = await sql`
-    SELECT id
-    FROM manual_reconciliation_requests
-    WHERE workspace_id = ${workspaceId}
-      AND notion_page_id = ${snapshot.notionPageId}
-      AND status IN ('queued', 'verifying')
-    LIMIT 1
-  `;
-  if (activeReconciliation.rows[0]) {
-    throw new LocalPublishJobError(
-      'This Notion post already has an active manual reconciliation',
-      'ACTIVE_RECONCILIATION_EXISTS',
-      409,
-    );
-  }
-  throw new LocalPublishJobError(
-    'The local publish job could not be created',
-    'QUEUE_WRITE_FAILED',
-    503,
-  );
 }
 
 export async function findLocalPublishJobByIdempotencyKey(idempotencyKey: string, workspaceId = 'legacy-local-publish') {
@@ -532,28 +474,35 @@ export async function listLocalPublishJobs(workspaceId = 'legacy-local-publish')
   }));
 }
 
-export async function listPublishOwningLocalJobs(
-  notionPageIds: string[],
+export async function listPublishLifecycleBlockers(
+  candidates: Array<Pick<
+    LocalPublishSnapshot,
+    'notionPageId' | 'notionLastEditedTime'
+  >>,
   workspaceId = 'legacy-local-publish',
 ) {
-  if (notionPageIds.length === 0) return [];
-  const result = await sql<LocalPublishJobRow>`
-    SELECT *
-    FROM local_publish_jobs
-    WHERE workspace_id = ${workspaceId}
-      AND notion_page_id = ANY(${notionPageIds}::text[])
-    ORDER BY created_at DESC
+  if (candidates.length === 0) return [];
+  const result = await sql<{
+    notion_page_id: string;
+    lifecycle_id: string;
+    lifecycle_state: string;
+  }>`
+    SELECT blocker.*
+    FROM jsonb_to_recordset(${JSON.stringify(candidates)}::jsonb) AS candidate(
+      "notionPageId" text,
+      "notionLastEditedTime" text
+    )
+    CROSS JOIN LATERAL rednote_publish_revision_blockers(
+      ${workspaceId},
+      candidate."notionPageId",
+      candidate."notionLastEditedTime"
+    ) blocker
   `;
-  return result.rows
-    .filter((row) =>
-      canonicalStatus(row.status) !== 'failed' ||
-      Boolean(
-        row.dispatch_authorized_at ||
-        row.dispatched_at ||
-        row.note_id ||
-        row.share_url,
-      ))
-    .map(mapRow);
+  return result.rows.map((row): PublishLifecycleBlocker => ({
+    notionPageId: row.notion_page_id,
+    lifecycleId: row.lifecycle_id,
+    lifecycleState: row.lifecycle_state,
+  }));
 }
 
 export async function claimNextStoredLocalPublishJob(

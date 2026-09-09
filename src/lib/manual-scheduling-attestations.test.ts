@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { rednotePublishMedia } from '@/lib/rednote-publish-authorization';
 import { manifestHash } from '@/lib/rednote-publish-batches';
 
 const mocks = vi.hoisted(() => ({
@@ -51,6 +52,7 @@ const snapshot = {
   mediaType: 'image' as const,
   mediaIndex: 0,
   mediaUrl: post.imageUrls[0],
+  media: [rednotePublishMedia('image', post.imageUrls[0])],
   thumbnailUrl: post.thumbnailUrl,
   publishAt: post.publishAt,
   notionLastEditedTime: post.lastEditedTime,

@@ -2,9 +2,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   sql: vi.fn(),
+  query: vi.fn(),
+  release: vi.fn(),
 }));
 
-vi.mock('@/lib/db', () => ({ sql: mocks.sql }));
+vi.mock('@/lib/db', () => ({
+  sql: mocks.sql,
+  getPool: () => ({
+    connect: async () => ({ query: mocks.query, release: mocks.release }),
+  }),
+}));
 
 import {
   authorizeStoredLocalPublishJob,
@@ -17,7 +24,7 @@ import {
   heartbeatStoredLocalPublishJob,
   insertLocalPublishJob,
   listLocalPublishJobs,
-  listPublishOwningLocalJobs,
+  listPublishLifecycleBlockers,
   normalizeStoredLocalPublishSnapshot,
   prepareStoredLocalPublishVerification,
   recordStoredAcknowledgedPublication,
@@ -44,26 +51,31 @@ const snapshot: LocalPublishSnapshot = {
   notionLastEditedTime: '2026-08-01T12:00:00.000Z',
 };
 
+beforeEach(() => {
+  mocks.query.mockReset();
+  mocks.release.mockReset();
+});
+
 describe('publish ownership lookup', () => {
-  it('keeps active and post-dispatch failures while allowing pre-dispatch retry', async () => {
+  it('returns revision-aware lifecycle blockers from the canonical database predicate', async () => {
     mocks.sql.mockResolvedValue({
       rows: [
-        { ...claimedRow(), id: 'active', status: 'scheduled' },
         {
-          ...claimedRow(),
-          id: 'dispatch-authorized-failure',
-          status: 'failed',
-          dispatch_authorized_at: '2026-08-01T12:59:00.000Z',
+          notion_page_id: snapshot.notionPageId,
+          lifecycle_id: 'active',
+          lifecycle_state: 'local_job:scheduled',
         },
-        { ...claimedRow(), id: 'pre-dispatch-failure', status: 'failed' },
       ],
-      rowCount: 3,
+      rowCount: 1,
     });
 
-    await expect(listPublishOwningLocalJobs([snapshot.notionPageId]))
+    await expect(listPublishLifecycleBlockers([snapshot]))
       .resolves.toEqual([
-        expect.objectContaining({ id: 'active', status: 'scheduled' }),
-        expect.objectContaining({ id: 'dispatch-authorized-failure', status: 'failed' }),
+        {
+          notionPageId: snapshot.notionPageId,
+          lifecycleId: 'active',
+          lifecycleState: 'local_job:scheduled',
+        },
       ]);
   });
 });
@@ -682,12 +694,15 @@ describe('local publish atomic claim storage', () => {
       expectedAccountId: snapshot.expectedAccountId,
       notionPageId: snapshot.notionPageId,
     };
-    mocks.sql
-      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
-      .mockResolvedValueOnce({
-        rows: [{ ...queuedRow(), snapshot: reorderedSnapshot }],
-        rowCount: 1,
-      });
+    mocks.query.mockImplementation(async (statement: string) => {
+      if (statement.includes('WHERE workspace_id = $1')) {
+        return {
+          rows: [{ ...queuedRow(), snapshot: reorderedSnapshot }],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
 
     await expect(insertLocalPublishJob(
       snapshot,
@@ -696,20 +711,82 @@ describe('local publish atomic claim storage', () => {
       created: false,
       job: { id: queuedRow().id, status: 'queued' },
     });
-    expect(mocks.sql).toHaveBeenCalledTimes(2);
+    expect(mocks.query).toHaveBeenCalledTimes(4);
   });
 
   it('prevents a second active job for the same Notion page', async () => {
-    mocks.sql
-      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
-      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
-      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
-      .mockResolvedValueOnce({ rows: [claimedRow()], rowCount: 1 });
+    mocks.query.mockImplementation(async (statement: string) => {
+      if (statement.includes('rednote_publish_revision_blockers')) {
+        return {
+          rows: [{
+            notion_page_id: snapshot.notionPageId,
+            lifecycle_id: claimedRow().id,
+            lifecycle_state: 'local_job:claimed',
+          }],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
 
     await expect(insertLocalPublishJob(
       snapshot,
       '55555555-5555-4555-8555-555555555555',
     )).rejects.toMatchObject({ code: 'ACTIVE_JOB_EXISTS', status: 409 });
+  });
+
+  it('queues the exact revised Day 16 snapshot after an evidence-free old failure', async () => {
+    const revisedSnapshot: LocalPublishSnapshot = {
+      ...snapshot,
+      notionPageId: '432411de-071a-498e-9833-ff7b6c238374',
+      notionLastEditedTime: '2026-09-08T23:36:51.638Z',
+      publishAt: '2026-09-11T23:20:00.000Z',
+      mediaUrl: 'https://images.xhs.justlikekatie.com/videos/day-16.mp4',
+      thumbnailUrl: 'https://images.xhs.justlikekatie.com/thumbnails/day-16.jpg',
+    };
+    const inserted = {
+      ...queuedRow(),
+      workspace_id: 'workspace-day-16',
+      notion_page_id: revisedSnapshot.notionPageId,
+      snapshot: revisedSnapshot,
+    };
+    mocks.query.mockImplementation(async (statement: string) => {
+      if (statement.includes('INSERT INTO local_publish_jobs')) {
+        return { rows: [inserted], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+
+    await expect(insertLocalPublishJob(
+      revisedSnapshot,
+      '66666666-6666-4666-8666-666666666666',
+      'workspace-day-16',
+    )).resolves.toMatchObject({
+      created: true,
+      job: {
+        workspaceId: 'workspace-day-16',
+        notionPageId: revisedSnapshot.notionPageId,
+        snapshot: {
+          publishAt: revisedSnapshot.publishAt,
+        },
+      },
+    });
+
+    const statements = mocks.query.mock.calls.map(([statement]) => String(statement));
+    const lockIndex = statements.findIndex((statement) =>
+      statement.includes('pg_advisory_xact_lock'));
+    const blockerIndex = statements.findIndex((statement) =>
+      statement.includes('rednote_publish_revision_blockers'));
+    expect(lockIndex).toBeGreaterThan(-1);
+    expect(lockIndex).toBeLessThan(blockerIndex);
+    expect(mocks.query.mock.calls[lockIndex][1]).toEqual([
+      `workspace-day-16:${revisedSnapshot.notionPageId}`,
+    ]);
+    expect(mocks.query.mock.calls[blockerIndex][1]).toEqual([
+      'workspace-day-16',
+      revisedSnapshot.notionPageId,
+      revisedSnapshot.notionLastEditedTime,
+    ]);
   });
 
   it('persists staged state before any Creator dispatch', async () => {

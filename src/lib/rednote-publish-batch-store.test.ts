@@ -92,7 +92,7 @@ describe('stored RedNote bootstrap replacement', () => {
     const oldHash = 'a'.repeat(64);
     const newHash = 'b'.repeat(64);
     mocks.query.mockImplementation(async (statement: string) => {
-      if (statement.includes('SELECT DISTINCT ON')) return { rows: [] };
+      if (statement.includes('rednote_publish_revision_blockers')) return { rows: [] };
       if (statement.includes("SET status = 'superseded'")) {
         return { rows: [batchRow(oldId, 'superseded', oldHash)] };
       }
@@ -122,6 +122,7 @@ describe('stored RedNote bootstrap replacement', () => {
     });
 
     const result = await createStoredPublishBatch({
+      workspaceId: 'workspace-1',
       kind: 'bootstrap',
       manifestHash: newHash,
       items: [{
@@ -146,12 +147,49 @@ describe('stored RedNote bootstrap replacement', () => {
       expect.stringContaining('SET superseded_by_batch_id = $1::uuid'),
       'COMMIT',
     ]));
+    expect(statements.find((statement) =>
+      statement.includes('INSERT INTO rednote_publish_batch_items')))
+      .not.toContain('ON CONFLICT DO NOTHING');
+  });
+
+  it('rolls back instead of committing an empty manifest after an item conflict', async () => {
+    const newId = '33333333-3333-4333-8333-333333333333';
+    const newHash = 'b'.repeat(64);
+    mocks.query.mockImplementation(async (statement: string) => {
+      if (statement.includes('rednote_publish_revision_blockers')) return { rows: [] };
+      if (statement.includes("SET status = 'superseded'")) return { rows: [] };
+      if (statement.includes('INSERT INTO rednote_publish_batches')) {
+        return { rows: [batchRow(newId, 'pending_approval', newHash)] };
+      }
+      if (statement.includes('INSERT INTO rednote_publish_batch_items')) {
+        throw Object.assign(new Error('duplicate active revision'), { code: '23505' });
+      }
+      return { rows: [], rowCount: 1 };
+    });
+
+    await expect(createStoredPublishBatch({
+      workspaceId: 'workspace-1',
+      kind: 'bootstrap',
+      manifestHash: newHash,
+      items: [{
+        notionPageId: snapshot.notionPageId,
+        snapshot,
+        itemHash: newHash,
+        dispatchMode: 'scheduled',
+        lateBySeconds: 0,
+      }],
+      blockedCandidates: [],
+    })).rejects.toMatchObject({ code: '23505' });
+    expect(mocks.query.mock.calls.map(([statement]) => String(statement)))
+      .toContain('ROLLBACK');
+    expect(mocks.query.mock.calls.map(([statement]) => String(statement)))
+      .not.toContain('COMMIT');
   });
 
   it('rejects a superseded manifest before changing any item', async () => {
     const oldHash = 'a'.repeat(64);
     mocks.query.mockImplementation(async (statement: string) => {
-      if (statement.includes('FOR UPDATE')) {
+      if (statement.includes('FROM rednote_publish_batches')) {
         return { rows: [batchRow('old', 'superseded', oldHash)] };
       }
       return { rows: [], rowCount: 1 };
@@ -162,6 +200,7 @@ describe('stored RedNote bootstrap replacement', () => {
       oldHash,
       'operator@example.com',
       [],
+      'workspace-1',
     )).rejects.toThrow(/superseded and can never be approved/i);
     const statements = mocks.query.mock.calls.map(([statement]) => String(statement));
     expect(statements).toContain('ROLLBACK');
@@ -173,8 +212,11 @@ describe('stored RedNote bootstrap replacement', () => {
     const batchId = '22222222-2222-4222-8222-222222222222';
     const manifestHash = 'a'.repeat(64);
     mocks.query.mockImplementation(async (statement: string) => {
-      if (statement.includes('FOR UPDATE')) {
+      if (statement.includes('FROM rednote_publish_batches')) {
         return { rows: [batchRow(batchId, 'pending_approval', manifestHash)] };
+      }
+      if (statement.includes('SELECT notion_page_id')) {
+        return { rows: [{ notion_page_id: snapshot.notionPageId }] };
       }
       if (statement.includes('UPDATE rednote_publish_batches AS batch')) {
         return { rows: [batchRow(batchId, 'approved', manifestHash)] };
@@ -195,6 +237,7 @@ describe('stored RedNote bootstrap replacement', () => {
         itemId: '44444444-4444-4444-8444-444444444444',
         approved: true,
       }],
+      'workspace-1',
     )).resolves.toMatchObject({ id: batchId, status: 'approved' });
 
     const statements = mocks.query.mock.calls.map(([statement]) => String(statement));
@@ -202,9 +245,73 @@ describe('stored RedNote bootstrap replacement', () => {
       expect.stringContaining("hashtextextended('rednote-bootstrap-batch', 0)"),
       expect.stringContaining('FOR UPDATE'),
       expect.stringContaining('INSERT INTO local_publish_jobs'),
-      expect.stringContaining('plan_operator_scheduled_posts'),
+      expect.stringContaining('rednote_publish_revision_blockers'),
       'COMMIT',
     ]));
+    const approvalStatement = statements.find((statement) =>
+      statement.includes('INSERT INTO local_publish_jobs'));
+    expect(approvalStatement).toContain('approved_item.id');
+  });
+
+  it('pre-locks approved pages once in deterministic page order', async () => {
+    const batchId = '22222222-2222-4222-8222-222222222222';
+    const manifestHash = 'a'.repeat(64);
+    mocks.query.mockImplementation(async (statement: string) => {
+      if (statement.includes('FROM rednote_publish_batches')) {
+        return { rows: [batchRow(batchId, 'pending_approval', manifestHash)] };
+      }
+      if (statement.includes('SELECT notion_page_id')) {
+        return {
+          rows: [
+            { notion_page_id: 'page-a' },
+            { notion_page_id: 'page-a' },
+            { notion_page_id: 'page-b' },
+          ],
+        };
+      }
+      if (statement.includes('UPDATE rednote_publish_batches AS batch')) {
+        return { rows: [batchRow(batchId, 'approved', manifestHash)] };
+      }
+      return { rows: [], rowCount: 1 };
+    });
+    mocks.sql
+      .mockResolvedValueOnce({
+        rows: [batchRow(batchId, 'approved', manifestHash)],
+      })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await approveStoredPublishBatch(
+      batchId,
+      manifestHash,
+      'operator@example.com',
+      [
+        { itemId: '55555555-5555-4555-8555-555555555555', approved: true },
+        { itemId: '44444444-4444-4444-8444-444444444444', approved: true },
+      ],
+      'workspace-1',
+    );
+
+    const pageLockKeys = mocks.query.mock.calls
+      .filter(([statement]) =>
+        String(statement) ===
+        'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))')
+      .map(([, parameters]) => parameters?.[0]);
+    expect(pageLockKeys).toEqual([
+      'workspace-1:page-a',
+      'workspace-1:page-b',
+    ]);
+    expect(String(mocks.query.mock.calls.find(([statement]) =>
+      String(statement).includes('SELECT notion_page_id'))?.[0]))
+      .toContain('ORDER BY notion_page_id');
+    const statements = mocks.query.mock.calls.map(([statement]) => String(statement));
+    const firstPageLock = statements.indexOf(
+      'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+    );
+    const batchRowLock = statements.findIndex((statement) =>
+      statement.includes('FROM rednote_publish_batches') &&
+      statement.includes('FOR UPDATE'));
+    expect(firstPageLock).toBeGreaterThan(-1);
+    expect(batchRowLock).toBeGreaterThan(firstPageLock);
   });
 
   it('still supersedes an unsafe old manifest when every current candidate is blocked', async () => {
@@ -223,6 +330,7 @@ describe('stored RedNote bootstrap replacement', () => {
     });
 
     await expect(createStoredPublishBatch({
+      workspaceId: 'workspace-1',
       kind: 'bootstrap',
       manifestHash: emptyHash,
       items: [],
@@ -288,7 +396,7 @@ describe('stored RedNote bootstrap replacement', () => {
     mocks.sql
       .mockResolvedValueOnce({ rows: [batchRow(batchId, 'approved', hash)] })
       .mockResolvedValueOnce({ rows: [item] });
-    await expect(listStoredPublishBatches(batchId)).resolves.toMatchObject([{
+    await expect(listStoredPublishBatches('workspace-1', batchId)).resolves.toMatchObject([{
       items: [{
         recoveryEvidence: {
           batchId,
@@ -324,7 +432,7 @@ describe('stored RedNote bootstrap replacement', () => {
           recovery_audit_recovered_at: '2026-08-04T18:40:00.000Z',
         }],
       });
-    await expect(listStoredPublishBatches(batchId)).resolves.toMatchObject([{
+    await expect(listStoredPublishBatches('workspace-1', batchId)).resolves.toMatchObject([{
       items: [{
         recoveryEvidence: {
           priorErrorCode: 'AMBIGUOUS_CREATOR_UI',
@@ -339,7 +447,7 @@ describe('stored RedNote bootstrap replacement', () => {
       .mockResolvedValueOnce({
         rows: [{ ...item, recovery_job_error_code: 'STAGING_FAILED' }],
       });
-    const unsafe = await listStoredPublishBatches(batchId);
+    const unsafe = await listStoredPublishBatches('workspace-1', batchId);
     expect(unsafe[0].items[0].recoveryEvidence).toBeUndefined();
 
     mocks.sql
@@ -355,7 +463,7 @@ describe('stored RedNote bootstrap replacement', () => {
           recovery_audit_snapshot_revision: snapshot.notionLastEditedTime,
         }],
       });
-    const alreadyAudited = await listStoredPublishBatches(batchId);
+    const alreadyAudited = await listStoredPublishBatches('workspace-1', batchId);
     expect(alreadyAudited[0].items[0].recoveryEvidence).toBeUndefined();
 
     mocks.sql
@@ -377,7 +485,7 @@ describe('stored RedNote bootstrap replacement', () => {
           recovery_audit_recovered_at: '2026-08-04T17:30:00.000Z',
         }],
       });
-    await expect(listStoredPublishBatches(batchId)).resolves.toMatchObject([{
+    await expect(listStoredPublishBatches('workspace-1', batchId)).resolves.toMatchObject([{
       items: [{
         recoveryEvidence: {
           claimAttempts: 2,
@@ -407,7 +515,7 @@ describe('stored RedNote bootstrap replacement', () => {
           recovery_audit_recovered_at: '2026-08-04T18:40:00.000Z',
         }],
       });
-    const changedAudit = await listStoredPublishBatches(batchId);
+    const changedAudit = await listStoredPublishBatches('workspace-1', batchId);
     expect(changedAudit[0].items[0].recoveryEvidence).toBeUndefined();
 
     const itemQuery = mocks.sql.mock.calls
