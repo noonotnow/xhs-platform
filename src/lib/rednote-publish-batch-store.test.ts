@@ -147,6 +147,43 @@ describe('stored RedNote bootstrap replacement', () => {
       expect.stringContaining('SET superseded_by_batch_id = $1::uuid'),
       'COMMIT',
     ]));
+    expect(statements.find((statement) =>
+      statement.includes('INSERT INTO rednote_publish_batch_items')))
+      .not.toContain('ON CONFLICT DO NOTHING');
+  });
+
+  it('rolls back instead of committing an empty manifest after an item conflict', async () => {
+    const newId = '33333333-3333-4333-8333-333333333333';
+    const newHash = 'b'.repeat(64);
+    mocks.query.mockImplementation(async (statement: string) => {
+      if (statement.includes('rednote_publish_revision_blockers')) return { rows: [] };
+      if (statement.includes("SET status = 'superseded'")) return { rows: [] };
+      if (statement.includes('INSERT INTO rednote_publish_batches')) {
+        return { rows: [batchRow(newId, 'pending_approval', newHash)] };
+      }
+      if (statement.includes('INSERT INTO rednote_publish_batch_items')) {
+        throw Object.assign(new Error('duplicate active revision'), { code: '23505' });
+      }
+      return { rows: [], rowCount: 1 };
+    });
+
+    await expect(createStoredPublishBatch({
+      workspaceId: 'workspace-1',
+      kind: 'bootstrap',
+      manifestHash: newHash,
+      items: [{
+        notionPageId: snapshot.notionPageId,
+        snapshot,
+        itemHash: newHash,
+        dispatchMode: 'scheduled',
+        lateBySeconds: 0,
+      }],
+      blockedCandidates: [],
+    })).rejects.toMatchObject({ code: '23505' });
+    expect(mocks.query.mock.calls.map(([statement]) => String(statement)))
+      .toContain('ROLLBACK');
+    expect(mocks.query.mock.calls.map(([statement]) => String(statement)))
+      .not.toContain('COMMIT');
   });
 
   it('rejects a superseded manifest before changing any item', async () => {

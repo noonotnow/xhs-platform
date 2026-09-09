@@ -93,6 +93,13 @@ function lifecycleBlockerReason(blocker: LifecycleBlockerRow) {
   if (blocker.lifecycle_state === 'candidate_revision:invalid') {
     return 'The Notion source revision is missing or malformed; automatic dispatch fails closed.';
   }
+  const batchItemState = blocker.lifecycle_state.startsWith('batch_item:')
+    ? blocker.lifecycle_state.slice('batch_item:'.length)
+    : null;
+  if (batchItemState) {
+    return `Publish batch item ${blocker.lifecycle_id} is ${batchItemState}. ` +
+      'Its frozen revision or linked lifecycle still owns this record; do not publish it again.';
+  }
   const localJobState = blocker.lifecycle_state.startsWith('local_job:')
     ? blocker.lifecycle_state.slice('local_job:'.length)
     : null;
@@ -368,8 +375,7 @@ export async function createStoredPublishBatch(input: {
            batch_id, workspace_id, notion_page_id, snapshot, item_hash,
            dispatch_mode, late_by_seconds
          ) VALUES ($1::uuid, $2, $3, $4::jsonb, $5, $6, $7)
-         ON CONFLICT DO NOTHING
-         RETURNING *`,
+           RETURNING *`,
         [
           row.id,
           input.workspaceId,
@@ -380,7 +386,7 @@ export async function createStoredPublishBatch(input: {
           item.lateBySeconds,
         ],
       );
-      if (inserted.rows[0]) storedItems.push(mapItem(inserted.rows[0]));
+      storedItems.push(mapItem(inserted.rows[0]));
     }
     if (storedItems.length === 0 && input.kind !== 'bootstrap') {
       await client.query('ROLLBACK');
