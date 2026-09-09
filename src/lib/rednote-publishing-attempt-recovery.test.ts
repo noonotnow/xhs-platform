@@ -19,6 +19,7 @@ vi.mock('@/lib/db', () => ({
 import {
   createRednotePublishAttempt,
   diagnoseExpiredMisclassifiedBatchClaim,
+  diagnoseTerminalExpiredMisclassifiedBatchClaim,
   frozenPayloadDigest,
   recordLinkedAttemptOutcome,
   requeueExpiredMisclassifiedBatchClaim,
@@ -27,6 +28,7 @@ import {
   requeueReadyX3NotLoggedInFailure,
   requeueReadyX3ScheduleReadbackMismatch,
   requeueReadyX3StaleBrowserFrameFailure,
+  requeueTerminalExpiredMisclassifiedBatchClaim,
   supersedeUnclaimedReadyX3Schedule,
   withReadyX3SourceLock,
 } from '@/lib/rednote-publishing-attempt-store';
@@ -38,11 +40,11 @@ import { storedManifestHash } from '@/lib/rednote-publish-batch-store';
 import { rednoteMediaIdentity } from '@/lib/rednote-publish-authorization';
 
 const input = {
-  workspaceId: 'workspace-1',
-  jobId: '11111111-1111-4111-8111-111111111111',
-  attemptId: '22222222-2222-4222-8222-222222222222',
-  sourceNotionPageId: 'notion-page-1',
-  revision: '2026-08-31T15:56:00.000Z',
+  workspaceId: 'legacy-local-publish',
+  jobId: 'a6cdfa8a-e840-4e48-9776-044a8cd2b093',
+  attemptId: 'ef4a1d51-01eb-4499-a596-4aefefb59de8',
+  sourceNotionPageId: '432411de-071a-498e-9833-ff7b6c238374',
+  revision: '2026-09-08T16:37:00.000Z',
 };
 
 function stableDigest(value: unknown): string {
@@ -91,7 +93,7 @@ describe('Ready x3 pre-provider failure recovery', () => {
         url: mediaUrl,
         identity: rednoteMediaIdentity({ type: 'image', url: mediaUrl }),
       }],
-      publishAt: '2026-08-31T18:00:00.000Z',
+      publishAt: '2026-09-08T23:20:00.000Z',
       notionLastEditedTime: input.revision,
       expectedAccountId: '678ba3b5000000000a03ecd2',
     };
@@ -103,7 +105,7 @@ describe('Ready x3 pre-provider failure recovery', () => {
         sourceLocalPublishJobId: input.jobId,
         payloadRevision: input.revision,
         payloadDigest: '',
-        requestedAt: '2026-08-31T15:00:00.000Z',
+        requestedAt: '2026-09-08T17:08:23.346Z',
         executor: {
           type: 'worker',
           kind: 'playwright',
@@ -131,6 +133,37 @@ describe('Ready x3 pre-provider failure recovery', () => {
       };
       payload.payloadDigest = frozenPayloadDigest(payload);
       return payload;
+    }
+
+    function terminalExpiredCandidate(
+      overrides: Record<string, unknown> = {},
+    ) {
+      const payload = recoveryPayload();
+      const itemHash = stableDigest(batchSnapshot);
+      const batchManifest = [{
+        notionPageId: input.sourceNotionPageId,
+        itemHash,
+        dispatchMode: 'scheduled' as const,
+        lateBySeconds: 0,
+      }];
+      return {
+        id: input.attemptId,
+        claim_token: '33333333-3333-4333-8333-333333333333',
+        claim_expires_at: '2026-09-08T20:19:53.817Z',
+        terminal_at: '2026-09-08T20:19:53.817Z',
+        payload_digest: payload.payloadDigest,
+        payload_revision: input.revision,
+        frozen_payload: payload,
+        approved_at: '2026-09-08T17:08:23.346Z',
+        late_fallback_policy: { action: 'post_now', maxLateMinutes: 30 },
+        job_snapshot: batchSnapshot,
+        batch_snapshot: batchSnapshot,
+        dispatch_mode: 'scheduled',
+        item_hash: itemHash,
+        manifest_hash: storedManifestHash(batchManifest),
+        batch_manifest: batchManifest,
+        ...overrides,
+      };
     }
 
     beforeEach(() => {
@@ -629,6 +662,232 @@ describe('Ready x3 pre-provider failure recovery', () => {
           code: 'EXPIRED_BATCH_CLAIM_RECOVERY_UNSAFE',
           status: 409,
         });
+    });
+
+    it('reactivates and requeues the exact terminal lease-expiry incident in place', async () => {
+      const candidate = terminalExpiredCandidate();
+      mocks.query.mockImplementation(async (statement: string) => {
+        if (
+          statement.includes('SELECT attempt.id,attempt.claim_token') &&
+          statement.includes('attempt.terminal_at')
+        ) {
+          return { rows: [candidate] };
+        }
+        if (statement.includes('UPDATE rednote_publish_attempts')) {
+          return {
+            rows: [{
+              id: input.attemptId,
+              approved_at: candidate.approved_at,
+            }],
+          };
+        }
+        if (statement.includes('UPDATE local_publish_jobs')) {
+          return { rows: [{ id: input.jobId }] };
+        }
+        return { rows: [], rowCount: 1 };
+      });
+
+      await expect(requeueTerminalExpiredMisclassifiedBatchClaim(input))
+        .resolves.toEqual({
+          requeued: true,
+          reclassifiedAuthorization: 'batch',
+          jobId: input.jobId,
+          attemptId: input.attemptId,
+          publicationMayHaveStarted: false,
+        });
+
+      const statements = mocks.query.mock.calls.map(([statement]) => String(statement));
+      expect(statements).toContain(
+        "SELECT set_config('app.ready_x3_invalid_claim_recovery', 'on', true)",
+      );
+      expect(statements).toContain(
+        "SELECT set_config('app.terminal_expired_batch_claim_reclassification', 'on', true)",
+      );
+      expect(statements.some((statement) =>
+        statement.includes('SET authorization_kind=NULL,late_fallback_policy=NULL')))
+        .toBe(true);
+      expect(statements.some((statement) =>
+        statement.includes("active=true,terminal_outcome=NULL,terminal_at=NULL")))
+        .toBe(true);
+      expect(statements.some((statement) =>
+        statement.includes("SET status='queued',claim_token=NULL,claimed_at=NULL")))
+        .toBe(true);
+      expect(statements.some((statement) =>
+        statement.includes("'terminal_expired_batch_claim_recovery'"))).toBe(true);
+      expect(statements.some((statement) =>
+        statement.includes('INSERT INTO local_publish_jobs'))).toBe(false);
+      expect(statements.some((statement) =>
+        statement.includes('INSERT INTO rednote_publish_attempts'))).toBe(false);
+    });
+
+    it('diagnoses the terminal incident with boolean checks and no mutation', async () => {
+      mocks.query.mockResolvedValue({
+        rows: [terminalExpiredCandidate({
+          sql_checks: { operatorScheduleAbsent: false },
+        })],
+      });
+
+      const result = await diagnoseTerminalExpiredMisclassifiedBatchClaim(input);
+
+      expect(result.eligible).toBe(false);
+      expect(result.failedChecks).toEqual(['operatorScheduleAbsent']);
+      expect(Object.values(result.checks).every((value) => typeof value === 'boolean'))
+        .toBe(true);
+      expect(mocks.query).toHaveBeenCalledTimes(1);
+      const statement = String(mocks.query.mock.calls[0][0]);
+      expect(statement).toContain('LEFT JOIN rednote_publish_batch_items');
+      expect(statement).not.toMatch(/\b(UPDATE|INSERT|DELETE)\b/);
+      expect(JSON.stringify(result)).not.toContain('claim_token');
+      expect(JSON.stringify(result)).not.toContain(mediaUrl);
+    });
+
+    it.each([
+      'batchItemPageMatchesAttempt',
+      'frozenContractRevisionMatchesAttempt',
+      'browserExpectedAccountMatchesSnapshot',
+      'browserScheduledDateMatchesSnapshot',
+      'browserTargetPublishAtMatchesSnapshot',
+    ])('reports the exact app/trigger parity failure for %s', async (checkName) => {
+      mocks.query.mockResolvedValue({
+        rows: [terminalExpiredCandidate({
+          sql_checks: { [checkName]: false },
+        })],
+      });
+
+      const result = await diagnoseTerminalExpiredMisclassifiedBatchClaim(input);
+
+      expect(result.eligible).toBe(false);
+      expect(result.failedChecks).toContain(checkName);
+      expect(result.checks[checkName]).toBe(false);
+    });
+
+    it.each([
+      [
+        'missing expected account on both packet sides',
+        'batchExpectedAccountPresent',
+        () => {
+          const candidate = terminalExpiredCandidate();
+          return {
+            ...candidate,
+            job_snapshot: { ...candidate.job_snapshot, expectedAccountId: undefined },
+            batch_snapshot: { ...candidate.batch_snapshot, expectedAccountId: undefined },
+            frozen_payload: {
+              ...candidate.frozen_payload,
+              browserPayload: {
+                ...candidate.frozen_payload.browserPayload,
+                expectedAccountId: undefined,
+              },
+            },
+          };
+        },
+      ],
+      [
+        'missing publish time on both packet sides',
+        'batchPublishAtPresent',
+        () => {
+          const candidate = terminalExpiredCandidate();
+          return {
+            ...candidate,
+            job_snapshot: { ...candidate.job_snapshot, publishAt: undefined },
+            batch_snapshot: { ...candidate.batch_snapshot, publishAt: undefined },
+            frozen_payload: {
+              ...candidate.frozen_payload,
+              browserPayload: {
+                ...candidate.frozen_payload.browserPayload,
+                scheduledDate: null,
+                targetPublishAt: undefined,
+              },
+            },
+          };
+        },
+      ],
+    ])('rejects terminal diagnosis with %s', async (
+      _,
+      expectedFailedCheck,
+      candidate,
+    ) => {
+      mocks.query.mockResolvedValue({ rows: [candidate()] });
+
+      const result = await diagnoseTerminalExpiredMisclassifiedBatchClaim(input);
+
+      expect(result.eligible).toBe(false);
+      expect(result.failedChecks).toContain(expectedFailedCheck);
+    });
+
+    it.each([
+      ['action', { action: 'schedule', maxLateMinutes: 30 }],
+      ['timeout', { action: 'post_now', maxLateMinutes: 31 }],
+      ['extra field', { action: 'post_now', maxLateMinutes: 30, extra: true }],
+    ])('rejects terminal recovery with an altered legacy fallback %s', async (
+      _,
+      lateFallbackPolicy,
+    ) => {
+      mocks.query.mockImplementation(async (statement: string) => {
+        if (
+          statement.includes('SELECT attempt.id,attempt.claim_token') &&
+          statement.includes('attempt.terminal_at')
+        ) {
+          return {
+            rows: [terminalExpiredCandidate({
+              late_fallback_policy: lateFallbackPolicy,
+            })],
+          };
+        }
+        return { rows: [], rowCount: 1 };
+      });
+
+      await expect(requeueTerminalExpiredMisclassifiedBatchClaim(input))
+        .rejects.toMatchObject({
+          code: 'TERMINAL_EXPIRED_BATCH_CLAIM_RECOVERY_UNSAFE',
+          status: 409,
+        });
+      expect(mocks.query.mock.calls.some(([statement]) =>
+        String(statement).includes('UPDATE rednote_publish_attempts'))).toBe(false);
+    });
+
+    it('fails closed on every terminal timestamp and evidence barrier', async () => {
+      mocks.query.mockResolvedValue({ rows: [], rowCount: 0 });
+
+      await expect(requeueTerminalExpiredMisclassifiedBatchClaim(input))
+        .rejects.toMatchObject({
+          code: 'TERMINAL_EXPIRED_BATCH_CLAIM_RECOVERY_UNSAFE',
+          status: 409,
+        });
+
+      const lockSql = String(mocks.query.mock.calls.find(([statement]) =>
+        String(statement).includes('attempt.terminal_at'))?.[0]);
+      for (const guard of [
+        "job.error_code='CLAIM_LEASE_EXPIRED'",
+        'job.error_message=$7',
+        'job.claim_expires_at<=CURRENT_TIMESTAMP',
+        'job.completed_at=job.claim_expires_at',
+        'attempt.terminal_at=job.claim_expires_at',
+        'attempt.receipt_lookup_updated_at=job.claim_expires_at',
+        'attempt.claim_expires_at=job.claim_expires_at',
+        "item.state='queued'",
+        'item.notion_page_id=attempt.source_notion_page_id',
+        "attempt.frozen_payload->>'contractRevision'=attempt.contract_revision",
+        "attempt.frozen_payload->'browserPayload'->>'expectedAccountId'=",
+        "attempt.frozen_payload->'browserPayload'->>'scheduledDate'=",
+        "attempt.frozen_payload->'browserPayload'->>'targetPublishAt'=",
+        '(SELECT count(*) FROM rednote_publish_attempt_events event',
+        "event.actor_id='local_publish_lease_recovery'",
+        "event.event_type='execution_started'",
+        'FROM rednote_publish_attempt_receipts receipt',
+        'FROM rednote_publication_evidence evidence',
+        'FROM local_publish_job_success_attestations attestation',
+        'FROM local_publish_job_success_attestation_release_acks acknowledgement',
+        'FROM manual_reconciliation_requests reconciliation',
+        'FROM external_post_reconciliations reconciliation',
+        'FROM plan_operator_scheduled_posts operator_post',
+        'FROM rednote_publish_job_recoveries recovery',
+        'FROM local_publish_queue_quarantine_items quarantine',
+        'FROM local_publish_jobs other_job',
+      ]) {
+        expect(lockSql).toContain(guard);
+      }
+      expect(mocks.query.mock.calls.some(([statement]) =>
+        String(statement).includes('UPDATE rednote_publish_attempts'))).toBe(false);
     });
   });
 
