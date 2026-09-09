@@ -2,11 +2,13 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireXhsOperator } from '@/lib/xhs-operator-auth';
 import { parseIdempotencyKey, LocalPublishJobError } from '@/lib/local-publish-job-input';
 import {
+  getLocalPublishJobSummaries,
   normalizeLocalPublishJobError,
   queueLocalPublishJob,
 } from '@/lib/local-publish-jobs';
 import { parseWorkspaceId } from '@/lib/workspace-id';
 import { readRednotePublishingOperational } from '@/lib/rednote-publishing-attempt-store';
+import { listOperatorSuccessAttestationEvidence } from '@/lib/operator-success-attestation-store';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -38,9 +40,13 @@ export async function GET(request: NextRequest) {
 
   try {
     const workspaceId = parseWorkspaceId(request.headers.get('x-workspace-id'));
-    const operational = await readRednotePublishingOperational(workspaceId);
+    const [operational, jobs, successAttestationCandidates] = await Promise.all([
+      readRednotePublishingOperational(workspaceId),
+      getLocalPublishJobSummaries(workspaceId),
+      listOperatorSuccessAttestationEvidence(workspaceId),
+    ]);
     return NextResponse.json(
-      operational,
+      { ...operational, jobs, successAttestationCandidates },
       { headers: NO_STORE_HEADERS },
     );
   } catch (error) {

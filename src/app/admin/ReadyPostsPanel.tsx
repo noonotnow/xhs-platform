@@ -48,7 +48,10 @@ import {
 } from '@/lib/local-publish-job-display';
 import { manualSchedulingProvenanceMismatch } from '@/lib/manual-scheduling-provenance';
 import { READY_POSTS_PANEL_FEATURES } from '@/lib/ready-posts-panel-features';
-import { adminApiFetch } from '@/lib/admin-api-client';
+import {
+  adminApiFetch,
+  parseAdminLocalJobsResponse,
+} from '@/lib/admin-api-client';
 
 interface ApiError {
   error?: string;
@@ -60,10 +63,7 @@ interface PublishBatchesResponse extends ApiError {
   batch?: PublishBatch | null;
 }
 
-interface LocalJobsResponse extends ApiError {
-  jobs: LocalPublishJobSummary[];
-  successAttestationCandidates: OperatorSuccessAttestationEvidence[];
-}
+type LocalJobsResponse = ApiError & Record<string, unknown>;
 
 interface PublishJobRecoveryResponse extends ApiError {
   recovery: RednotePublishJobRecovery;
@@ -576,8 +576,9 @@ export default function ReadyPostsPanel({ workspaceId }: { workspaceId: string }
       const response = await adminApiFetch(workspaceId, path, { cache: 'no-store' });
       const data = await responseJson<LocalJobsResponse>(response, `GET ${path}`);
       if (!response.ok) throw new Error(data.error || 'Failed to load local publish jobs');
-      setJobs(data.jobs);
-      setSuccessAttestationCandidates(data.successAttestationCandidates);
+      const parsed = parseAdminLocalJobsResponse(data);
+      setJobs(parsed.jobs);
+      setSuccessAttestationCandidates(parsed.successAttestationCandidates);
     } catch (loadError) {
       if (showError) {
         setError(
