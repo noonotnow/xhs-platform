@@ -120,9 +120,10 @@ describe('operator success attestation store', () => {
       ],
     });
 
-    const evidence = await listOperatorSuccessAttestationEvidence();
+    const evidence = await listOperatorSuccessAttestationEvidence('legacy-local-publish');
     expect(evidence).toHaveLength(1);
     expect(evidence[0]).toMatchObject(input);
+    expect(mocks.sql.mock.calls[0]?.[1]).toBe('legacy-local-publish');
     expect(warning).toHaveBeenCalledWith(
       'Ignoring invalid operator success attestation candidate',
       expect.objectContaining({ jobId: input.jobId, itemId: input.itemId }),

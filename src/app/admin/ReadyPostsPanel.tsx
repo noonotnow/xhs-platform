@@ -5,7 +5,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ExternalReconciliationSummary,
   LocalPublishJobSummary,
-  LocalPublishMediaType,
   ManualSchedulingAttestationEvidence,
   ManualReconciliationSummary,
   OperatorSuccessAttestationEvidence,
@@ -47,8 +46,15 @@ import {
   receiptPendingLocalPublishJobs,
 } from '@/lib/local-publish-job-display';
 import { manualSchedulingProvenanceMismatch } from '@/lib/manual-scheduling-provenance';
-import { READY_POSTS_PANEL_FEATURES } from '@/lib/ready-posts-panel-features';
-import { adminApiFetch } from '@/lib/admin-api-client';
+import {
+  READY_POSTS_PANEL_FEATURES,
+  readyPostMediaPreview,
+  type ReadyPostMediaChoice,
+} from '@/lib/ready-posts-panel-features';
+import {
+  adminApiFetch,
+  parseAdminLocalJobsResponse,
+} from '@/lib/admin-api-client';
 
 interface ApiError {
   error?: string;
@@ -60,10 +66,7 @@ interface PublishBatchesResponse extends ApiError {
   batch?: PublishBatch | null;
 }
 
-interface LocalJobsResponse extends ApiError {
-  jobs: LocalPublishJobSummary[];
-  successAttestationCandidates: OperatorSuccessAttestationEvidence[];
-}
+type LocalJobsResponse = ApiError & Record<string, unknown>;
 
 interface PublishJobRecoveryResponse extends ApiError {
   recovery: RednotePublishJobRecovery;
@@ -145,13 +148,6 @@ function scheduleStatusClass(status: EditorialScheduleStatus) {
     unscheduled: styles.scheduleUnscheduled,
   }[status];
 }
-
-type MediaChoice = {
-  type: LocalPublishMediaType;
-  index: number;
-  url: string;
-  compatibilityTrial?: 'unverified_mov';
-};
 
 function tagsFromInput(value: string) {
   return value
@@ -466,27 +462,17 @@ export default function ReadyPostsPanel({ workspaceId }: { workspaceId: string }
     () => receiptPendingLocalPublishJobs(jobs),
     [jobs],
   );
-  const mediaChoices = useMemo<MediaChoice[]>(() => {
-    if (!selected) return [];
-    if (selected.candidateKind === 'mov_compatibility_trial') {
-      return (selected.compatibilityTrialVideoUrls ?? []).map((url, index) => ({
-        type: 'video' as const,
-        index,
-        url,
-        compatibilityTrial: 'unverified_mov' as const,
-      }));
+  const mediaPreview = useMemo(() => {
+    if (!selected) {
+      return {
+        choices: [] as ReadyPostMediaChoice[],
+        rejectedUrls: [] as string[],
+        thumbnailUrl: undefined,
+      };
     }
-    return [
-      ...selected.videoUrls.map((url, index) => ({ type: 'video' as const, index, url })),
-      ...(selected.compatibilityTrialVideoUrls ?? []).map((url, index) => ({
-        type: 'video' as const,
-        index,
-        url,
-        compatibilityTrial: 'unverified_mov' as const,
-      })),
-      ...selected.imageUrls.map((url, index) => ({ type: 'image' as const, index, url })),
-    ];
+    return readyPostMediaPreview(selected);
   }, [selected]);
+  const mediaChoices = mediaPreview.choices;
   const selectedMedia = mediaChoices.find(
     (choice) => `${choice.compatibilityTrial ?? choice.type}:${choice.index}` === mediaKey,
   ) ?? mediaChoices[0];
@@ -576,8 +562,9 @@ export default function ReadyPostsPanel({ workspaceId }: { workspaceId: string }
       const response = await adminApiFetch(workspaceId, path, { cache: 'no-store' });
       const data = await responseJson<LocalJobsResponse>(response, `GET ${path}`);
       if (!response.ok) throw new Error(data.error || 'Failed to load local publish jobs');
-      setJobs(data.jobs);
-      setSuccessAttestationCandidates(data.successAttestationCandidates);
+      const parsed = parseAdminLocalJobsResponse(data);
+      setJobs(parsed.jobs);
+      setSuccessAttestationCandidates(parsed.successAttestationCandidates);
     } catch (loadError) {
       if (showError) {
         setError(
@@ -1651,7 +1638,7 @@ export default function ReadyPostsPanel({ workspaceId }: { workspaceId: string }
                 <video
                   className={styles.video}
                   controls
-                  poster={selected.thumbnailUrl || undefined}
+                  poster={mediaPreview.thumbnailUrl}
                   preload="metadata"
                   src={selectedMedia.url}
                 >
@@ -1666,6 +1653,15 @@ export default function ReadyPostsPanel({ workspaceId }: { workspaceId: string }
                     sizes="(max-width: 640px) 100vw, 520px"
                     src={selectedMedia.url}
                   />
+                </div>
+              )}
+
+              {mediaPreview.rejectedUrls.length > 0 && (
+                <div className={styles.manualWarnings} role="alert">
+                  <strong>Untrusted media preview hidden</strong>
+                  <p>
+                    Replace placeholder or non-canonical media URLs in Notion before publishing.
+                  </p>
                 </div>
               )}
 

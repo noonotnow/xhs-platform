@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { adminApiFetch } from '@/lib/admin-api-client';
+import {
+  adminApiFetch,
+  parseAdminLocalJobsResponse,
+} from '@/lib/admin-api-client';
 import { LEGACY_LOCAL_PUBLISH_WORKSPACE_ID } from '@/lib/workspace-id';
 
 describe('adminApiFetch', () => {
@@ -29,5 +32,14 @@ describe('adminApiFetch', () => {
     const headers = new Headers(init.headers);
     expect(headers.get('X-Workspace-Id')).toBe(LEGACY_LOCAL_PUBLISH_WORKSPACE_ID);
     expect(headers.get('Content-Type')).toBe('application/json');
+  });
+
+  it('rejects the operational-only response that previously crashed the admin render', () => {
+    expect(() => parseAdminLocalJobsResponse({
+      contractVersion: 'publishing-v1',
+      queue: [],
+      attempts: [],
+      worker: { state: 'offline', online: false },
+    })).toThrow('Local publish jobs response is missing the jobs array');
   });
 });

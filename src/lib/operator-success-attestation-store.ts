@@ -640,7 +640,7 @@ export async function acknowledgeOperatorSuccessAttestationRelease(
   }
 }
 
-export async function listOperatorSuccessAttestationEvidence() {
+export async function listOperatorSuccessAttestationEvidence(workspaceId: string) {
   if (!operatorSuccessAttestationEnabled()) return [];
   const result = await sql<OperatorSuccessCandidateRow>`
     SELECT
@@ -678,7 +678,8 @@ export async function listOperatorSuccessAttestationEvidence() {
     FROM local_publish_jobs AS job
     JOIN rednote_publish_batch_items AS item ON item.id = job.batch_item_id
     JOIN rednote_publish_batches AS batch ON batch.id = item.batch_id
-    WHERE job.success_attestation_id IS NULL
+    WHERE job.workspace_id = ${workspaceId}
+      AND job.success_attestation_id IS NULL
       AND (
         (
           job.status = 'staged'
