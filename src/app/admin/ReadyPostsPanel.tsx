@@ -8,9 +8,9 @@ import type {
   ManualSchedulingAttestationEvidence,
   ManualReconciliationSummary,
   OperatorSuccessAttestationEvidence,
+  PublicRednotePublishJobRecovery,
   PublishBatch,
   PublishBatchItemState,
-  RednotePublishJobRecovery,
   RednotePublishJobRecoveryEvidence,
 } from '@/types/local-publish-job';
 import type { ReadyXhsPost, ReadyXhsPostsResponse } from '@/types/ready-post';
@@ -69,7 +69,7 @@ interface PublishBatchesResponse extends ApiError {
 type LocalJobsResponse = ApiError & Record<string, unknown>;
 
 interface PublishJobRecoveryResponse extends ApiError {
-  recovery: RednotePublishJobRecovery;
+  recovery: PublicRednotePublishJobRecovery;
 }
 
 function manualPublicPostError(value: string) {
