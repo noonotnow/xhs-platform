@@ -7,6 +7,7 @@ import {
 } from '@/lib/local-publish-job-input';
 import { normalizeLocalPublishJobError } from '@/lib/local-publish-jobs';
 import { requireLocalPublishWorker } from '@/lib/local-publish-worker-auth';
+import { parseWorkspaceId } from '@/lib/workspace-id';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -22,9 +23,9 @@ const NO_STORE_HEADERS = {
 export async function POST(request: NextRequest) {
   try {
     requireLocalPublishWorker(request.headers.get('authorization'));
-    if (!request.headers.get('x-workspace-id')) {
-      throw new LocalPublishJobError('X-Workspace-Id is required', 'VALIDATION_ERROR', 400);
-    }
+    const workspaceId = parseWorkspaceId(
+      request.headers.get('x-workspace-id'),
+    );
     const idempotencyKey = parseIdempotencyKey(
       request.headers.get('idempotency-key'),
     );
@@ -41,6 +42,7 @@ export async function POST(request: NextRequest) {
     const result = await reconcileVerifiedExternalPost({
       snapshot: parseExternalPostSnapshot(body),
       idempotencyKey,
+      workspaceId,
     });
     return NextResponse.json(
       { reconciliation: result },

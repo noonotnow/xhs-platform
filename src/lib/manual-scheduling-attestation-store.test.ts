@@ -75,6 +75,14 @@ function candidate(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function identity(overrides: Record<string, unknown> = {}) {
+  return {
+    workspace_id: workspaceId,
+    notion_page_id: snapshot.notionPageId,
+    ...overrides,
+  };
+}
+
 function job(overrides: Record<string, unknown> = {}) {
   return {
     id: jobId,
@@ -137,8 +145,9 @@ describe('manual scheduling attestation store', () => {
       .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result())
-      .mockResolvedValueOnce(result([candidate()]))
+      .mockResolvedValueOnce(result([identity()]))
       .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result([candidate()]))
       .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result([{ conflict: false }]))
@@ -171,6 +180,13 @@ describe('manual scheduling attestation store', () => {
       text.includes("'manual_scheduled'"))).toBe(true);
     expect(statements.filter((text) =>
       text.includes('UPDATE local_publish_jobs'))).toHaveLength(1);
+    const pageLockIndex = statements.findIndex((text) =>
+      text.includes('pg_advisory_xact_lock') &&
+      !text.includes('manual-scheduling:'));
+    const candidateRowLockIndex = statements.findIndex((text) =>
+      text.includes('FOR UPDATE OF item, batch'));
+    expect(pageLockIndex).toBeGreaterThan(-1);
+    expect(candidateRowLockIndex).toBeGreaterThan(pageLockIndex);
   });
 
   it('converts only the exact unclaimed queued job and rejects a worker collision', async () => {
@@ -178,11 +194,12 @@ describe('manual scheduling attestation store', () => {
       .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result([identity()]))
+      .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result([candidate({
         item_state: 'queued',
         local_publish_job_id: jobId,
       })]))
-      .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result([job({ status: 'claimed', claim_token: key })]))
       .mockResolvedValueOnce(result());
 
@@ -214,8 +231,9 @@ describe('manual scheduling attestation store', () => {
       .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result())
-      .mockResolvedValueOnce(result([candidate()]))
+      .mockResolvedValueOnce(result([identity()]))
       .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce(result([candidate()]))
       .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result())
       .mockResolvedValueOnce(result([{ conflict: true }]))

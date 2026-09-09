@@ -6,12 +6,14 @@ const targetPageId = '44444444-4444-4444-8444-444444444444';
 const unrelatedPageId = '55555555-5555-4555-8555-555555555555';
 const jobId = '33333333-3333-4333-8333-333333333333';
 const itemId = '22222222-2222-4222-8222-222222222222';
+const workspaceId = 'workspace-a';
 
 function database() {
   const db = newDb();
   db.public.none(`
     CREATE TABLE local_publish_jobs (
       id uuid PRIMARY KEY,
+      workspace_id text NOT NULL,
       notion_page_id text NOT NULL,
       status text NOT NULL,
       dispatch_authorized_at timestamp,
@@ -22,15 +24,23 @@ function database() {
     );
     CREATE TABLE rednote_publish_batch_items (
       id uuid PRIMARY KEY,
+      workspace_id text NOT NULL,
       notion_page_id text NOT NULL,
       state text NOT NULL
     );
-    CREATE TABLE manual_reconciliation_requests (notion_page_id text NOT NULL);
+    CREATE TABLE manual_reconciliation_requests (
+      workspace_id text NOT NULL,
+      notion_page_id text NOT NULL
+    );
     CREATE TABLE external_post_reconciliations (
+      workspace_id text NOT NULL,
       notion_page_id text,
       status text NOT NULL
     );
-    CREATE TABLE xhs_publish_receipts (notion_page_id text NOT NULL);
+    CREATE TABLE xhs_publish_receipts (
+      workspace_id text NOT NULL,
+      notion_page_id text NOT NULL
+    );
   `);
   return db;
 }
@@ -40,7 +50,7 @@ async function hasConflict(db: ReturnType<typeof database>) {
   const pool = new Pool();
   const result = await pool.query(
     OPERATOR_SUCCESS_ATTESTATION_OWNERSHIP_SQL,
-    [targetPageId, jobId, itemId],
+    [targetPageId, jobId, itemId, workspaceId],
   );
   await pool.end();
   return result.rows[0]?.conflict;
@@ -50,8 +60,8 @@ describe('operator success attestation ownership SQL', () => {
   it('does not treat an unrelated processing reconciliation as target ownership', async () => {
     const db = database();
     db.public.none(
-      `INSERT INTO external_post_reconciliations (notion_page_id, status)
-       VALUES ('${unrelatedPageId}', 'processing')`,
+      `INSERT INTO external_post_reconciliations (workspace_id, notion_page_id, status)
+       VALUES ('${workspaceId}', '${unrelatedPageId}', 'processing')`,
     );
 
     await expect(hasConflict(db)).resolves.toBe(false);
@@ -60,10 +70,20 @@ describe('operator success attestation ownership SQL', () => {
   it('detects reconciliation ownership for the exact target page', async () => {
     const db = database();
     db.public.none(
-      `INSERT INTO external_post_reconciliations (notion_page_id, status)
-       VALUES ('${targetPageId}', 'processing')`,
+      `INSERT INTO external_post_reconciliations (workspace_id, notion_page_id, status)
+       VALUES ('${workspaceId}', '${targetPageId}', 'processing')`,
     );
 
     await expect(hasConflict(db)).resolves.toBe(true);
+  });
+
+  it('does not treat the same page in another workspace as target ownership', async () => {
+    const db = database();
+    db.public.none(
+      `INSERT INTO external_post_reconciliations (workspace_id, notion_page_id, status)
+       VALUES ('workspace-b', '${targetPageId}', 'processing')`,
+    );
+
+    await expect(hasConflict(db)).resolves.toBe(false);
   });
 });

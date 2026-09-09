@@ -124,6 +124,7 @@ describe('external reconciliation orchestration', () => {
       processing.id,
       'automation',
       'target-page',
+      undefined,
     );
   });
 

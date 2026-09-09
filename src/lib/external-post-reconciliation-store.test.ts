@@ -22,9 +22,14 @@ const snapshot = {
 };
 const idempotencyKey = '33333333-3333-4333-8333-333333333333';
 
-function row(status: 'processing' | 'succeeded' | 'failed', updatedAt: string) {
+function row(
+  status: 'processing' | 'succeeded' | 'failed',
+  updatedAt: string,
+  workspaceId = 'legacy-local-publish',
+) {
   return {
     id: '11111111-1111-4111-8111-111111111111',
+    workspace_id: workspaceId,
     note_id: snapshot.noteId,
     share_url: snapshot.shareUrl,
     snapshot,
@@ -92,7 +97,14 @@ describe('external reconciliation persistence', () => {
       }] })
       .mockResolvedValueOnce({ rows: [] });
 
-    await expect(beginExternalReconciliation(snapshot, idempotencyKey))
+    await expect(beginExternalReconciliation(
+      snapshot,
+      idempotencyKey,
+      undefined,
+      'automation',
+      undefined,
+      'workspace-a',
+    ))
       .rejects.toMatchObject({ code: 'RECONCILIATION_CONFLICT', status: 409 });
     expect(mocks.query.mock.calls[5][0]).toBe('ROLLBACK');
     expect(mocks.release).toHaveBeenCalledOnce();
@@ -100,6 +112,8 @@ describe('external reconciliation persistence', () => {
     expect(insert).toContain("request_kind = 'targeted_local_job'");
     expect(insert).toContain('disposition.id =');
     expect(insert).toContain('IS NOT NULL');
+    expect(insert).toContain('workspace_id');
+    expect(mocks.query.mock.calls[3][1]?.[7]).toBe('workspace-a');
   });
 
   it('refuses a live processing lease and reclaims a stale one atomically', async () => {
@@ -149,6 +163,39 @@ describe('external reconciliation persistence', () => {
     await expect(beginExternalReconciliation(snapshot, idempotencyKey))
       .resolves.toMatchObject({ acquired: true, record: { status: 'processing' } });
   });
+
+  it.each(['succeeded', 'failed'] as const)(
+    'does not replay or reclaim a %s reconciliation owned by another workspace',
+    async (status) => {
+      mocks.query
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({
+          rows: [row(status, '2026-08-04T10:00:00.000Z', 'workspace-a')],
+        })
+        .mockResolvedValueOnce({ rows: [] });
+
+      await expect(beginExternalReconciliation(
+        snapshot,
+        idempotencyKey,
+        undefined,
+        'automation',
+        undefined,
+        'workspace-b',
+      )).rejects.toMatchObject({
+        code: 'RECONCILIATION_CONFLICT',
+        status: 409,
+      });
+      expect(mocks.query).toHaveBeenCalledTimes(7);
+      expect(mocks.query.mock.calls[6][0]).toBe('ROLLBACK');
+      expect(mocks.query.mock.calls.some(([statement]) =>
+        String(statement).includes('UPDATE external_post_reconciliations')
+      )).toBe(false);
+    },
+  );
 
   it('does not reclaim a failed record owned by a targeted disposition', async () => {
     mocks.query

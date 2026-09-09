@@ -29,6 +29,11 @@ interface ManualCandidateRow extends QueryResultRow {
   local_publish_job_id: string | null;
 }
 
+interface ManualCandidateIdentityRow extends QueryResultRow {
+  workspace_id: string;
+  notion_page_id: string;
+}
+
 interface ManualJobRow extends QueryResultRow {
   id: string;
   workspace_id: string;
@@ -219,6 +224,27 @@ export async function insertManualSchedulingAttestation(
       };
     }
 
+    const identityResult = await client.query<ManualCandidateIdentityRow>(
+      `SELECT batch.workspace_id, item.notion_page_id
+       FROM rednote_publish_batch_items AS item
+       JOIN rednote_publish_batches AS batch ON batch.id = item.batch_id
+       WHERE item.id = $1::uuid
+         AND batch.id = $2::uuid
+         AND item.workspace_id = batch.workspace_id`,
+      [input.itemId, input.batchId],
+    );
+    const identity = identityResult.rows[0];
+    if (!identity) {
+      throw conflict(
+        'Manual scheduling evidence does not identify an exact frozen batch item',
+        'MANUAL_SCHEDULING_NOT_FOUND',
+      );
+    }
+    await client.query(
+      'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+      [`${identity.workspace_id}:${identity.notion_page_id}`],
+    );
+
     const candidate = await client.query<ManualCandidateRow>(
       `SELECT
          batch.workspace_id,
@@ -242,16 +268,16 @@ export async function insertManualSchedulingAttestation(
       [input.itemId, input.batchId],
     );
     const row = candidate.rows[0];
-    if (!row) {
+    if (
+      !row ||
+      row.workspace_id !== identity.workspace_id ||
+      row.notion_page_id !== identity.notion_page_id
+    ) {
       throw conflict(
         'Manual scheduling evidence does not identify an exact frozen batch item',
         'MANUAL_SCHEDULING_NOT_FOUND',
       );
     }
-    await client.query(
-      'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
-      [`${row.workspace_id}:${row.notion_page_id}`],
-    );
     validateCandidate(row, input);
 
     let job: ManualJobRow | undefined;

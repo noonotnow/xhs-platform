@@ -386,6 +386,53 @@ async function transaction<T>(work: (client: PoolClient) => Promise<T>) {
   }
 }
 
+async function assertNoCompetingPublishLifecycle(
+  client: PoolClient,
+  input: {
+    workspaceId: string;
+    jobId: string;
+    attemptId: string;
+    sourceNotionPageId: string;
+    revision: string;
+  },
+) {
+  const blocker = await client.query<{ lifecycle_id: string }>(
+    `SELECT lifecycle_id
+     FROM rednote_publish_revision_blockers(
+       $1,
+       $2,
+       $3,
+       (
+         SELECT COALESCE(job.batch_item_id, item.id)
+         FROM local_publish_jobs job
+         LEFT JOIN rednote_publish_batch_items item
+           ON item.local_publish_job_id = job.id
+          AND item.workspace_id = job.workspace_id
+          AND item.notion_page_id = job.notion_page_id
+         WHERE job.id = $4::uuid
+           AND job.workspace_id = $1
+       ),
+       $4::uuid,
+       $5::uuid
+     )
+     LIMIT 1`,
+    [
+      input.workspaceId,
+      input.sourceNotionPageId,
+      input.revision,
+      input.jobId,
+      input.attemptId,
+    ],
+  );
+  if (blocker.rows[0]) {
+    throw new LocalPublishJobError(
+      'Another publish lifecycle or durable evidence owns this page revision.',
+      'PUBLISH_LIFECYCLE_RECOVERY_CONFLICT',
+      409,
+    );
+  }
+}
+
 export async function createRednotePublishAttempt(input: {
   workspaceId: string;
   idempotencyKey: string;
@@ -905,6 +952,7 @@ export async function requeueReadyX3PrestageClaim(input: {
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
       `${input.workspaceId}:${input.sourceNotionPageId}`,
     ]);
+    await assertNoCompetingPublishLifecycle(client, input);
     const locked = await client.query<{
       job_claimed_at: Date | string | null;
       job_claim_expires_at: Date | string | null;
@@ -1005,7 +1053,7 @@ export async function requeueReadyX3PrestageClaim(input: {
       `INSERT INTO rednote_publish_attempt_events(
          attempt_id,event_type,occurred_at,actor_type,actor_id,diagnostics
        ) VALUES(
-         $1::uuid,'execution_evidence',CURRENT_TIMESTAMP,'admin',
+         $1::uuid,'administrative_recovery',CURRENT_TIMESTAMP,'admin',
          'ready_x3_prestage_claim_recovery',
          jsonb_build_object(
            'kind','prestage_claim_requeued',
@@ -1066,11 +1114,12 @@ async function requeueReadyX3PreproviderFailure(input: {
   try {
     return await transaction(async (client) => {
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
-      `${input.workspaceId}:${input.sourceNotionPageId}`,
-    ]);
+        `${input.workspaceId}:${input.sourceNotionPageId}`,
+      ]);
+      await assertNoCompetingPublishLifecycle(client, input);
       await client.query(
-      `SELECT set_config('app.ready_x3_invalid_claim_recovery', 'on', true)`,
-    );
+        `SELECT set_config('app.ready_x3_invalid_claim_recovery', 'on', true)`,
+      );
       const recovered = await client.query<{ id: string }>(
       `WITH eligible AS (
          SELECT job.id, attempt.id AS attempt_id
@@ -1148,7 +1197,7 @@ async function requeueReadyX3PreproviderFailure(input: {
       `INSERT INTO rednote_publish_attempt_events(
          attempt_id,event_type,occurred_at,actor_type,actor_id,diagnostics
        ) VALUES(
-         $1::uuid,'execution_evidence',CURRENT_TIMESTAMP,'admin',
+         $1::uuid,'administrative_recovery',CURRENT_TIMESTAMP,'admin',
          $2,
           jsonb_build_object('kind',$3::text)
        )`,
@@ -1454,6 +1503,7 @@ export async function requeueMisclassifiedBatchInvalidClaimFailure(input: {
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
       `${input.workspaceId}:${input.sourceNotionPageId}`,
     ]);
+    await assertNoCompetingPublishLifecycle(client, input);
     await client.query(
       `SELECT set_config('app.ready_x3_invalid_claim_recovery', 'on', true)`,
     );
@@ -1595,7 +1645,7 @@ export async function requeueMisclassifiedBatchInvalidClaimFailure(input: {
       `INSERT INTO rednote_publish_attempt_events(
          attempt_id,event_type,occurred_at,actor_type,actor_id,diagnostics
        ) VALUES(
-         $1::uuid,'execution_evidence',CURRENT_TIMESTAMP,'admin',
+         $1::uuid,'administrative_recovery',CURRENT_TIMESTAMP,'admin',
          'batch_authorization_invalid_claim_recovery',
          jsonb_build_object(
            'kind','batch_authorization_reclassified',
@@ -1630,6 +1680,7 @@ export async function requeueExpiredMisclassifiedBatchClaim(input: {
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
       `${input.workspaceId}:${input.sourceNotionPageId}`,
     ]);
+    await assertNoCompetingPublishLifecycle(client, input);
     await client.query(
       `SELECT set_config('app.expired_batch_claim_reclassification', 'on', true)`,
     );
@@ -1733,7 +1784,7 @@ export async function requeueExpiredMisclassifiedBatchClaim(input: {
       `INSERT INTO rednote_publish_attempt_events(
          attempt_id,event_type,occurred_at,actor_type,actor_id,diagnostics
        ) VALUES(
-         $1::uuid,'execution_evidence',CURRENT_TIMESTAMP,'admin',
+         $1::uuid,'administrative_recovery',CURRENT_TIMESTAMP,'admin',
          'expired_batch_claim_authorization_recovery',
          jsonb_build_object(
            'kind','expired_batch_claim_authorization_reclassified',
@@ -2148,6 +2199,7 @@ export async function requeueTerminalExpiredMisclassifiedBatchClaim(input: {
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
       `${input.workspaceId}:${input.sourceNotionPageId}`,
     ]);
+    await assertNoCompetingPublishLifecycle(client, input);
     await client.query(
       `SELECT set_config('app.ready_x3_invalid_claim_recovery', 'on', true)`,
     );
@@ -2278,7 +2330,7 @@ export async function requeueTerminalExpiredMisclassifiedBatchClaim(input: {
       `INSERT INTO rednote_publish_attempt_events(
          attempt_id,event_type,occurred_at,actor_type,actor_id,diagnostics
        ) VALUES(
-         $1::uuid,'execution_evidence',CURRENT_TIMESTAMP,'admin',
+         $1::uuid,'administrative_recovery',CURRENT_TIMESTAMP,'admin',
          'terminal_expired_batch_claim_recovery',
          jsonb_build_object(
            'kind','terminal_expired_batch_claim_authorization_reclassified',

@@ -136,7 +136,24 @@ const READINESS_SQL = `
       ('029', 'routine', NULL, 'terminal_expired_batch_claim_reclassification_guard_revision'),
       ('029', 'routine', NULL, 'guard_terminal_expired_batch_claim_reset'),
       ('029', 'trigger', 'rednote_publish_attempts', 'terminal_expired_batch_claim_reset'),
-      ('030', 'routine', NULL, 'rednote_publish_revision_blockers')
+      (
+        '030',
+        'routine_signature',
+        'text, text, text',
+        'rednote_publish_revision_blockers'
+      ),
+      (
+        '030',
+        'routine_signature',
+        'text, text, text, uuid',
+        'rednote_publish_revision_blockers'
+      ),
+      (
+        '030',
+        'routine_signature',
+        'text, text, text, uuid, uuid, uuid',
+        'rednote_publish_revision_blockers'
+      )
   )
   SELECT
     migration,
@@ -162,6 +179,15 @@ const READINESS_SQL = `
         WHEN 'routine' THEN EXISTS (
           SELECT 1 FROM information_schema.routines
           WHERE routine_schema = 'public' AND routine_name = object_name
+        )
+        WHEN 'routine_signature' THEN EXISTS (
+          SELECT 1
+          FROM pg_proc
+          JOIN pg_namespace ON pg_namespace.oid = pg_proc.pronamespace
+          WHERE pg_namespace.nspname = 'public'
+            AND pg_proc.proname = object_name
+            AND oidvectortypes(pg_proc.proargtypes) =
+              required_objects.table_name
         )
         WHEN 'trigger' THEN EXISTS (
           SELECT 1 FROM information_schema.triggers

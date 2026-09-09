@@ -278,6 +278,7 @@ async function reconciliationSummaryWithPlanSync(
         id,
         claimToken,
         result.snapshot,
+        workspaceId,
       );
       return manualReconciliationSummary(await loadManualReconciliation(id, workspaceId));
     } catch (error) {
@@ -313,6 +314,7 @@ async function reconciliationSummaryWithPlanSync(
       idempotencyKey: request.id,
       targetNotionPageId: request.notionPageId,
       source: 'manual',
+      workspaceId,
       ...(request.expected.notionVersion ? { manualHandling: {} } : {}),
     });
     return reconciliationSummaryWithPlanSync(await completeManualReconciliation(

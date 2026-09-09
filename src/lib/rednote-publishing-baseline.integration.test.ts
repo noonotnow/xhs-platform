@@ -3,7 +3,14 @@ import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { storedManifestHash } from '@/lib/rednote-publish-batch-store';
+import {
+  approveStoredPublishBatchTransaction,
+  storedManifestHash,
+} from '@/lib/rednote-publish-batch-store';
+import {
+  applyExpectedRednoteSchemaMigrations,
+  readRednoteSchemaReadiness,
+} from '@/lib/rednote-publishing-schema';
 
 const migrationFiles = [
   '002_xhs_publish_receipts.sql',
@@ -1371,6 +1378,44 @@ describe('canonical local publishing migration chain', () => {
     );
     expect(otherWorkspace.rows).toEqual([]);
 
+    const recoverySelfExcluded = await database.query(
+      `SELECT * FROM rednote_publish_revision_blockers(
+         $1,
+         $2,
+         $3,
+         (
+           SELECT COALESCE(job.batch_item_id, item.id)
+           FROM local_publish_jobs job
+           LEFT JOIN rednote_publish_batch_items item
+             ON item.local_publish_job_id = job.id
+            AND item.workspace_id = job.workspace_id
+            AND item.notion_page_id = job.notion_page_id
+           WHERE job.id = $4
+             AND job.workspace_id = $1
+         ),
+         $4,
+         $5
+       )`,
+      ['workspace-day-16', pageId, oldRevision, jobId, attemptId],
+    );
+    expect(recoverySelfExcluded.rows).toEqual([]);
+
+    await database.query(
+      `INSERT INTO rednote_publish_attempt_events(
+         attempt_id, event_type, occurred_at, actor_type, actor_id, diagnostics
+       ) VALUES (
+         $1, 'administrative_recovery', '2026-09-08T23:26:00.000Z',
+         'admin', 'day-16-recovery-test',
+         jsonb_build_object('kind', 'prestage_claim_requeued')
+       )`,
+      [attemptId],
+    );
+    const administrativeRecoveryIsNotExecutionEvidence = await database.query(
+      `SELECT * FROM rednote_publish_revision_blockers($1, $2, $3)`,
+      ['workspace-day-16', pageId, newRevision],
+    );
+    expect(administrativeRecoveryIsNotExecutionEvidence.rows).toEqual([]);
+
     const revisedSnapshot = {
       ...frozenSnapshot,
       notionLastEditedTime: newRevision,
@@ -1425,6 +1470,35 @@ describe('canonical local publishing migration chain', () => {
         local_publish_job_id: null,
       },
     ]);
+
+    const newerOwnershipBlocksRecovery = await database.query<{
+      lifecycle_id: string;
+      lifecycle_state: string;
+    }>(
+      `SELECT lifecycle_id, lifecycle_state
+       FROM rednote_publish_revision_blockers(
+         $1,
+         $2,
+         $3,
+         (
+           SELECT COALESCE(job.batch_item_id, item.id)
+           FROM local_publish_jobs job
+           LEFT JOIN rednote_publish_batch_items item
+             ON item.local_publish_job_id = job.id
+            AND item.workspace_id = job.workspace_id
+            AND item.notion_page_id = job.notion_page_id
+           WHERE job.id = $4
+             AND job.workspace_id = $1
+         ),
+         $4,
+         $5
+       )`,
+      ['workspace-day-16', pageId, oldRevision, jobId, attemptId],
+    );
+    expect(newerOwnershipBlocksRecovery.rows).toEqual([{
+      lifecycle_id: newItemId,
+      lifecycle_state: 'batch_item:needs_approval',
+    }]);
 
     const attestationId = randomUUID();
     await database.query(
@@ -1494,6 +1568,79 @@ describe('canonical local publishing migration chain', () => {
       lifecycle_id: jobId,
       lifecycle_state: 'local_job:failed',
     }]));
+    const excludedLifecycleStillReportsEvidence = await database.query<{
+      lifecycle_id: string;
+      lifecycle_state: string;
+    }>(
+      `SELECT lifecycle_id, lifecycle_state
+       FROM rednote_publish_revision_blockers(
+         $1, $2, $3, $4, $5, $6
+       )
+       WHERE lifecycle_state LIKE 'excluded_%'`,
+      ['workspace-day-16', pageId, oldRevision, oldItemId, jobId, attemptId],
+    );
+    expect(excludedLifecycleStillReportsEvidence.rows).toEqual(
+      expect.arrayContaining([
+        {
+          lifecycle_id: jobId,
+          lifecycle_state: 'excluded_local_job:evidence',
+        },
+        {
+          lifecycle_id: attemptId,
+          lifecycle_state: 'excluded_publish_attempt:evidence',
+        },
+      ]),
+    );
+  });
+
+  it('does not treat an exactly excluded active recovery attempt as competing ownership', async () => {
+    const pageId = 'active-recovery-self-exclusion';
+    const jobId = randomUUID();
+    const attemptId = randomUUID();
+    const revision = '2026-09-08T16:37:00.000Z';
+    const snapshot = JSON.stringify({
+      notionPageId: pageId,
+      notionLastEditedTime: revision,
+      publishAt: '2026-09-08T23:20:00.000Z',
+    });
+    await database.query(
+      `INSERT INTO local_publish_jobs(
+         id, workspace_id, notion_page_id, snapshot, status, idempotency_key
+       ) VALUES ($1, 'workspace-active-recovery', $2, $3::jsonb, 'claimed', $4)`,
+      [jobId, pageId, snapshot, randomUUID()],
+    );
+    await database.query(
+      `INSERT INTO rednote_publish_attempts(
+         id, workspace_id, idempotency_key, contract_revision,
+         source_notion_page_id, source_local_publish_job_id,
+         frozen_payload, payload_digest, payload_revision,
+         executor_type, executor_kind, executor_id, target_publish_at,
+         requested_at, receipt_lookup_state, active
+       ) VALUES (
+         $1, 'workspace-active-recovery', $2, 'rednote-publishing/v1',
+         $3, $4, $5::jsonb, $6, $7,
+         'worker', 'playwright', 'worker-recovery',
+         '2026-09-08T23:20:00.000Z', '2026-09-08T23:19:00.000Z',
+         'pending', true
+       )`,
+      [
+        attemptId,
+        randomUUID(),
+        pageId,
+        jobId,
+        snapshot,
+        '9'.repeat(64),
+        revision,
+      ],
+    );
+
+    const blockers = await database.query(
+      `SELECT * FROM rednote_publish_revision_blockers(
+         $1, $2, $3, NULL, $4, $5
+       )`,
+      ['workspace-active-recovery', pageId, revision, jobId, attemptId],
+    );
+    expect(blockers.rows).toEqual([]);
   });
 
   it('blocks a newer revision while an older active batch item has no proven lifecycle', async () => {
@@ -1735,5 +1882,273 @@ describe('canonical local publishing migration chain', () => {
       lifecycle_id: malformedAttemptId,
       lifecycle_state: 'publish_attempt:known_failed',
     }]);
+  });
+
+  it('approves one clean item without treating that item as a competing lifecycle', async () => {
+    const batchId = randomUUID();
+    const itemId = randomUUID();
+    const pageId = `approval-self-exclusion-${randomUUID()}`;
+    const revision = '2026-09-09T01:02:03.004Z';
+    const manifestHash = 'a'.repeat(64);
+    const snapshot = {
+      notionPageId: pageId,
+      notionLastEditedTime: revision,
+      publishAt: '2026-09-12T01:02:03.004Z',
+    };
+    await database.query(
+      `INSERT INTO rednote_publish_batches(
+         id, workspace_id, kind, status, manifest_hash
+       ) VALUES ($1, 'workspace-approval', 'bootstrap', 'pending_approval', $2)`,
+      [batchId, manifestHash],
+    );
+    await database.query(
+      `INSERT INTO rednote_publish_batch_items(
+         id, batch_id, workspace_id, notion_page_id, snapshot, item_hash,
+         state, dispatch_mode
+       ) VALUES (
+         $1, $2, 'workspace-approval', $3, $4::jsonb, $5,
+         'needs_approval', 'scheduled'
+       )`,
+      [itemId, batchId, pageId, JSON.stringify(snapshot), 'b'.repeat(64)],
+    );
+
+    const selfBlocker = await database.query(
+      `SELECT lifecycle_id, lifecycle_state
+       FROM rednote_publish_revision_blockers($1, $2, $3)`,
+      ['workspace-approval', pageId, revision],
+    );
+    expect(selfBlocker.rows).toEqual([{
+      lifecycle_id: itemId,
+      lifecycle_state: 'batch_item:needs_approval',
+    }]);
+    const excludedSelfBlocker = await database.query(
+      `SELECT lifecycle_id, lifecycle_state
+       FROM rednote_publish_revision_blockers($1, $2, $3, $4)`,
+      ['workspace-approval', pageId, revision, itemId],
+    );
+    expect(excludedSelfBlocker.rows).toEqual([]);
+
+    const client = {
+      query: async (statement: string, parameters?: unknown[]) => {
+        if (statement.includes('pg_advisory_xact_lock')) {
+          return { rows: [], rowCount: 1 };
+        }
+        return database.query(statement, parameters);
+      },
+    } as unknown as Parameters<typeof approveStoredPublishBatchTransaction>[0];
+    await approveStoredPublishBatchTransaction(
+      client,
+      batchId,
+      manifestHash,
+      'operator@example.com',
+      [{ itemId, approved: true }],
+      'workspace-approval',
+    );
+
+    const jobs = await database.query(
+      `SELECT id, batch_item_id, status
+       FROM local_publish_jobs
+       WHERE workspace_id = 'workspace-approval'
+         AND batch_item_id = $1`,
+      [itemId],
+    );
+    expect(jobs.rows).toHaveLength(1);
+    expect(jobs.rows[0]).toMatchObject({
+      batch_item_id: itemId,
+      status: 'queued',
+    });
+    const item = await database.query(
+      `SELECT state, local_publish_job_id
+       FROM rednote_publish_batch_items
+       WHERE id = $1`,
+      [itemId],
+    );
+    expect(item.rows).toEqual([{
+      state: 'queued',
+      local_publish_job_id: jobs.rows[0].id,
+    }]);
+    const batch = await database.query(
+      `SELECT status FROM rednote_publish_batches WHERE id = $1`,
+      [batchId],
+    );
+    expect(batch.rows).toEqual([{ status: 'approved' }]);
+  });
+
+  it('scopes operator-scheduled dispatch guards to the owning workspace', async () => {
+    const batchPageId = `operator-batch-workspace-${randomUUID()}`;
+    const jobPageId = `operator-job-workspace-${randomUUID()}`;
+    const revision = '2026-09-09T01:02:03.004Z';
+    const workspaceABatchId = randomUUID();
+    const workspaceBBatchId = randomUUID();
+    await database.query(
+      `INSERT INTO plan_operator_scheduled_posts(
+         workspace_id, notion_page_id, idempotency_key,
+         notion_last_edited_time, scheduled_at
+       ) VALUES
+         ('workspace-operator-a', $1, $2, $3, CURRENT_TIMESTAMP),
+         ('workspace-operator-a', $4, $5, $3, CURRENT_TIMESTAMP)`,
+      [batchPageId, randomUUID(), revision, jobPageId, randomUUID()],
+    );
+    await database.query(
+      `INSERT INTO rednote_publish_batches(
+         id, workspace_id, kind, status, manifest_hash
+       ) VALUES
+         ($1, 'workspace-operator-a', 'bootstrap', 'pending_approval', $3),
+         ($2, 'workspace-operator-b', 'bootstrap', 'pending_approval', $4)`,
+      [workspaceABatchId, workspaceBBatchId, 'c'.repeat(64), 'd'.repeat(64)],
+    );
+    const snapshot = JSON.stringify({
+      notionPageId: batchPageId,
+      notionLastEditedTime: revision,
+    });
+
+    const crossWorkspaceItem = await database.query<{ id: string }>(
+      `INSERT INTO rednote_publish_batch_items(
+         batch_id, workspace_id, notion_page_id, snapshot, item_hash,
+         state, dispatch_mode
+       ) VALUES (
+         $1, 'workspace-operator-b', $2, $3::jsonb, $4,
+         'needs_approval', 'scheduled'
+       )
+       RETURNING id`,
+      [workspaceBBatchId, batchPageId, snapshot, 'e'.repeat(64)],
+    );
+    expect(crossWorkspaceItem.rows).toHaveLength(1);
+    await expect(database.query(
+      `INSERT INTO rednote_publish_batch_items(
+         batch_id, workspace_id, notion_page_id, snapshot, item_hash,
+         state, dispatch_mode
+       ) VALUES (
+         $1, 'workspace-operator-a', $2, $3::jsonb, $4,
+         'needs_approval', 'scheduled'
+       )`,
+      [workspaceABatchId, batchPageId, snapshot, 'f'.repeat(64)],
+    )).rejects.toThrow(/manually handled post/);
+    await expect(database.query(
+      `UPDATE rednote_publish_batch_items
+       SET workspace_id = 'workspace-operator-a'
+       WHERE id = $1`,
+      [crossWorkspaceItem.rows[0].id],
+    )).rejects.toThrow(/manually handled post/);
+
+    const crossWorkspaceJob = await database.query<{ id: string }>(
+      `INSERT INTO local_publish_jobs(
+         workspace_id, notion_page_id, snapshot, idempotency_key
+       ) VALUES ('workspace-operator-b', $1, '{}'::jsonb, $2)
+       RETURNING id`,
+      [jobPageId, randomUUID()],
+    );
+    expect(crossWorkspaceJob.rows).toHaveLength(1);
+    await expect(database.query(
+      `INSERT INTO local_publish_jobs(
+         workspace_id, notion_page_id, snapshot, idempotency_key
+       ) VALUES ('workspace-operator-a', $1, '{}'::jsonb, $2)`,
+      [jobPageId, randomUUID()],
+    )).rejects.toThrow(/manually handled post/);
+    await expect(database.query(
+      `UPDATE local_publish_jobs
+       SET workspace_id = 'workspace-operator-a'
+       WHERE id = $1`,
+      [crossWorkspaceJob.rows[0].id],
+    )).rejects.toThrow(/manually handled post/);
+  });
+
+  it('can reapply migration 030 without duplicate workspace constraints', async () => {
+    const migration = await readFile(
+      path.join(
+        process.cwd(),
+        'migrations',
+        '030_revision_aware_publish_lifecycle.sql',
+      ),
+      'utf8',
+    );
+    await expect(database.exec(migration)).resolves.toBeDefined();
+  });
+
+  it('selects migration 030 when the recovery blocker signature is missing', async () => {
+    const previousSchema = new PGlite();
+    try {
+      for (const file of migrationFiles.slice(0, -1)) {
+        const migration = await readFile(
+          path.join(process.cwd(), 'migrations', file),
+          'utf8',
+        );
+        await previousSchema.exec(migration);
+      }
+      await previousSchema.exec(`
+        CREATE OR REPLACE FUNCTION rednote_publish_revision_blockers(
+          candidate_workspace_id TEXT,
+          candidate_notion_page_id TEXT,
+          candidate_revision TEXT
+        )
+        RETURNS TABLE (
+          notion_page_id TEXT,
+          lifecycle_id TEXT,
+          lifecycle_state TEXT
+        )
+        LANGUAGE sql
+        STABLE
+        AS $$
+          SELECT
+            candidate_notion_page_id,
+            candidate_notion_page_id,
+            'obsolete'
+        $$;
+
+        CREATE OR REPLACE FUNCTION rednote_publish_revision_blockers(
+          candidate_workspace_id TEXT,
+          candidate_notion_page_id TEXT,
+          candidate_revision TEXT,
+          excluded_batch_item_id UUID
+        )
+        RETURNS TABLE (
+          notion_page_id TEXT,
+          lifecycle_id TEXT,
+          lifecycle_state TEXT
+        )
+        LANGUAGE sql
+        STABLE
+        AS $$
+          SELECT *
+          FROM rednote_publish_revision_blockers(
+            candidate_workspace_id,
+            candidate_notion_page_id,
+            candidate_revision
+          )
+        $$;
+      `);
+      const client = {
+        query: async (statement: string, parameters?: unknown[]) => {
+          if (statement.includes('pg_advisory_lock')
+              || statement.includes('pg_advisory_unlock')) {
+            return { rows: [], rowCount: 1 };
+          }
+          if (statement.includes(
+            'CREATE OR REPLACE FUNCTION rednote_publish_revision_is_valid',
+          )) {
+            await previousSchema.exec(statement);
+            return { rows: [], rowCount: 1 };
+          }
+          return previousSchema.query(statement, parameters);
+        },
+      } as unknown as Parameters<typeof applyExpectedRednoteSchemaMigrations>[0];
+
+      const before = await readRednoteSchemaReadiness(client);
+      expect(before['030']).toBe(false);
+      const applied = await applyExpectedRednoteSchemaMigrations(client, ['030']);
+      expect(applied.applied).toEqual(['030']);
+      expect(applied.after['030']).toBe(true);
+
+      await previousSchema.exec(`
+        DROP FUNCTION rednote_publish_revision_blockers(TEXT, TEXT, TEXT);
+      `);
+      const withoutCandidateOverload = await readRednoteSchemaReadiness(client);
+      expect(withoutCandidateOverload['030']).toBe(false);
+      const reapplied = await applyExpectedRednoteSchemaMigrations(client, ['030']);
+      expect(reapplied.applied).toEqual(['030']);
+      expect(reapplied.after['030']).toBe(true);
+    } finally {
+      await previousSchema.close();
+    }
   });
 });

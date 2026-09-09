@@ -1,4 +1,4 @@
-import type { QueryResultRow } from 'pg';
+import type { PoolClient, QueryResultRow } from 'pg';
 import { createHash } from 'crypto';
 import { isDeepStrictEqual } from 'util';
 import { getPool, sql } from '@/lib/db';
@@ -462,41 +462,15 @@ export async function listStoredPublishBatches(workspaceId: string, batchId?: st
         recovery.prior_claim_attempts AS recovery_audit_claim_attempts,
         recovery.prior_completed_at AS recovery_audit_completed_at,
         recovery.recovered_at AS recovery_audit_recovered_at,
-        NOT (
-          EXISTS (
-            SELECT 1
-            FROM local_publish_jobs AS other_job
-            WHERE other_job.notion_page_id = item.notion_page_id
-              AND other_job.id <> job.id
-              AND (
-                other_job.batch_item_id IS NOT NULL
-                OR other_job.status NOT IN ('reconciled', 'failed')
-                OR other_job.dispatch_authorized_at IS NOT NULL
-                OR other_job.dispatched_at IS NOT NULL
-                OR other_job.note_id IS NOT NULL
-                OR other_job.share_url IS NOT NULL
-              )
-          )
-          OR EXISTS (
-            SELECT 1
-            FROM rednote_publish_batch_items AS other_item
-            WHERE other_item.notion_page_id = item.notion_page_id
-              AND other_item.id <> item.id
-              AND (
-                other_item.local_publish_job_id IS NOT NULL
-                OR other_item.state NOT IN ('invalidated', 'reconciled', 'failed')
-              )
-          )
-          OR EXISTS (
-            SELECT 1
-            FROM manual_reconciliation_requests
-            WHERE notion_page_id = item.notion_page_id
-              AND status IN ('queued', 'verifying')
-          )
-          OR EXISTS (
-            SELECT 1
-            FROM external_post_reconciliations
-            WHERE status = 'processing'
+        NOT EXISTS (
+          SELECT 1
+          FROM rednote_publish_revision_blockers(
+            item.workspace_id,
+            item.notion_page_id,
+            item.snapshot->>'notionLastEditedTime',
+            item.id,
+            job.id,
+            NULL::uuid
           )
         ) AS recovery_no_active_ownership
       FROM rednote_publish_batch_items AS item
@@ -517,19 +491,63 @@ export async function listStoredPublishBatches(workspaceId: string, batchId?: st
   return output;
 }
 
-export async function approveStoredPublishBatch(
+export async function approveStoredPublishBatchTransaction(
+  client: Pick<PoolClient, 'query'>,
   batchId: string,
   manifestHash: string,
   approvedBy: string,
   decisions: Array<{ itemId: string; approved: boolean; reason?: string }>,
   workspaceId: string,
 ) {
-  const client = await getPool().connect();
   try {
     await client.query('BEGIN');
     await client.query(
       "SELECT pg_advisory_xact_lock(hashtextextended('rednote-bootstrap-batch', 0))",
     );
+    const observed = await client.query<BatchRow>(
+      `SELECT *
+       FROM rednote_publish_batches
+       WHERE id = $1::uuid
+         AND manifest_hash = $2
+         AND workspace_id = $3`,
+      [batchId, manifestHash, workspaceId],
+    );
+    const observedBatch = observed.rows[0];
+    if (!observedBatch || observedBatch.status !== 'pending_approval') {
+      throw new Error(
+        observedBatch?.status === 'superseded'
+          ? 'This batch was superseded and can never be approved. Refresh to review its replacement manifest.'
+          : 'The batch is no longer pending approval; refresh before approving.',
+      );
+    }
+    const approvedItemIds = Array.from(
+      new Set(
+        decisions
+          .filter((decision) => decision.approved)
+          .map((decision) => decision.itemId),
+      ),
+    );
+    if (approvedItemIds.length > 0) {
+      const approvedPages = await client.query<{ notion_page_id: string }>(
+        `SELECT notion_page_id
+         FROM rednote_publish_batch_items
+         WHERE id = ANY($1::uuid[])
+           AND batch_id = $2::uuid
+           AND workspace_id = $3
+           AND state = 'needs_approval'
+         ORDER BY notion_page_id`,
+        [approvedItemIds, batchId, workspaceId],
+      );
+      let previousPageId: string | undefined;
+      for (const { notion_page_id: pageId } of approvedPages.rows) {
+        if (pageId === previousPageId) continue;
+        await client.query(
+          'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+          [`${workspaceId}:${pageId}`],
+        );
+        previousPageId = pageId;
+      }
+    }
     const locked = await client.query<BatchRow>(
       `SELECT *
        FROM rednote_publish_batches
@@ -567,19 +585,6 @@ export async function approveStoredPublishBatch(
         );
         continue;
       }
-      const approvedPage = await client.query<{ notion_page_id: string }>(
-        `SELECT notion_page_id
-         FROM rednote_publish_batch_items
-         WHERE id = $1::uuid
-           AND batch_id = $2::uuid
-           AND workspace_id = $3`,
-        [decision.itemId, batchId, workspaceId],
-      );
-      if (!approvedPage.rows[0]) continue;
-      await client.query(
-        'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
-        [`${workspaceId}:${approvedPage.rows[0].notion_page_id}`],
-      );
       await client.query(
         `
       WITH approved_item AS (
@@ -607,7 +612,8 @@ export async function approveStoredPublishBatch(
           FROM rednote_publish_revision_blockers(
             $3,
             approved_item.notion_page_id,
-            approved_item.snapshot->>'notionLastEditedTime'
+            approved_item.snapshot->>'notionLastEditedTime',
+            approved_item.id
           )
           )
         ON CONFLICT DO NOTHING
@@ -663,6 +669,26 @@ export async function approveStoredPublishBatch(
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
+  }
+}
+
+export async function approveStoredPublishBatch(
+  batchId: string,
+  manifestHash: string,
+  approvedBy: string,
+  decisions: Array<{ itemId: string; approved: boolean; reason?: string }>,
+  workspaceId: string,
+) {
+  const client = await getPool().connect();
+  try {
+    await approveStoredPublishBatchTransaction(
+      client,
+      batchId,
+      manifestHash,
+      approvedBy,
+      decisions,
+      workspaceId,
+    );
   } finally {
     client.release();
   }

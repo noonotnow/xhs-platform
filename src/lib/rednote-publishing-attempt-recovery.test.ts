@@ -220,6 +220,39 @@ describe('Ready x3 pre-provider failure recovery', () => {
         statement.includes("'batch_authorization_reclassified'"))).toBe(true);
     });
 
+    it('fails closed before requeue when a competing newer lifecycle owns the page', async () => {
+      mocks.query.mockImplementation(async (statement: string) => {
+        if (statement.includes('rednote_publish_revision_blockers')) {
+          return {
+            rows: [{
+              lifecycle_id: 'newer-batch-item',
+            }],
+          };
+        }
+        return { rows: [], rowCount: 1 };
+      });
+
+      await expect(requeueMisclassifiedBatchInvalidClaimFailure(input))
+        .rejects.toMatchObject({
+          code: 'PUBLISH_LIFECYCLE_RECOVERY_CONFLICT',
+          status: 409,
+        });
+      expect(mocks.query).toHaveBeenCalledWith(
+        expect.stringContaining('SELECT COALESCE(job.batch_item_id, item.id)'),
+        [
+          input.workspaceId,
+          input.sourceNotionPageId,
+          input.revision,
+          input.jobId,
+          input.attemptId,
+        ],
+      );
+      expect(mocks.query.mock.calls.some(([statement]) =>
+        String(statement).includes('UPDATE rednote_publish_attempts'))).toBe(false);
+      expect(mocks.query.mock.calls.some(([statement]) =>
+        String(statement).includes('UPDATE local_publish_jobs'))).toBe(false);
+    });
+
     it('fails closed when the frozen attempt differs from the approved batch packet', async () => {
       const payload = recoveryPayload();
       mocks.query.mockImplementation(async (statement: string) => {

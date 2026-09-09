@@ -189,7 +189,7 @@ describe('stored RedNote bootstrap replacement', () => {
   it('rejects a superseded manifest before changing any item', async () => {
     const oldHash = 'a'.repeat(64);
     mocks.query.mockImplementation(async (statement: string) => {
-      if (statement.includes('FOR UPDATE')) {
+      if (statement.includes('FROM rednote_publish_batches')) {
         return { rows: [batchRow('old', 'superseded', oldHash)] };
       }
       return { rows: [], rowCount: 1 };
@@ -212,7 +212,7 @@ describe('stored RedNote bootstrap replacement', () => {
     const batchId = '22222222-2222-4222-8222-222222222222';
     const manifestHash = 'a'.repeat(64);
     mocks.query.mockImplementation(async (statement: string) => {
-      if (statement.includes('FOR UPDATE')) {
+      if (statement.includes('FROM rednote_publish_batches')) {
         return { rows: [batchRow(batchId, 'pending_approval', manifestHash)] };
       }
       if (statement.includes('SELECT notion_page_id')) {
@@ -248,6 +248,70 @@ describe('stored RedNote bootstrap replacement', () => {
       expect.stringContaining('rednote_publish_revision_blockers'),
       'COMMIT',
     ]));
+    const approvalStatement = statements.find((statement) =>
+      statement.includes('INSERT INTO local_publish_jobs'));
+    expect(approvalStatement).toContain('approved_item.id');
+  });
+
+  it('pre-locks approved pages once in deterministic page order', async () => {
+    const batchId = '22222222-2222-4222-8222-222222222222';
+    const manifestHash = 'a'.repeat(64);
+    mocks.query.mockImplementation(async (statement: string) => {
+      if (statement.includes('FROM rednote_publish_batches')) {
+        return { rows: [batchRow(batchId, 'pending_approval', manifestHash)] };
+      }
+      if (statement.includes('SELECT notion_page_id')) {
+        return {
+          rows: [
+            { notion_page_id: 'page-a' },
+            { notion_page_id: 'page-a' },
+            { notion_page_id: 'page-b' },
+          ],
+        };
+      }
+      if (statement.includes('UPDATE rednote_publish_batches AS batch')) {
+        return { rows: [batchRow(batchId, 'approved', manifestHash)] };
+      }
+      return { rows: [], rowCount: 1 };
+    });
+    mocks.sql
+      .mockResolvedValueOnce({
+        rows: [batchRow(batchId, 'approved', manifestHash)],
+      })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await approveStoredPublishBatch(
+      batchId,
+      manifestHash,
+      'operator@example.com',
+      [
+        { itemId: '55555555-5555-4555-8555-555555555555', approved: true },
+        { itemId: '44444444-4444-4444-8444-444444444444', approved: true },
+      ],
+      'workspace-1',
+    );
+
+    const pageLockKeys = mocks.query.mock.calls
+      .filter(([statement]) =>
+        String(statement) ===
+        'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))')
+      .map(([, parameters]) => parameters?.[0]);
+    expect(pageLockKeys).toEqual([
+      'workspace-1:page-a',
+      'workspace-1:page-b',
+    ]);
+    expect(String(mocks.query.mock.calls.find(([statement]) =>
+      String(statement).includes('SELECT notion_page_id'))?.[0]))
+      .toContain('ORDER BY notion_page_id');
+    const statements = mocks.query.mock.calls.map(([statement]) => String(statement));
+    const firstPageLock = statements.indexOf(
+      'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+    );
+    const batchRowLock = statements.findIndex((statement) =>
+      statement.includes('FROM rednote_publish_batches') &&
+      statement.includes('FOR UPDATE'));
+    expect(firstPageLock).toBeGreaterThan(-1);
+    expect(batchRowLock).toBeGreaterThan(firstPageLock);
   });
 
   it('still supersedes an unsafe old manifest when every current candidate is blocked', async () => {

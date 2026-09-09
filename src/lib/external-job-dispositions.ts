@@ -8,6 +8,7 @@ import {
   prepareExternalJobDisposition,
   retryExternalJobDisposition,
 } from '@/lib/external-job-disposition-store';
+import { LocalPublishJobError } from '@/lib/local-publish-job-input';
 import { reconcileVerifiedExternalPost } from '@/lib/external-post-reconciliations';
 import type { ExternalPostSnapshot } from '@/types/local-publish-job';
 
@@ -39,9 +40,17 @@ export async function reconcileExternalJobDisposition(
   id: string,
   claimToken: string,
   snapshot: ExternalPostSnapshot,
+  workspaceId?: string,
   dependencies: ReconciliationDependencies = reconciliationDependencies,
 ) {
   const prepared = await dependencies.prepare(id, claimToken, snapshot);
+  if (workspaceId && prepared.workspaceId !== workspaceId) {
+    throw new LocalPublishJobError(
+      'The targeted disposition belongs to a different workspace',
+      'DISPOSITION_REQUEST_CONFLICT',
+      409,
+    );
+  }
   if (prepared.status === 'reconciled') {
     return externalJobDispositionSummary(prepared);
   }
@@ -50,6 +59,7 @@ export async function reconcileExternalJobDisposition(
     idempotencyKey: prepared.id,
     targetNotionPageId: prepared.notionPageId,
     targetDispositionId: prepared.id,
+    workspaceId: prepared.workspaceId,
   });
   return externalJobDispositionSummary(
     await dependencies.complete(id, claimToken, receipt.id),
