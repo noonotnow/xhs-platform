@@ -7,6 +7,7 @@ import {
   approveStoredPublishBatchTransaction,
   storedManifestHash,
 } from '@/lib/rednote-publish-batch-store';
+import { recoverStoredApprovedPublishJobTransaction } from '@/lib/rednote-publish-job-recovery-store';
 import {
   applyExpectedRednoteSchemaMigrations,
   readRednoteSchemaReadiness,
@@ -324,6 +325,124 @@ describe('canonical local publishing migration chain', () => {
     };
   }
 
+  async function insertRecoverablePublishJob() {
+    const workspaceId = `workspace-recovery-${randomUUID()}`;
+    const batchId = randomUUID();
+    const itemId = randomUUID();
+    const jobId = randomUUID();
+    const claimToken = randomUUID();
+    const pageId = `recovery-page-${randomUUID()}`;
+    const revision = '2026-09-08T16:37:00.000Z';
+    const claimedAt = '2026-09-08T19:15:12.818Z';
+    const completedAt = '2026-09-08T20:19:53.817Z';
+    const snapshot = {
+      notionPageId: pageId,
+      headline: 'Recovery guard',
+      title: 'Recovery guard',
+      caption: 'Recovery ownership regression',
+      tags: ['Regression'],
+      platform: 'RedNote',
+      mediaType: 'image',
+      mediaIndex: 0,
+      mediaUrl: 'https://images.xhs.justlikekatie.com/recovery-guard.png',
+      media: [{
+        type: 'image',
+        url: 'https://images.xhs.justlikekatie.com/recovery-guard.png',
+        identity: 'recovery-guard-image',
+      }],
+      publishAt: '2026-09-08T23:20:00.000Z',
+      notionLastEditedTime: revision,
+      expectedAccountId: '678ba3b5000000000a03ecd2',
+    };
+    const itemHash = stableDigest(snapshot);
+    const manifestHash = storedManifestHash([{
+      notionPageId: pageId,
+      itemHash,
+      dispatchMode: 'scheduled',
+      lateBySeconds: 0,
+    }]);
+    await database.query(
+      `INSERT INTO rednote_publish_batches(
+         id, workspace_id, kind, status, manifest_hash, approved_at
+       ) VALUES ($1, $2, 'bootstrap', 'approved', $3, $4)`,
+      [batchId, workspaceId, manifestHash, '2026-09-08T17:08:23.346Z'],
+    );
+    await database.query(
+      `INSERT INTO rednote_publish_batch_items(
+         id, workspace_id, batch_id, notion_page_id, snapshot, item_hash,
+         state, dispatch_mode
+       ) VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'failed', 'scheduled')`,
+      [itemId, workspaceId, batchId, pageId, JSON.stringify(snapshot), itemHash],
+    );
+    await database.query(
+      `INSERT INTO local_publish_jobs(
+         id, workspace_id, notion_page_id, snapshot, status, idempotency_key,
+         batch_item_id, claim_token, claim_attempts, claimed_at,
+         claim_expires_at, completed_at, error_code, error_message
+       ) VALUES (
+         $1, $2, $3, $4::jsonb, 'failed', $5, $6, $7, 1, $8,
+         $9, $9, 'BOUNDED_BATCH_BYPASS_DISABLED',
+         'Bounded batch bypass is disabled'
+       )`,
+      [
+        jobId,
+        workspaceId,
+        pageId,
+        JSON.stringify(snapshot),
+        randomUUID(),
+        itemId,
+        claimToken,
+        claimedAt,
+        completedAt,
+      ],
+    );
+    return {
+      actor: 'operator@example.com',
+      input: {
+        batchId,
+        manifestHash,
+        itemId,
+        jobId,
+        itemHash,
+        snapshotRevision: revision,
+      },
+      itemId,
+      jobId,
+      pageId,
+      revision,
+      workspaceId,
+    };
+  }
+
+  async function insertCompetingBatchItem(
+    workspaceId: string,
+    pageId: string,
+    revision: string,
+  ) {
+    const batchId = randomUUID();
+    await database.query(
+      `INSERT INTO rednote_publish_batches(
+         id, workspace_id, kind, status, manifest_hash, approved_at
+       ) VALUES ($1, $2, 'bootstrap', 'approved', $3, CURRENT_TIMESTAMP)`,
+      [batchId, workspaceId, 'd'.repeat(64)],
+    );
+    await database.query(
+      `INSERT INTO rednote_publish_batch_items(
+         workspace_id, batch_id, notion_page_id, snapshot, item_hash,
+         state, dispatch_mode
+       ) VALUES (
+         $1, $2, $3,
+         jsonb_build_object(
+           'notionPageId', $3::text,
+           'notionLastEditedTime', $4::text,
+           'publishAt', '2026-09-08T23:20:00.000Z'
+         ),
+         $5, 'queued', 'scheduled'
+       )`,
+      [workspaceId, batchId, pageId, revision, stableDigest({ batchId, revision })],
+    );
+  }
+
   async function expectTerminalReclassificationRejected(attemptId: string) {
     await database.exec('BEGIN');
     try {
@@ -349,6 +468,96 @@ describe('canonical local publishing migration chain', () => {
       await database.exec('ROLLBACK');
     }
   }
+
+  it.each([
+    ['no competing lifecycle', 0],
+    ['one competing lifecycle', 1],
+    ['multiple competing lifecycles', 2],
+  ])(
+    'evaluates recovery ownership as a boolean with %s',
+    async (_, blockerCount) => {
+      const fixture = await insertRecoverablePublishJob();
+      for (let index = 0; index < blockerCount; index += 1) {
+        await insertCompetingBatchItem(
+          fixture.workspaceId,
+          fixture.pageId,
+          `2026-09-08T${String(15 - index).padStart(2, '0')}:37:00.000Z`,
+        );
+      }
+      const blockers = await database.query(
+        `SELECT *
+         FROM rednote_publish_revision_blockers(
+           $1, $2, $3, $4::uuid, $5::uuid, NULL::uuid
+         )`,
+        [
+          fixture.workspaceId,
+          fixture.pageId,
+          fixture.revision,
+          fixture.itemId,
+          fixture.jobId,
+        ],
+      );
+      expect(blockers.rows).toHaveLength(blockerCount);
+
+      const client = {
+        query: async (statement: string, params?: unknown[]) => {
+          if (
+            statement.includes('pg_advisory_xact_lock') ||
+            statement.startsWith('LOCK TABLE ')
+          ) {
+            return { rows: [], rowCount: 0 };
+          }
+          const result = await database.query(statement, params);
+          return {
+            ...result,
+            rowCount: result.affectedRows,
+          };
+        },
+      } as unknown as Parameters<
+        typeof recoverStoredApprovedPublishJobTransaction
+      >[0];
+      const recovery = recoverStoredApprovedPublishJobTransaction(
+        client,
+        fixture.input,
+        fixture.actor,
+      );
+      if (blockerCount === 0) {
+        await expect(recovery).resolves.toMatchObject({
+          batchId: fixture.input.batchId,
+          itemId: fixture.itemId,
+          jobId: fixture.jobId,
+          alreadyRecovered: false,
+        });
+      } else {
+        await expect(recovery).rejects.toMatchObject({
+          code: 'RECOVERY_PRECONDITION_FAILED',
+          message: 'Another publish or reconciliation lifecycle owns this post.',
+        });
+      }
+
+      const state = await database.query<{
+        item_state: string;
+        job_status: string;
+        recovery_count: string;
+      }>(
+        `SELECT item.state AS item_state, job.status AS job_status,
+           (
+             SELECT COUNT(*)::text
+             FROM rednote_publish_job_recoveries recovery
+             WHERE recovery.local_publish_job_id = job.id
+           ) AS recovery_count
+         FROM local_publish_jobs job
+         JOIN rednote_publish_batch_items item ON item.id = job.batch_item_id
+         WHERE job.id = $1`,
+        [fixture.jobId],
+      );
+      expect(state.rows[0]).toEqual({
+        item_state: blockerCount === 0 ? 'queued' : 'failed',
+        job_status: blockerCount === 0 ? 'queued' : 'failed',
+        recovery_count: blockerCount === 0 ? '1' : '0',
+      });
+    },
+  );
 
   it('installs every baseline and RedNote worker table in order', async () => {
     const result = await database.query<{ table_name: string }>(

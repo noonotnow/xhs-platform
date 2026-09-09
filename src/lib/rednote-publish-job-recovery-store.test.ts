@@ -263,6 +263,10 @@ describe('stored approved publish job recovery', () => {
       alreadyRecovered: false,
     });
     const statements = mocks.query.mock.calls.map(([statement]) => String(statement));
+    const ownershipQuery = statements.find((value) =>
+      value.includes('AS active_ownership'))!;
+    expect(ownershipQuery).toContain('SELECT EXISTS (');
+    expect(ownershipQuery).not.toContain('SELECT (\n         SELECT 1');
     const candidateQuery = statements.find((value) =>
       value.includes('FROM local_publish_jobs AS job'))!;
     expect(candidateQuery).toContain('LEFT JOIN LATERAL');

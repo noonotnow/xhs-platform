@@ -1,4 +1,4 @@
-import type { QueryResultRow } from 'pg';
+import type { PoolClient, QueryResultRow } from 'pg';
 import { getPool } from '@/lib/db';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
 import {
@@ -166,11 +166,11 @@ function result(
   };
 }
 
-export async function recoverStoredApprovedPublishJob(
+export async function recoverStoredApprovedPublishJobTransaction(
+  client: Pick<PoolClient, 'query'>,
   input: RednotePublishJobRecoveryInput,
   recoveredBy: string,
 ) {
-  const client = await getPool().connect();
   try {
     await client.query('BEGIN');
     await client.query(
@@ -285,7 +285,7 @@ export async function recoverStoredApprovedPublishJob(
     }
     await client.query('LOCK TABLE external_post_reconciliations IN SHARE MODE');
     const ownership = await client.query<OwnershipRow>(
-      `SELECT (
+      `SELECT EXISTS (
          SELECT 1
          FROM rednote_publish_revision_blockers(
            $1,
@@ -437,6 +437,20 @@ export async function recoverStoredApprovedPublishJob(
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
+  }
+}
+
+export async function recoverStoredApprovedPublishJob(
+  input: RednotePublishJobRecoveryInput,
+  recoveredBy: string,
+) {
+  const client = await getPool().connect();
+  try {
+    return await recoverStoredApprovedPublishJobTransaction(
+      client,
+      input,
+      recoveredBy,
+    );
   } finally {
     client.release();
   }
