@@ -49,6 +49,7 @@ import { manualSchedulingProvenanceMismatch } from '@/lib/manual-scheduling-prov
 import {
   READY_POSTS_PANEL_FEATURES,
   readyPostMediaPreview,
+  readyPostRecoveryAction,
   type ReadyPostMediaChoice,
 } from '@/lib/ready-posts-panel-features';
 import {
@@ -792,22 +793,14 @@ export default function ReadyPostsPanel({ workspaceId }: { workspaceId: string }
     title: string,
     repairMissingAttemptLineage = false,
   ) {
-    const fixedHydrationFailure =
-      evidence.priorErrorCode === 'AMBIGUOUS_CREATOR_UI';
-    const creatorLoginFailure =
-      evidence.priorErrorCode === 'NOT_LOGGED_IN';
-    const scheduleReadbackMismatch =
-      evidence.priorErrorCode === 'SCHEDULE_READBACK_MISMATCH';
+    const recoveryAction = readyPostRecoveryAction(
+      evidence,
+      repairMissingAttemptLineage,
+    );
     const confirmed = window.confirm(
       `${repairMissingAttemptLineage ? 'Repair attempt lineage for' : 'Recover'} ` +
       `the exact already-approved job for "${title}"?\n\n` +
-      (fixedHydrationFailure
-        ? 'Fixed failure: image-mode pre-staging hydration could not uniquely identify the upload mode.\n'
-        : creatorLoginFailure
-          ? 'Recorded failure: the persistent Creator browser profile required login before staging.\n'
-          : scheduleReadbackMismatch
-            ? 'Recorded failure: Creator did not retain the approved scheduled time before staging.\n'
-            : '') +
+      recoveryAction.failureDetail +
       `Job ${evidence.jobId}\n` +
       `Batch ${evidence.batchId}\n` +
       `Item ${evidence.itemId}\n` +
@@ -844,7 +837,10 @@ export default function ReadyPostsPanel({ workspaceId }: { workspaceId: string }
       const response = await adminApiFetch(workspaceId, path, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...exactEvidence, confirmed: true }),
+        body: JSON.stringify({
+          ...exactEvidence,
+          confirmed: recoveryAction.confirmation,
+        }),
       });
       const data = await responseJson<PublishJobRecoveryResponse>(
         response,
@@ -1491,8 +1487,8 @@ export default function ReadyPostsPanel({ workspaceId }: { workspaceId: string }
                         )}
                       >
                         {recoveryBusyJobId === item.recoveryEvidence.jobId
-                          ? 'Requeueing exact job…'
-                          : 'Confirm exact-job recovery'}
+                          ? readyPostRecoveryAction(item.recoveryEvidence).busyLabel
+                          : readyPostRecoveryAction(item.recoveryEvidence).idleLabel}
                       </button>
                     )}
                     {isFailed && !item.recoveryEvidence && (
@@ -1515,8 +1511,10 @@ export default function ReadyPostsPanel({ workspaceId }: { workspaceId: string }
               the approved job and creates one fresh approved worker attempt generation with no
               second approval or replacement local job. The fixed hydration failure is eligible
               only as a proven, immediately later terminal claim generation. A Creator login
-              failure is eligible only for its canonical pre-staging code and message. Any currently
-              authenticated authorized Admin may complete a missing-lineage repair; the original
+              failure is eligible only for its canonical pre-staging code and message. A
+              browser-closed media-loading failure is eligible only for its exact canonical
+              pre-Publish code and message. Any currently authenticated authorized Admin may
+              complete a missing-lineage repair; the original
               audit actor is preserved and the repair operator is recorded separately. A later
               failed-generation recovery remains bound to the original recovery identity.
             </p>
@@ -1540,15 +1538,9 @@ export default function ReadyPostsPanel({ workspaceId }: { workspaceId: string }
                     Original publish time: <code>{item.snapshot.publishAt}</code>
                   </small>
                   <small>
-                    Recovery reason: {item.recoveryEvidence.priorErrorCode ===
-                    'AMBIGUOUS_CREATOR_UI'
-                      ? 'Fixed image-mode pre-staging hydration failure'
-                      : item.recoveryEvidence.priorErrorCode === 'NOT_LOGGED_IN'
-                        ? 'Persistent Creator browser profile required login before staging'
-                        : item.recoveryEvidence.priorErrorCode ===
-                            'SCHEDULE_READBACK_MISMATCH'
-                          ? 'Creator did not retain the approved scheduled time before staging'
-                          : 'Bounded-batch bypass disabled'}
+                    Recovery reason: {
+                      readyPostRecoveryAction(item.recoveryEvidence).reason
+                    }
                   </small>
                   <small>
                     Terminal failure generation: <code>
@@ -1571,12 +1563,14 @@ export default function ReadyPostsPanel({ workspaceId }: { workspaceId: string }
                     )}
                   >
                     {recoveryBusyJobId === item.recoveryEvidence.jobId
-                      ? item.state === 'queued'
-                        ? 'Repairing attempt lineage…'
-                        : 'Requeueing exact job…'
-                      : item.state === 'queued'
-                        ? 'Repair missing attempt lineage'
-                        : 'Confirm exact-job recovery'}
+                      ? readyPostRecoveryAction(
+                          item.recoveryEvidence,
+                          item.state === 'queued',
+                        ).busyLabel
+                      : readyPostRecoveryAction(
+                          item.recoveryEvidence,
+                          item.state === 'queued',
+                        ).idleLabel}
                   </button>
                 </li>
               )] : [])}

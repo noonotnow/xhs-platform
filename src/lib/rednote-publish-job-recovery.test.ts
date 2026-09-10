@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
+  isExactBrowserClosedPrePublishFailure,
+  parseBrowserClosedPublishJobRecoveryInput,
   parseRednotePublishJobRecoveryInput,
   validateRecoveryCandidate,
   type RecoveryCandidateState,
   type RednotePublishJobRecoveryInput,
 } from '@/lib/rednote-publish-job-recovery';
+import {
+  BROWSER_CLOSED_PRE_PUBLISH_CONFIRMATION,
+  BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
+} from '@/lib/rednote-publish-job-recovery-contract';
 import type { LocalPublishSnapshot } from '@/types/local-publish-job';
 
 const batchId = '11111111-1111-4111-8111-111111111111';
@@ -83,6 +89,90 @@ describe('bounded publish job recovery validation', () => {
     jobErrorCode: 'NOT_LOGGED_IN',
     jobErrorMessage: 'RedNote creator login is required in the persistent browser profile',
   };
+  const browserClosedFailure = {
+    jobErrorCode: 'INTERNAL_ERROR',
+    jobErrorMessage: BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
+  };
+
+  it('keeps the browser-closed failure on its dedicated exact recovery policy', () => {
+    expect(isExactBrowserClosedPrePublishFailure(
+      browserClosedFailure.jobErrorCode,
+      browserClosedFailure.jobErrorMessage,
+    )).toBe(true);
+    expect(() => validateRecoveryCandidate(
+      candidate(browserClosedFailure),
+      input,
+      actor,
+    )).toThrow(/exact recoverable terminal pre-dispatch/i);
+    expect(validateRecoveryCandidate(
+      candidate(browserClosedFailure),
+      input,
+      actor,
+      'browser_closed_pre_publish',
+    )).toBe('recover');
+    const queuedBrowserClosedRecovery = candidate({
+      itemState: 'queued',
+      jobStatus: 'queued',
+      jobErrorCode: null,
+      jobErrorMessage: null,
+      jobClaimToken: null,
+      jobClaimedAt: null,
+      jobClaimExpiresAt: null,
+      jobCompletedAt: null,
+      audit: {
+        id: '66666666-6666-4666-8666-666666666666',
+        ...input,
+        recoveredBy: actor,
+        recoveredAt: '2026-08-04T17:30:00.000Z',
+        priorErrorCode: browserClosedFailure.jobErrorCode,
+        priorErrorMessage: browserClosedFailure.jobErrorMessage,
+        priorClaimAttempts: 1,
+        priorClaimedAt: '2026-08-04T17:04:33.424Z',
+        priorCompletedAt: '2026-08-04T17:04:33.963Z',
+      },
+    });
+    expect(() => validateRecoveryCandidate(
+      queuedBrowserClosedRecovery,
+      input,
+      actor,
+    )).toThrow(/does not match the latest audited claim generation/i);
+    expect(validateRecoveryCandidate(
+      queuedBrowserClosedRecovery,
+      input,
+      actor,
+      'browser_closed_pre_publish',
+    )).toBe('repair_missing_attempt_lineage');
+
+    for (const jobErrorMessage of [
+      ` ${BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE}`,
+      `${BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE} `,
+      `${BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE}: retry`,
+      'page.waitForTimeout: Target page, context or browser has been closed.',
+      'page.waitForTimeout: target page, context or browser has been closed',
+      'page.goto: Target page, context or browser has been closed',
+      'Target page, context or browser has been closed',
+    ]) {
+      expect(isExactBrowserClosedPrePublishFailure(
+        browserClosedFailure.jobErrorCode,
+        jobErrorMessage,
+      )).toBe(false);
+      expect(() => validateRecoveryCandidate(
+        candidate({ ...browserClosedFailure, jobErrorMessage }),
+        input,
+        actor,
+        'browser_closed_pre_publish',
+      )).toThrow(/exact recoverable terminal pre-dispatch/i);
+    }
+    expect(() => validateRecoveryCandidate(
+      candidate({
+        ...browserClosedFailure,
+        jobErrorCode: 'PLAYWRIGHT_ERROR',
+      }),
+      input,
+      actor,
+      'browser_closed_pre_publish',
+    )).toThrow(/exact recoverable terminal pre-dispatch/i);
+  });
 
   it('accepts only the canonical NOT_LOGGED_IN code and message pair', () => {
     expect(validateRecoveryCandidate(candidate(loginFailure), input, actor)).toBe('recover');
@@ -438,5 +528,17 @@ describe('bounded publish job recovery validation', () => {
       snapshotRevision: '2026-08-04T13:12:00Z',
       confirmed: true,
     })).toThrow(/canonical UTC timestamp/i);
+    expect(parseBrowserClosedPublishJobRecoveryInput({
+      ...input,
+      confirmed: BROWSER_CLOSED_PRE_PUBLISH_CONFIRMATION,
+    })).toEqual(input);
+    expect(() => parseBrowserClosedPublishJobRecoveryInput({
+      ...input,
+      confirmed: true,
+    })).toThrow(/browser-closed recovery confirmation/i);
+    expect(() => parseRednotePublishJobRecoveryInput({
+      ...input,
+      confirmed: BROWSER_CLOSED_PRE_PUBLISH_CONFIRMATION,
+    })).toThrow(/confirmation/i);
   });
 });

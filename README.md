@@ -556,6 +556,11 @@ migration 032 needs only migration 033.
 `SCHEDULE_READBACK_MISMATCH` code in the immutable recovery audit. Apply
 migration 034 before deploying platform code that exposes this recovery reason.
 A database already through migration 033 needs only migration 034.
+`migrations/035_recover_browser_closed_pre_publish.sql` additively permits
+`INTERNAL_ERROR` in the immutable recovery audit for the separate exact
+browser-closed pre-Publish path. It does not mutate lifecycle or audit rows.
+Apply migration 035 before deploying platform code that exposes this action. A
+database already through migration 034 needs only migration 035.
 
 This is the only supported recovery for a bounded job that terminal-failed
 before staging or dispatch with either existing exact error
@@ -567,6 +572,14 @@ valid, differing `got` and `expected` values. It updates the original
 attempt while preserving the terminal source attempt. It does not create a job,
 replace an item, rebuild or approve a manifest, change the frozen snapshot or
 publish time, or change the original batch approval.
+
+The browser-closed pre-Publish action is a separate fail-closed path. It accepts
+only code `INTERNAL_ERROR` and the exact anchored message
+`page.waitForTimeout: Target page, context or browser has been closed`; prefixes,
+suffixes, whitespace changes, other browser errors, and generic
+`INTERNAL_ERROR` failures are ineligible. It preserves every immutable,
+approval, ownership, generation, and no-publication check above. It does not
+broaden the existing stale-browser-frame recovery matcher.
 
 Use this deployment and operator sequence exactly:
 
@@ -589,10 +602,12 @@ Use this deployment and operator sequence exactly:
      -f migrations/033_rejected_worker_result_recovery_evidence.sql
    psql "$XHS_DATABASE_POSTGRES_URL_NON_POOLING" -v ON_ERROR_STOP=1 \
      -f migrations/034_recover_schedule_readback_mismatch.sql
+   psql "$XHS_DATABASE_POSTGRES_URL_NON_POOLING" -v ON_ERROR_STOP=1 \
+     -f migrations/035_recover_browser_closed_pre_publish.sql
    ```
 
 3. Deploy the platform release containing the recovery API and UI only after
-   all required migrations, including 034, succeed. Do not rebuild, supersede,
+   all required migrations, including 035, succeed. Do not rebuild, supersede,
    or approve a batch and do not create a replacement job.
 4. In `/admin`, refresh **Bounded batch approval**. **Eligible pre-dispatch
    recovery** appears only when the approved batch, two-way item/job linkage,
@@ -645,6 +660,21 @@ The authenticated action is
   "itemHash": "64-character lowercase SHA-256",
   "snapshotRevision": "canonical UTC timestamp",
   "confirmed": true
+}
+```
+
+For the exact browser-closed pre-Publish action, the same immutable identifiers
+are required and `confirmed` must instead be the dedicated literal:
+
+```json
+{
+  "batchId": "uuid",
+  "manifestHash": "64-character lowercase SHA-256",
+  "itemId": "uuid",
+  "jobId": "uuid",
+  "itemHash": "64-character lowercase SHA-256",
+  "snapshotRevision": "canonical UTC timestamp",
+  "confirmed": "RECOVER_EXACT_BROWSER_CLOSED_PREPUBLISH_FAILURE"
 }
 ```
 

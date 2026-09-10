@@ -1,5 +1,10 @@
 import { isDeepStrictEqual } from 'util';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
+import {
+  BROWSER_CLOSED_PRE_PUBLISH_CONFIRMATION,
+  BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
+  BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
+} from '@/lib/rednote-publish-job-recovery-contract';
 import type { LocalPublishSnapshot } from '@/types/local-publish-job';
 
 export const RECOVERABLE_BOUNDED_BATCH_ERROR = 'BOUNDED_BATCH_BYPASS_DISABLED';
@@ -17,6 +22,10 @@ export type RecoverableRednotePublishJobError =
   | typeof RECOVERABLE_AMBIGUOUS_CREATOR_ERROR
   | typeof RECOVERABLE_NOT_LOGGED_IN_ERROR
   | typeof RECOVERABLE_SCHEDULE_READBACK_MISMATCH_ERROR;
+
+export type RednotePublishJobRecoveryKind =
+  | 'standard'
+  | 'browser_closed_pre_publish';
 
 export interface RednotePublishJobRecoveryInput {
   batchId: string;
@@ -141,6 +150,26 @@ export function exactRecoverablePublishJobError(
   return null;
 }
 
+export function isExactBrowserClosedPrePublishFailure(
+  errorCode: string | null | undefined,
+  errorMessage: string | null | undefined,
+) {
+  return (
+    errorCode === BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE &&
+    errorMessage === BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE
+  );
+}
+
+function isRecoverableForKind(
+  kind: RednotePublishJobRecoveryKind,
+  errorCode: string | null | undefined,
+  errorMessage: string | null | undefined,
+) {
+  return kind === 'browser_closed_pre_publish'
+    ? isExactBrowserClosedPrePublishFailure(errorCode, errorMessage)
+    : Boolean(exactRecoverablePublishJobError(errorCode, errorMessage));
+}
+
 function exactKeys(value: Record<string, unknown>, expected: string[]) {
   const keys = Object.keys(value).sort();
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
@@ -223,6 +252,30 @@ export function parseRednotePublishJobRecoveryInput(
   };
 }
 
+export function parseBrowserClosedPublishJobRecoveryInput(
+  value: unknown,
+): RednotePublishJobRecoveryInput {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new LocalPublishJobError(
+      'Recovery body must be a JSON object',
+      'VALIDATION_ERROR',
+      400,
+    );
+  }
+  const body = value as Record<string, unknown>;
+  if (body.confirmed !== BROWSER_CLOSED_PRE_PUBLISH_CONFIRMATION) {
+    throw new LocalPublishJobError(
+      'Explicit browser-closed recovery confirmation is required',
+      'CONFIRMATION_REQUIRED',
+      400,
+    );
+  }
+  return parseRednotePublishJobRecoveryInput({
+    ...body,
+    confirmed: true,
+  });
+}
+
 function assertImmutableEvidence(
   state: RecoveryCandidateState,
   input: RednotePublishJobRecoveryInput,
@@ -270,6 +323,7 @@ export function validateRecoveryCandidate(
   state: RecoveryCandidateState,
   input: RednotePublishJobRecoveryInput,
   recoveredBy: string,
+  recoveryKind: RednotePublishJobRecoveryKind = 'standard',
 ): 'recover' | 'repair_missing_attempt_lineage' {
   assertImmutableEvidence(state, input);
   if (!recoveredBy.trim() || recoveredBy.length > 320) {
@@ -299,7 +353,8 @@ export function validateRecoveryCandidate(
       !state.jobCompletedAt;
     if (safelyQueued) {
       if (
-        !exactRecoverablePublishJobError(
+        !isRecoverableForKind(
+          recoveryKind,
           state.audit.priorErrorCode ?? null,
           state.audit.priorErrorMessage ?? null,
         ) ||
@@ -319,7 +374,11 @@ export function validateRecoveryCandidate(
     if (
       state.itemState !== 'failed' ||
       state.jobStatus !== 'failed' ||
-      !exactRecoverablePublishJobError(state.jobErrorCode, state.jobErrorMessage) ||
+      !isRecoverableForKind(
+        recoveryKind,
+        state.jobErrorCode,
+        state.jobErrorMessage,
+      ) ||
       !state.jobClaimedAt ||
       !state.jobCompletedAt ||
       !laterClaimGeneration ||
@@ -336,7 +395,11 @@ export function validateRecoveryCandidate(
   if (
     state.itemState !== 'failed' ||
     state.jobStatus !== 'failed' ||
-    !exactRecoverablePublishJobError(state.jobErrorCode, state.jobErrorMessage) ||
+    !isRecoverableForKind(
+      recoveryKind,
+      state.jobErrorCode,
+      state.jobErrorMessage,
+    ) ||
     state.jobErrorCode === RECOVERABLE_AMBIGUOUS_CREATOR_ERROR ||
     !state.jobCompletedAt
   ) {

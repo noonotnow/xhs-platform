@@ -401,6 +401,7 @@ describe('stored RedNote bootstrap replacement', () => {
     await expect(listStoredPublishBatches('workspace-1', batchId)).resolves.toMatchObject([{
       items: [{
         recoveryEvidence: {
+          recoveryKind: 'standard',
           batchId,
           itemId,
           jobId,
@@ -424,6 +425,7 @@ describe('stored RedNote bootstrap replacement', () => {
       });
     const loginFailure = await listStoredPublishBatches('workspace-1', batchId);
     expect(loginFailure[0].items[0].recoveryEvidence).toMatchObject({
+      recoveryKind: 'standard',
       priorErrorCode: 'NOT_LOGGED_IN',
       claimAttempts: 1,
     });
@@ -442,9 +444,49 @@ describe('stored RedNote bootstrap replacement', () => {
       });
     const scheduleReadbackMismatch = await listStoredPublishBatches('workspace-1', batchId);
     expect(scheduleReadbackMismatch[0].items[0].recoveryEvidence).toMatchObject({
+      recoveryKind: 'standard',
       priorErrorCode: 'SCHEDULE_READBACK_MISMATCH',
       claimAttempts: 1,
     });
+
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [batchRow(batchId, 'approved', hash)] })
+      .mockResolvedValueOnce({
+        rows: [{
+          ...item,
+          recovery_job_error_code: 'INTERNAL_ERROR',
+          recovery_job_error_message:
+            'page.waitForTimeout: Target page, context or browser has been closed',
+        }],
+      });
+    const browserClosed = await listStoredPublishBatches('workspace-1', batchId);
+    expect(browserClosed[0].items[0].recoveryEvidence).toMatchObject({
+      recoveryKind: 'browser_closed_pre_publish',
+      priorErrorCode: 'INTERNAL_ERROR',
+      claimAttempts: 1,
+    });
+
+    for (const recoveryJobErrorMessage of [
+      'page.waitForTimeout: Target page, context or browser has been closed ',
+      ' page.waitForTimeout: Target page, context or browser has been closed',
+      'page.waitForTimeout: Target page, context or browser has been closed: retry',
+      'page.goto: Target page, context or browser has been closed',
+    ]) {
+      mocks.sql
+        .mockResolvedValueOnce({ rows: [batchRow(batchId, 'approved', hash)] })
+        .mockResolvedValueOnce({
+          rows: [{
+            ...item,
+            recovery_job_error_code: 'INTERNAL_ERROR',
+            recovery_job_error_message: recoveryJobErrorMessage,
+          }],
+        });
+      const rejectedBrowserClosed = await listStoredPublishBatches(
+        'workspace-1',
+        batchId,
+      );
+      expect(rejectedBrowserClosed[0].items[0].recoveryEvidence).toBeUndefined();
+    }
 
     mocks.sql
       .mockResolvedValueOnce({ rows: [batchRow(batchId, 'approved', hash)] })

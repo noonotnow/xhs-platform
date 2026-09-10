@@ -4,6 +4,7 @@ import { NextRequest } from 'next/server';
 const mocks = vi.hoisted(() => ({
   validateAccess: vi.fn(),
   recover: vi.fn(),
+  recoverBrowserClosed: vi.fn(),
 }));
 
 vi.mock('@/lib/cloudflare-access', () => ({
@@ -11,9 +12,13 @@ vi.mock('@/lib/cloudflare-access', () => ({
 }));
 vi.mock('@/lib/rednote-publish-job-recovery-store', () => ({
   recoverStoredApprovedPublishJob: mocks.recover,
+  recoverStoredBrowserClosedPrePublishJob: mocks.recoverBrowserClosed,
 }));
 
 import { POST } from '@/app/admin/api/publish-job-recoveries/route';
+import {
+  BROWSER_CLOSED_PRE_PUBLISH_CONFIRMATION,
+} from '@/lib/rednote-publish-job-recovery-contract';
 
 const body = {
   batchId: '11111111-1111-4111-8111-111111111111',
@@ -56,6 +61,7 @@ describe('approved publish job recovery route', () => {
     vi.clearAllMocks();
     mocks.validateAccess.mockResolvedValue({ email: 'operator@example.com' });
     mocks.recover.mockResolvedValue(recovery);
+    mocks.recoverBrowserClosed.mockResolvedValue(recovery);
   });
 
   it('authenticates the actor and returns an actor-free normal recovery DTO', async () => {
@@ -111,6 +117,27 @@ describe('approved publish job recovery route', () => {
     expect(JSON.stringify(json)).not.toContain(repairActor);
   });
 
+  it('routes only the dedicated exact confirmation to browser-closed recovery', async () => {
+    const response = await POST(request({
+      ...body,
+      confirmed: BROWSER_CLOSED_PRE_PUBLISH_CONFIRMATION,
+    }));
+
+    expect(response.status).toBe(201);
+    expect(mocks.recoverBrowserClosed).toHaveBeenCalledWith(
+      {
+        batchId: body.batchId,
+        manifestHash: body.manifestHash,
+        itemId: body.itemId,
+        jobId: body.jobId,
+        itemHash: body.itemHash,
+        snapshotRevision: body.snapshotRevision,
+      },
+      'operator@example.com',
+    );
+    expect(mocks.recover).not.toHaveBeenCalled();
+  });
+
   it.each([
     'Cloudflare Access assertion is missing',
     'Unauthorized',
@@ -132,5 +159,14 @@ describe('approved publish job recovery route', () => {
     }));
     expect(spoofed.status).toBe(400);
     expect(mocks.recover).not.toHaveBeenCalled();
+    expect(mocks.recoverBrowserClosed).not.toHaveBeenCalled();
+
+    const genericInternalConfirmation = await POST(request({
+      ...body,
+      confirmed: 'RECOVER_INTERNAL_ERROR',
+    }));
+    expect(genericInternalConfirmation.status).toBe(400);
+    expect(mocks.recover).not.toHaveBeenCalled();
+    expect(mocks.recoverBrowserClosed).not.toHaveBeenCalled();
   });
 });
