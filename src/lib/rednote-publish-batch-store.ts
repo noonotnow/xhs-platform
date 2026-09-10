@@ -3,10 +3,8 @@ import { createHash } from 'crypto';
 import { isDeepStrictEqual } from 'util';
 import { getPool, sql } from '@/lib/db';
 import {
+  exactRecoverablePublishJobError,
   RECOVERABLE_AMBIGUOUS_CREATOR_ERROR,
-  RECOVERABLE_AMBIGUOUS_CREATOR_MESSAGE,
-  RECOVERABLE_BOUNDED_BATCH_ERROR,
-  type RecoverableRednotePublishJobError,
 } from '@/lib/rednote-publish-job-recovery';
 import type {
   LocalPublishSnapshot,
@@ -169,16 +167,17 @@ function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
     isAfter(row.recovery_claimed_at, row.recovery_audit_recovered_at) &&
     isAfter(row.recovery_completed_at, row.recovery_claimed_at)
   );
+  const exactRecoverableError = exactRecoverablePublishJobError(
+    row.recovery_job_error_code,
+    row.recovery_job_error_message,
+  );
   const recoverableError = (
-    row.recovery_job_error_code === RECOVERABLE_BOUNDED_BATCH_ERROR ||
+    exactRecoverableError &&
     (
-      !firstRecovery &&
-      row.recovery_job_error_code === RECOVERABLE_AMBIGUOUS_CREATOR_ERROR &&
-      row.recovery_job_error_message === RECOVERABLE_AMBIGUOUS_CREATOR_MESSAGE
+      row.recovery_job_error_code !== RECOVERABLE_AMBIGUOUS_CREATOR_ERROR ||
+      !firstRecovery
     )
-  )
-    ? row.recovery_job_error_code as RecoverableRednotePublishJobError
-    : null;
+  ) ? exactRecoverableError : null;
   const failedRecoveryEligible = Boolean(
     batch?.status === 'approved' &&
     batch.approved_at &&
@@ -188,6 +187,7 @@ function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
     row.recovery_job_status === 'failed' &&
     recoverableError &&
     row.recovery_job_snapshot &&
+    row.recovery_claimed_at &&
     row.recovery_completed_at &&
     isDeepStrictEqual(row.snapshot, row.recovery_job_snapshot) &&
     row.snapshot.notionLastEditedTime ===
@@ -202,19 +202,14 @@ function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
     !row.recovery_reconciled_at &&
     row.recovery_verification_attempts === 0 &&
     (firstRecovery || distinctRefailure) &&
+    row.recovery_source_attempt_count === 1 &&
     row.recovery_no_active_ownership === true
   );
-  const queuedRepairError = (
-    matchingAuditEvidence &&
-    (
-      row.recovery_audit_error_code === RECOVERABLE_BOUNDED_BATCH_ERROR ||
-      (
-        row.recovery_audit_error_code === RECOVERABLE_AMBIGUOUS_CREATOR_ERROR &&
-        row.recovery_audit_error_message === RECOVERABLE_AMBIGUOUS_CREATOR_MESSAGE
+  const queuedRepairError = matchingAuditEvidence
+    ? exactRecoverablePublishJobError(
+        row.recovery_audit_error_code,
+        row.recovery_audit_error_message,
       )
-    )
-  )
-    ? row.recovery_audit_error_code as RecoverableRednotePublishJobError
     : null;
   const queuedRepairEligible = Boolean(
     batch?.status === 'approved' &&
@@ -561,11 +556,15 @@ export async function listStoredPublishBatches(workspaceId: string, batchId?: st
           AND source.approved_at IS NOT NULL
           AND NOT source.active
           AND source.terminal_outcome = 'known_failed'
-          AND source.terminal_at <= recovery.prior_completed_at
+          AND source.terminal_at <= COALESCE(
+            job.completed_at,
+            recovery.prior_completed_at
+          )
           AND source.receipt_lookup_state = 'not_required'
           AND source.dispatch_authorized_at IS NULL
           AND source.superseded_by_attempt_id IS NULL
-          AND source.payload_revision = recovery.snapshot_revision
+          AND source.payload_revision =
+            item.snapshot->>'notionLastEditedTime'
       ) AS source_attempts ON TRUE
       WHERE item.batch_id = ${batch.id}::uuid
         AND item.workspace_id = ${workspaceId}

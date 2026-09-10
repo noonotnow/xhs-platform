@@ -55,6 +55,8 @@ interface RecoveryRow extends QueryResultRow {
   recovery_item_id: string | null;
   recovery_item_hash: string | null;
   recovery_snapshot_revision: string | null;
+  recovery_prior_error_code: string | null;
+  recovery_prior_error_message: string | null;
   recovery_prior_claim_attempts: number | null;
   recovery_prior_claimed_at: Date | string | null;
   recovery_prior_completed_at_raw: string | null;
@@ -120,6 +122,8 @@ function audit(row: RecoveryRow): ExistingRecoveryAudit | null {
     snapshotRevision: row.recovery_snapshot_revision,
     recoveredBy: row.recovered_by,
     recoveredAt: timestamp(row.recovered_at),
+    priorErrorCode: row.recovery_prior_error_code ?? undefined,
+    priorErrorMessage: row.recovery_prior_error_message ?? undefined,
     priorClaimAttempts: row.recovery_prior_claim_attempts,
     priorClaimedAt: optionalTimestamp(row.recovery_prior_claimed_at),
     priorCompletedAt: timestamp(row.recovery_prior_completed_at_raw),
@@ -452,6 +456,8 @@ export async function recoverStoredApprovedPublishJobTransaction(
          recovery.batch_item_id AS recovery_item_id,
          recovery.item_hash AS recovery_item_hash,
          recovery.snapshot_revision AS recovery_snapshot_revision,
+         recovery.prior_error_code AS recovery_prior_error_code,
+         recovery.prior_error_message AS recovery_prior_error_message,
          recovery.prior_claim_attempts AS recovery_prior_claim_attempts,
          recovery.prior_claimed_at AS recovery_prior_claimed_at,
          recovery.prior_completed_at::text AS

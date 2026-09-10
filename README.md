@@ -530,7 +530,7 @@ with bounded-batch bypass still disabled. Enable bypass only after both
 reauthorization checks succeed against production. Finally perform the bootstrap
 steps above.
 
-#### Recovering a bypass-disabled approved job
+#### Recovering an exact approved pre-dispatch failure
 
 `migrations/010_rednote_publish_job_recoveries.sql` adds the append-only recovery
 audit and `migrations/011_generation_aware_rednote_publish_job_recoveries.sql`
@@ -542,10 +542,15 @@ recovery path; a database already through migration 030 needs only migration
 031. The migration does not repair previously recovered jobs by itself. An
 exact replay after the migration and application deploy idempotently creates
 the missing attempt generation for a queue-only recovery audit.
+`migrations/032_recover_creator_login_failure.sql` additively permits the
+`NOT_LOGGED_IN` code in that audit, without changing any lifecycle row. Apply
+migration 032 before deploying platform code that exposes this recovery reason.
+A database already through migration 031 needs only migration 032.
 
-This is the only
-supported recovery for a bounded job that terminal-failed
-with exact error `BOUNDED_BATCH_BYPASS_DISABLED` before staging or dispatch. It
+This is the only supported recovery for a bounded job that terminal-failed
+before staging or dispatch with either existing exact error
+`BOUNDED_BATCH_BYPASS_DISABLED`, or code `NOT_LOGGED_IN` and exact message
+`RedNote creator login is required in the persistent browser profile`. It
 updates the original `local_publish_jobs` row back to `queued` and creates a
 fresh approved worker attempt while preserving the terminal source attempt. It
 does not create a job, replace an item, rebuild or approve a manifest, change the
@@ -566,11 +571,13 @@ Use this deployment and operator sequence exactly:
      -f migrations/011_generation_aware_rednote_publish_job_recoveries.sql
    psql "$XHS_DATABASE_POSTGRES_URL_NON_POOLING" -v ON_ERROR_STOP=1 \
      -f migrations/031_recovery_attempt_generations.sql
+   psql "$XHS_DATABASE_POSTGRES_URL_NON_POOLING" -v ON_ERROR_STOP=1 \
+     -f migrations/032_recover_creator_login_failure.sql
    ```
 
 3. Deploy the platform release containing the recovery API and UI only after
-   migration 031 succeeds. Do not rebuild, supersede, or approve a batch and do
-   not create a replacement job.
+   all required migrations, including 032, succeed. Do not rebuild, supersede,
+   or approve a batch and do not create a replacement job.
 4. In `/admin`, refresh **Bounded batch approval**. **Eligible pre-dispatch
    recovery** appears only when the approved batch, two-way item/job linkage,
    immutable snapshots, manifest/item hashes, source revision, exact error,
@@ -584,10 +591,8 @@ Use this deployment and operator sequence exactly:
    operator and identifies the operation as `repair_missing_attempt_lineage`.
    Mismatched, actor-less, or ambiguous history fails closed, and the action
    disappears once lineage exists.
-5. Confirm the Day 5 job remains safely queued and do not recover or otherwise
-   mutate it. Compare every displayed Vibe Atlas job, batch, item, manifest hash,
-   item hash, source revision, and original publish time with the approved change
-   record. Select
+5. Compare every displayed job, batch, item, manifest hash, item hash, source
+   revision, and original publish time with the approved change record. Select
    **Repair missing attempt lineage** for an already queued audited recovery, or
    **Confirm exact-job recovery** once for a proven later failure generation, and
    accept the confirmation that no second batch approval or replacement job is
@@ -598,14 +603,19 @@ Use this deployment and operator sequence exactly:
    reuses its existing audit instead of writing another. Both create one fresh
    approved worker attempt generation for that claim generation, supersede the
    terminal attempt without erasing it, and leave the same job and item
-   `queued`. An exact repeated request is idempotent only while that job is still
+   `queued`. Recovery does not increment `claim_attempts`; the next real worker
+   claim increments it exactly once, and replaying that claim token does not
+   increment it again. An exact repeated request is idempotent only while that job is still
    safely queued at the latest audited generation. A later recovery is
    allowed only after a distinct greater claim attempt has later exact claimed and
    completed timestamps and independently satisfies every original precondition.
    Unchanged generations, changed evidence, or a job claimed by a worker fail closed.
-7. Confirm both the Vibe Atlas and Day 5 rows are queued. Keep the worker unloaded.
-   Enable the bounded-batch bypass in a separately controlled change, confirm it,
-   and only then start the worker in a separately controlled start step.
+7. Confirm the exact recovered row is queued and keep the worker unloaded. For
+   `NOT_LOGGED_IN`, independently confirm the persistent Creator profile identity
+   succeeds. Start the worker for one controlled real claim and verify the fresh
+   active attempt is claimed once. For `BOUNDED_BATCH_BYPASS_DISABLED`, enable
+   the bounded-batch bypass only through its separately controlled change before
+   starting the worker.
 
 The authenticated action is
 `POST /admin/api/publish-job-recoveries` with exactly:
@@ -627,7 +637,7 @@ records that operator and the recovery time in `rednote_publish_job_recoveries`.
 A queue-only missing-lineage repair never rewrites that immutable provenance; its
 append-only attempt event records the currently authenticated repair operator
 instead. The request and Admin projection never accept or expose an actor field.
-Never call it for a different error, after staging/authorization/dispatch/publication evidence,
+Never call it for a different or non-canonical error/message pair, after staging/authorization/dispatch/publication evidence,
 for an unapproved or superseded batch, or while another publish or reconciliation
 lifecycle owns the post. Because an in-flight external reconciliation has no
 canonical page ID until it succeeds, any `processing` external reconciliation

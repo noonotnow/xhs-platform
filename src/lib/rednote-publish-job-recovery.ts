@@ -6,10 +6,14 @@ export const RECOVERABLE_BOUNDED_BATCH_ERROR = 'BOUNDED_BATCH_BYPASS_DISABLED';
 export const RECOVERABLE_AMBIGUOUS_CREATOR_ERROR = 'AMBIGUOUS_CREATOR_UI';
 export const RECOVERABLE_AMBIGUOUS_CREATOR_MESSAGE =
   'Could not uniquely identify the image upload mode';
+export const RECOVERABLE_NOT_LOGGED_IN_ERROR = 'NOT_LOGGED_IN';
+export const RECOVERABLE_NOT_LOGGED_IN_MESSAGE =
+  'RedNote creator login is required in the persistent browser profile';
 
 export type RecoverableRednotePublishJobError =
   | typeof RECOVERABLE_BOUNDED_BATCH_ERROR
-  | typeof RECOVERABLE_AMBIGUOUS_CREATOR_ERROR;
+  | typeof RECOVERABLE_AMBIGUOUS_CREATOR_ERROR
+  | typeof RECOVERABLE_NOT_LOGGED_IN_ERROR;
 
 export interface RednotePublishJobRecoveryInput {
   batchId: string;
@@ -30,6 +34,8 @@ export interface ExistingRecoveryAudit {
   snapshotRevision: string;
   recoveredBy: string;
   recoveredAt: string;
+  priorErrorCode?: string;
+  priorErrorMessage?: string;
   priorClaimAttempts: number;
   priorClaimedAt: string | null;
   priorCompletedAt: string;
@@ -76,6 +82,28 @@ const HASH_PATTERN = /^[a-f0-9]{64}$/;
 
 function recoveryError(message: string, code = 'RECOVERY_PRECONDITION_FAILED') {
   return new LocalPublishJobError(message, code, 409);
+}
+
+export function exactRecoverablePublishJobError(
+  errorCode: string | null | undefined,
+  errorMessage: string | null | undefined,
+): RecoverableRednotePublishJobError | null {
+  if (errorCode === RECOVERABLE_BOUNDED_BATCH_ERROR) {
+    return errorCode;
+  }
+  if (
+    errorCode === RECOVERABLE_AMBIGUOUS_CREATOR_ERROR &&
+    errorMessage === RECOVERABLE_AMBIGUOUS_CREATOR_MESSAGE
+  ) {
+    return errorCode;
+  }
+  if (
+    errorCode === RECOVERABLE_NOT_LOGGED_IN_ERROR &&
+    errorMessage === RECOVERABLE_NOT_LOGGED_IN_MESSAGE
+  ) {
+    return errorCode;
+  }
+  return null;
 }
 
 function exactKeys(value: Record<string, unknown>, expected: string[]) {
@@ -235,7 +263,13 @@ export function validateRecoveryCandidate(
       !state.jobClaimExpiresAt &&
       !state.jobCompletedAt;
     if (safelyQueued) {
-      if (state.jobClaimAttempts !== state.audit.priorClaimAttempts) {
+      if (
+        !exactRecoverablePublishJobError(
+          state.audit.priorErrorCode ?? null,
+          state.audit.priorErrorMessage ?? null,
+        ) ||
+        state.jobClaimAttempts !== state.audit.priorClaimAttempts
+      ) {
         throw recoveryError('The safely queued job does not match the latest audited claim generation.');
       }
       return 'repair_missing_attempt_lineage';
@@ -250,13 +284,7 @@ export function validateRecoveryCandidate(
     if (
       state.itemState !== 'failed' ||
       state.jobStatus !== 'failed' ||
-      (
-        state.jobErrorCode !== RECOVERABLE_BOUNDED_BATCH_ERROR &&
-        (
-          state.jobErrorCode !== RECOVERABLE_AMBIGUOUS_CREATOR_ERROR ||
-          state.jobErrorMessage !== RECOVERABLE_AMBIGUOUS_CREATOR_MESSAGE
-        )
-      ) ||
+      !exactRecoverablePublishJobError(state.jobErrorCode, state.jobErrorMessage) ||
       !state.jobClaimedAt ||
       !state.jobCompletedAt ||
       !laterClaimGeneration ||
@@ -265,7 +293,7 @@ export function validateRecoveryCandidate(
       new Date(state.jobCompletedAt) <= new Date(state.jobClaimedAt)
     ) {
       throw recoveryError(
-        'The job does not prove a distinct later terminal bypass-disabled claim generation.',
+        'The job does not prove a distinct later recoverable terminal claim generation.',
       );
     }
     return 'recover';
@@ -273,10 +301,11 @@ export function validateRecoveryCandidate(
   if (
     state.itemState !== 'failed' ||
     state.jobStatus !== 'failed' ||
-    state.jobErrorCode !== RECOVERABLE_BOUNDED_BATCH_ERROR ||
+    !exactRecoverablePublishJobError(state.jobErrorCode, state.jobErrorMessage) ||
+    state.jobErrorCode === RECOVERABLE_AMBIGUOUS_CREATOR_ERROR ||
     !state.jobCompletedAt
   ) {
-    throw recoveryError('Only the exact terminal bypass-disabled failure is recoverable.');
+    throw recoveryError('Only an exact recoverable terminal pre-dispatch failure is recoverable.');
   }
   return 'recover';
 }

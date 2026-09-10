@@ -46,6 +46,7 @@ const migrationFiles = [
   '029_terminal_expired_batch_claim_reclassification.sql',
   '030_revision_aware_publish_lifecycle.sql',
   '031_recovery_attempt_generations.sql',
+  '032_recover_creator_login_failure.sql',
 ] as const;
 
 function stable(value: unknown): string {
@@ -2329,10 +2330,25 @@ describe('canonical local publishing migration chain', () => {
     await expect(database.exec(migration)).resolves.toBeDefined();
   });
 
+  it('can reapply migration 032 without mutating recovery audit rows', async () => {
+    const migration = await readFile(
+      path.join(
+        process.cwd(),
+        'migrations',
+        '032_recover_creator_login_failure.sql',
+      ),
+      'utf8',
+    );
+    await expect(database.exec(migration)).resolves.toBeDefined();
+  });
+
   it('selects migration 030 when the recovery blocker signature is missing', async () => {
     const previousSchema = new PGlite();
     try {
-      for (const file of migrationFiles.slice(0, -2)) {
+      for (const file of migrationFiles.slice(
+        0,
+        migrationFiles.indexOf('030_revision_aware_publish_lifecycle.sql'),
+      )) {
         const migration = await readFile(
           path.join(process.cwd(), 'migrations', file),
           'utf8',
@@ -2391,6 +2407,8 @@ describe('canonical local publishing migration chain', () => {
             'CREATE OR REPLACE FUNCTION rednote_publish_revision_is_valid',
           ) || statement.includes(
             'CREATE TABLE IF NOT EXISTS rednote_publish_recovery_attempt_generations',
+          ) || statement.includes(
+            'rednote_publish_job_recoveries_prior_error_code_check',
           )) {
             await previousSchema.exec(statement);
             return { rows: [], rowCount: 1 };
@@ -2403,11 +2421,12 @@ describe('canonical local publishing migration chain', () => {
       expect(before['030']).toBe(false);
       const applied = await applyExpectedRednoteSchemaMigrations(
         client,
-        ['030', '031'],
+        ['030', '031', '032'],
       );
-      expect(applied.applied).toEqual(['030', '031']);
+      expect(applied.applied).toEqual(['030', '031', '032']);
       expect(applied.after['030']).toBe(true);
       expect(applied.after['031']).toBe(true);
+      expect(applied.after['032']).toBe(true);
 
       await previousSchema.exec(`
         DROP FUNCTION rednote_publish_revision_blockers(TEXT, TEXT, TEXT);

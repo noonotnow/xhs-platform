@@ -349,7 +349,7 @@ describe('stored RedNote bootstrap replacement', () => {
       .toContain('COMMIT');
   });
 
-  it('exposes recovery evidence only for the exact safe bypass-disabled failure', async () => {
+  it('exposes recovery evidence only for exact safe pre-dispatch failures', async () => {
     const batchId = '22222222-2222-4222-8222-222222222222';
     const itemId = '44444444-4444-4444-8444-444444444444';
     const jobId = '55555555-5555-4555-8555-555555555555';
@@ -392,6 +392,7 @@ describe('stored RedNote bootstrap replacement', () => {
       recovery_audit_completed_at: null,
       recovery_audit_recovered_at: null,
       recovery_audit_actor_available: false,
+      recovery_source_attempt_count: 1,
       recovery_no_active_ownership: true,
     };
     mocks.sql
@@ -411,6 +412,47 @@ describe('stored RedNote bootstrap replacement', () => {
         },
       }],
     }]);
+
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [batchRow(batchId, 'approved', hash)] })
+      .mockResolvedValueOnce({
+        rows: [{
+          ...item,
+          recovery_job_error_code: 'NOT_LOGGED_IN',
+          recovery_job_error_message: 'RedNote creator login is required in the persistent browser profile',
+        }],
+      });
+    const loginFailure = await listStoredPublishBatches('workspace-1', batchId);
+    expect(loginFailure[0].items[0].recoveryEvidence).toMatchObject({
+      priorErrorCode: 'NOT_LOGGED_IN',
+      claimAttempts: 1,
+    });
+    expect(loginFailure[0].items[0].recoveryEvidence)
+      .not.toHaveProperty('recoveredBy');
+
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [batchRow(batchId, 'approved', hash)] })
+      .mockResolvedValueOnce({
+        rows: [{
+          ...item,
+          recovery_job_error_code: 'NOT_LOGGED_IN',
+          recovery_job_error_message: 'Login required',
+        }],
+      });
+    const spoofedLoginFailure = await listStoredPublishBatches('workspace-1', batchId);
+    expect(spoofedLoginFailure[0].items[0].recoveryEvidence).toBeUndefined();
+
+    for (const unsafeEvidence of [
+      { recovery_claimed_at: null },
+      { recovery_source_attempt_count: 0 },
+      { recovery_source_attempt_count: 2 },
+    ]) {
+      mocks.sql
+        .mockResolvedValueOnce({ rows: [batchRow(batchId, 'approved', hash)] })
+        .mockResolvedValueOnce({ rows: [{ ...item, ...unsafeEvidence }] });
+      const rejected = await listStoredPublishBatches('workspace-1', batchId);
+      expect(rejected[0].items[0].recoveryEvidence).toBeUndefined();
+    }
 
     mocks.sql
       .mockResolvedValueOnce({ rows: [batchRow(batchId, 'approved', hash)] })
@@ -572,7 +614,8 @@ describe('stored RedNote bootstrap replacement', () => {
     expect(itemQuery).toContain('job.workspace_id = item.workspace_id');
     expect(itemQuery).toContain('generation.recovery_id IS NOT NULL');
     expect(itemQuery).toContain('COUNT(*)::integer AS source_count');
-    expect(itemQuery).toContain('source.payload_revision = recovery.snapshot_revision');
+    expect(itemQuery).toContain('COALESCE(');
+    expect(itemQuery).toContain("item.snapshot->>'notionLastEditedTime'");
     expect(itemQuery).toContain('btrim(recovery.recovered_by)');
     expect(itemQuery).not.toContain('recovery.recovered_by AS');
   });
