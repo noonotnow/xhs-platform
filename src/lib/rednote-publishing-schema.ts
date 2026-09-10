@@ -193,8 +193,20 @@ const READINESS_SQL = `
       ),
       (
         '033',
+        'routine_body',
+        NULL,
+        'rednote_publish_excluded_job_has_recovery_evidence'
+      ),
+      (
+        '033',
         'routine_signature',
         'text, text, text, uuid, uuid, uuid',
+        'rednote_publish_recovery_revision_blockers'
+      ),
+      (
+        '033',
+        'routine_body',
+        NULL,
         'rednote_publish_recovery_revision_blockers'
       )
   )
@@ -231,6 +243,54 @@ const READINESS_SQL = `
             AND pg_proc.proname = object_name
             AND oidvectortypes(pg_proc.proargtypes) =
               required_objects.table_name
+        )
+        WHEN 'routine_body' THEN EXISTS (
+          SELECT 1
+          FROM pg_proc
+          JOIN pg_namespace ON pg_namespace.oid = pg_proc.pronamespace
+          WHERE pg_namespace.nspname = 'public'
+            AND pg_proc.proname = object_name
+            AND (
+              (
+                object_name =
+                  'rednote_publish_excluded_job_has_recovery_evidence'
+                AND oidvectortypes(pg_proc.proargtypes) =
+                  'text, text, uuid, uuid'
+                AND pg_get_functiondef(pg_proc.oid) LIKE
+                  '%job.authenticated_account_id IS NOT NULL%'
+                AND pg_get_functiondef(pg_proc.oid) LIKE
+                  '%job.authenticated_account_at IS NOT NULL%'
+                AND pg_get_functiondef(pg_proc.oid) LIKE
+                  '%job.xsec_accessible_at IS NOT NULL%'
+                AND pg_get_functiondef(pg_proc.oid) LIKE
+                  '%job.public_index_status IS NOT NULL%'
+                AND pg_get_functiondef(pg_proc.oid) LIKE
+                  '%job.public_index_checked_at IS NOT NULL%'
+                AND pg_get_functiondef(pg_proc.oid) LIKE
+                  '%job.provider_restriction_status IS NOT NULL%'
+                AND pg_get_functiondef(pg_proc.oid) LIKE
+                  '%job.provider_restriction_reported_at IS NOT NULL%'
+                AND pg_get_functiondef(pg_proc.oid) LIKE
+                  '%job.receipt_contract_version = ''rednote-worker-result/v2''%'
+                AND pg_get_functiondef(pg_proc.oid) LIKE
+                  '%job.receipt_outcome = ''rejected''%'
+                AND pg_get_functiondef(pg_proc.oid) LIKE
+                  '%job.receipt_acknowledged_at IS NOT NULL%'
+                AND pg_get_functiondef(pg_proc.oid) LIKE
+                  '%) IS NOT TRUE%'
+              )
+              OR (
+                object_name = 'rednote_publish_recovery_revision_blockers'
+                AND oidvectortypes(pg_proc.proargtypes) =
+                  'text, text, text, uuid, uuid, uuid'
+                AND pg_get_functiondef(pg_proc.oid) LIKE
+                  '%FROM rednote_publish_revision_blockers(%'
+                AND pg_get_functiondef(pg_proc.oid) LIKE
+                  '%blocker.lifecycle_state <> ''excluded_local_job:evidence''%'
+                AND pg_get_functiondef(pg_proc.oid) LIKE
+                  '%rednote_publish_excluded_job_has_recovery_evidence(%'
+              )
+            )
         )
         WHEN 'trigger' THEN EXISTS (
           SELECT 1 FROM information_schema.triggers

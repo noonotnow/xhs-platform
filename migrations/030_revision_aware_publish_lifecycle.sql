@@ -225,6 +225,13 @@ AS $$
         OR job.share_url IS NOT NULL
         OR job.success_attestation_id IS NOT NULL
         OR job.external_disposition_request_id IS NOT NULL
+        OR job.authenticated_account_id IS NOT NULL
+        OR job.authenticated_account_at IS NOT NULL
+        OR job.xsec_accessible_at IS NOT NULL
+        OR job.public_index_status IS NOT NULL
+        OR job.public_index_checked_at IS NOT NULL
+        OR job.provider_restriction_status IS NOT NULL
+        OR job.provider_restriction_reported_at IS NOT NULL
         OR (
           (
             job.receipt_contract_version IS NOT NULL

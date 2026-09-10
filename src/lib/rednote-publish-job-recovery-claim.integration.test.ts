@@ -63,6 +63,7 @@ import { listStoredPublishBatches } from '@/lib/rednote-publish-batch-store';
 import {
   bindLinkedAttemptClaim,
   readRednotePublishingOperational,
+  requeueReadyX3NotLoggedInFailure,
 } from '@/lib/rednote-publishing-attempt-store';
 
 const MIGRATIONS = [
@@ -377,6 +378,51 @@ async function countRows(table: string, where = '', params: unknown[] = []) {
     params,
   );
   return result.rows[0]?.count ?? 0;
+}
+
+async function readRecoveryMutationState(jobId: string) {
+  const [job, attempts, recoveries, generations, events] = await Promise.all([
+    database.query<Record<string, unknown>>(
+      'SELECT * FROM local_publish_jobs WHERE id = $1',
+      [jobId],
+    ),
+    database.query<Record<string, unknown>>(
+      `SELECT * FROM rednote_publish_attempts
+       WHERE source_local_publish_job_id = $1
+       ORDER BY created_at, id`,
+      [jobId],
+    ),
+    database.query<Record<string, unknown>>(
+      `SELECT * FROM rednote_publish_job_recoveries
+       WHERE local_publish_job_id = $1
+       ORDER BY recovered_at, id`,
+      [jobId],
+    ),
+    database.query<Record<string, unknown>>(
+      `SELECT generation.*
+       FROM rednote_publish_recovery_attempt_generations generation
+       JOIN rednote_publish_job_recoveries recovery
+         ON recovery.id = generation.recovery_id
+       WHERE recovery.local_publish_job_id = $1
+       ORDER BY generation.created_at, generation.recovery_id`,
+      [jobId],
+    ),
+    database.query<Record<string, unknown>>(
+      `SELECT event.*
+       FROM rednote_publish_attempt_events event
+       JOIN rednote_publish_attempts attempt ON attempt.id = event.attempt_id
+       WHERE attempt.source_local_publish_job_id = $1
+       ORDER BY event.occurred_at, event.id`,
+      [jobId],
+    ),
+  ]);
+  return {
+    job: job.rows,
+    attempts: attempts.rows,
+    recoveries: recoveries.rows,
+    generations: generations.rows,
+    events: events.rows,
+  };
 }
 
 async function insertHistoricalEvidenceFixture() {
@@ -923,6 +969,19 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
     expect(batches[0].items[0].recoveryEvidence)
       .not.toHaveProperty('recoveredBy');
 
+    const immutableState = await readRecoveryMutationState(fixture.jobId);
+    await expect(requeueReadyX3NotLoggedInFailure({
+      workspaceId: fixture.workspaceId,
+      jobId: fixture.jobId,
+      attemptId: replacement.id,
+      sourceNotionPageId: notionPageId,
+      revision: EXACT_REVISION,
+    })).rejects.toMatchObject({
+      code: 'PUBLISH_LIFECYCLE_RECOVERY_CONFLICT',
+      status: 409,
+    });
+    expect(await readRecoveryMutationState(fixture.jobId)).toEqual(immutableState);
+
     const blockingReceiptShapes = [
       {
         contractVersion: 'rednote-worker-result/v2',
@@ -973,10 +1032,83 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
       `UPDATE local_publish_jobs
        SET receipt_contract_version = 'rednote-worker-result/v2',
            receipt_outcome = 'rejected',
-           receipt_acknowledged_at = '2026-09-09T23:13:54.148Z'
+           receipt_acknowledged_at = $2
        WHERE id = $1`,
-      [fixture.jobId],
+      [fixture.jobId, failedJob.rows[0]!.receipt_acknowledged_at],
     );
+
+    const evidenceCases = [
+      {
+        set: "authenticated_account_id = 'creator-account'",
+        clear: 'authenticated_account_id = NULL',
+      },
+      {
+        set: "authenticated_account_at = '2026-09-09T23:13:54.148Z'",
+        clear: 'authenticated_account_at = NULL',
+      },
+      {
+        set: "xsec_accessible_at = '2026-09-09T23:13:54.148Z'",
+        clear: 'xsec_accessible_at = NULL',
+      },
+      {
+        set: "public_index_status = 'not_found'",
+        clear: 'public_index_status = NULL',
+      },
+      {
+        set: "public_index_checked_at = '2026-09-09T23:13:54.148Z'",
+        clear: 'public_index_checked_at = NULL',
+      },
+      {
+        set: "provider_restriction_status = 'restricted'",
+        clear: 'provider_restriction_status = NULL',
+      },
+      {
+        set: "provider_restriction_reported_at = '2026-09-09T23:13:54.148Z'",
+        clear: 'provider_restriction_reported_at = NULL',
+      },
+      {
+        set: `public_index_status = 'not_found',
+              public_index_checked_at = '2026-09-09T23:13:54.148Z'`,
+        clear: 'public_index_status = NULL, public_index_checked_at = NULL',
+      },
+      {
+        set: `provider_restriction_status = 'removed',
+              provider_restriction_reported_at = '2026-09-09T23:13:54.148Z'`,
+        clear: `provider_restriction_status = NULL,
+                provider_restriction_reported_at = NULL`,
+      },
+    ] as const;
+    for (const evidence of evidenceCases) {
+      await database.query(
+        `UPDATE local_publish_jobs SET ${evidence.set} WHERE id = $1`,
+        [fixture.jobId],
+      );
+      expect((await listStoredPublishBatches(
+        fixture.workspaceId,
+        fixture.batchId,
+      ))[0].items[0].recoveryEvidence).toBeUndefined();
+      await expect(recoverStoredApprovedPublishJob(
+        fixture.input,
+        ORIGINAL_AUDIT_ACTOR,
+      )).rejects.toMatchObject({
+        code: 'RECOVERY_PRECONDITION_FAILED',
+        status: 409,
+      });
+      await database.query(
+        `UPDATE local_publish_jobs SET ${evidence.clear} WHERE id = $1`,
+        [fixture.jobId],
+      );
+      expect(await readRecoveryMutationState(fixture.jobId)).toEqual(immutableState);
+    }
+    expect((await listStoredPublishBatches(
+      fixture.workspaceId,
+      fixture.batchId,
+    ))[0].items[0].recoveryEvidence).toEqual({
+      ...fixture.input,
+      priorErrorCode: 'NOT_LOGGED_IN',
+      claimAttempts: 2,
+      latestAuditedClaimAttempts: 1,
+    });
 
     await expect(recoverStoredApprovedPublishJob(
       fixture.input,
