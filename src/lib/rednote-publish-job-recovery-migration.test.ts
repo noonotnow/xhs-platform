@@ -39,4 +39,19 @@ describe('generation-aware recovery migration', () => {
     expect(migration).not.toMatch(/\bUPDATE\b|\bDELETE FROM\b|\bINSERT INTO\b/i);
     expect(migration).not.toContain('prevent_rednote_publish_job_recovery_mutation');
   });
+
+  it('adds only the login-required code to the existing recovery audit allowlist', () => {
+    const migration = readFileSync(
+      join(process.cwd(), 'migrations/032_recover_creator_login_failure.sql'),
+      'utf8',
+    );
+    expect(migration).toContain(
+      'DROP CONSTRAINT IF EXISTS rednote_publish_job_recoveries_prior_error_code_check',
+    );
+    expect(migration).toContain("'BOUNDED_BATCH_BYPASS_DISABLED'");
+    expect(migration).toContain("'AMBIGUOUS_CREATOR_UI'");
+    expect(migration).toContain("'NOT_LOGGED_IN'");
+    expect(migration).not.toMatch(/\bUPDATE\b|\bDELETE FROM\b|\bINSERT INTO\b/i);
+    expect(migration).not.toContain('prevent_rednote_publish_job_recovery_mutation');
+  });
 });

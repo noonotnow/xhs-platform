@@ -87,6 +87,8 @@ function row(recovered = false, generation = 1, recoveredBy = actor) {
     recovery_item_id: recovered ? input.itemId : null,
     recovery_item_hash: recovered ? input.itemHash : null,
     recovery_snapshot_revision: recovered ? input.snapshotRevision : null,
+    recovery_prior_error_code: recovered ? 'BOUNDED_BATCH_BYPASS_DISABLED' : null,
+    recovery_prior_error_message: recovered ? 'Worker bypass is disabled' : null,
     recovery_prior_claim_attempts: recovered ? 1 : null,
     recovery_prior_claimed_at: recovered ? '2026-08-04T17:04:33.424Z' : null,
     recovery_prior_completed_at_raw: recovered

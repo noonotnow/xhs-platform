@@ -92,6 +92,7 @@ const MIGRATIONS = [
   '029_terminal_expired_batch_claim_reclassification.sql',
   '030_revision_aware_publish_lifecycle.sql',
   '031_recovery_attempt_generations.sql',
+  '032_recover_creator_login_failure.sql',
 ] as const;
 
 const EXACT_JOB_ID = 'c6203283-be7d-46ce-a38b-9a7f90eef75d';
@@ -154,6 +155,8 @@ async function insertRecoverableFixture({
   notionPageId = `page-${crypto.randomUUID()}`,
   workspaceId = `workspace-${crypto.randomUUID()}`,
   approvedSource = true,
+  errorCode = 'BOUNDED_BATCH_BYPASS_DISABLED',
+  errorMessage = 'bounded batch enforcement',
 }: {
   jobId?: string;
   batchItemId?: string;
@@ -161,6 +164,8 @@ async function insertRecoverableFixture({
   notionPageId?: string;
   workspaceId?: string;
   approvedSource?: boolean;
+  errorCode?: string;
+  errorMessage?: string;
 } = {}): Promise<RecoveryFixture> {
   const batchId = crypto.randomUUID();
   const sourceAttemptId = crypto.randomUUID();
@@ -179,7 +184,7 @@ async function insertRecoverableFixture({
     ) VALUES (
       $1, $2, $3, $4::jsonb, 'failed', NULL,
       1, $5::timestamptz, $6::timestamptz, $6::timestamptz,
-      'BOUNDED_BATCH_BYPASS_DISABLED', 'bounded batch enforcement',
+      $7, $8,
       gen_random_uuid(), $5, $6
     )`,
     [
@@ -189,6 +194,8 @@ async function insertRecoverableFixture({
       JSON.stringify(snapshot),
       now,
       completedAt,
+      errorCode,
+      errorMessage,
     ],
   );
   await database.query(
@@ -299,11 +306,15 @@ async function insertQueueOnlyRecoveryAudit(
     itemHash = ITEM_HASH,
     snapshotRevision = fixture.input.snapshotRevision,
     recoveredBy = RECOVERED_BY,
+    priorErrorCode = 'BOUNDED_BATCH_BYPASS_DISABLED',
+    priorErrorMessage = 'bounded batch enforcement',
   }: {
     manifestHash?: string;
     itemHash?: string;
     snapshotRevision?: string;
     recoveredBy?: string;
+    priorErrorCode?: string;
+    priorErrorMessage?: string;
   } = {},
 ) {
   const recoveredAt = new Date().toISOString();
@@ -315,7 +326,7 @@ async function insertQueueOnlyRecoveryAudit(
       prior_completed_at, recovered_by, recovered_at
     ) VALUES (
       $1, $2, $3, $4, $5, $6,
-      'BOUNDED_BATCH_BYPASS_DISABLED', 'bounded batch enforcement',
+      $11, $12,
       1, $7, $8, $9, $10
     )
     RETURNING id`,
@@ -330,6 +341,8 @@ async function insertQueueOnlyRecoveryAudit(
       fixture.completedAt,
       recoveredBy,
       recoveredAt,
+      priorErrorCode,
+      priorErrorMessage,
     ],
   );
   await database.query(
@@ -453,6 +466,8 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
       revision: EXACT_REVISION,
       notionPageId: 'page-day-16-exact-recovery',
       workspaceId: 'default',
+      errorCode: 'NOT_LOGGED_IN',
+      errorMessage: 'RedNote creator login is required in the persistent browser profile',
     });
     const historicalAttemptId = await insertHistoricalEvidenceFixture();
     const historicalBefore = await database.query<Record<string, unknown>>(
@@ -467,6 +482,25 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
       `SELECT * FROM rednote_publication_evidence WHERE attempt_id = $1`,
       [historicalAttemptId],
     );
+    const beforeRecovery = await listStoredPublishBatches(
+      fixture.workspaceId,
+      fixture.batchId,
+    );
+    expect(beforeRecovery[0].items[0].recoveryEvidence).toEqual({
+      ...fixture.input,
+      priorErrorCode: 'NOT_LOGGED_IN',
+      claimAttempts: 1,
+    });
+    expect(beforeRecovery[0].items[0].recoveryEvidence)
+      .not.toHaveProperty('recoveredBy');
+    await expect(listStoredPublishBatches(
+      'wrong-workspace',
+      fixture.batchId,
+    )).resolves.toEqual([]);
+    expect(await database.query<{ claim_attempts: number }>(
+      `SELECT claim_attempts FROM local_publish_jobs WHERE id = $1`,
+      [EXACT_JOB_ID],
+    )).toMatchObject({ rows: [{ claim_attempts: 1 }] });
 
     const recovered = await recoverStoredApprovedPublishJob(
       fixture.input,
@@ -536,11 +570,34 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
     });
     expect(await countRows('rednote_publish_recovery_attempt_generations')).toBe(1);
     expect(await countRows('rednote_publish_job_recoveries')).toBe(1);
+    expect(await database.query<{
+      prior_error_code: string;
+      prior_error_message: string;
+    }>(
+      `SELECT prior_error_code, prior_error_message
+       FROM rednote_publish_job_recoveries
+       WHERE local_publish_job_id = $1`,
+      [EXACT_JOB_ID],
+    )).toMatchObject({
+      rows: [{
+        prior_error_code: 'NOT_LOGGED_IN',
+        prior_error_message:
+          'RedNote creator login is required in the persistent browser profile',
+      }],
+    });
     expect(await countRows(
       'rednote_publish_attempt_events',
       'WHERE attempt_id IN ($1, $2)',
       [fixture.sourceAttemptId, replacement?.id],
     )).toBe(4);
+    expect((await listStoredPublishBatches(
+      fixture.workspaceId,
+      fixture.batchId,
+    ))[0].items[0].recoveryEvidence).toBeUndefined();
+    expect(await database.query<{ claim_attempts: number }>(
+      `SELECT claim_attempts FROM local_publish_jobs WHERE id = $1`,
+      [EXACT_JOB_ID],
+    )).toMatchObject({ rows: [{ claim_attempts: 1 }] });
 
     const projected = await readRednotePublishingOperational(fixture.workspaceId);
     expect(projected.queue.filter(({ id }) => id === EXACT_JOB_ID)).toHaveLength(1);
@@ -671,6 +728,34 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
       [historicalAttemptId],
     )).rows).toEqual(evidenceBefore.rows);
   }, 30_000);
+
+  it('hides and rejects a spoofed NOT_LOGGED_IN message', async () => {
+    const fixture = await insertRecoverableFixture({
+      errorCode: 'NOT_LOGGED_IN',
+      errorMessage: 'Login required',
+    });
+
+    expect((await listStoredPublishBatches(
+      fixture.workspaceId,
+      fixture.batchId,
+    ))[0].items[0].recoveryEvidence).toBeUndefined();
+    await expect(recoverStoredApprovedPublishJob(
+      fixture.input,
+      RECOVERED_BY,
+    )).rejects.toMatchObject({
+      code: 'RECOVERY_PRECONDITION_FAILED',
+      status: 409,
+    } satisfies Partial<PublishJobRecoveryError>);
+    expect(await countRows(
+      'rednote_publish_job_recoveries',
+      'WHERE local_publish_job_id = $1',
+      [fixture.jobId],
+    )).toBe(0);
+    expect(await database.query<{ status: string; claim_attempts: number }>(
+      `SELECT status, claim_attempts FROM local_publish_jobs WHERE id = $1`,
+      [fixture.jobId],
+    )).toMatchObject({ rows: [{ status: 'failed', claim_attempts: 1 }] });
+  });
 
   it('repairs a pre-031 queue-only recovery audit without creating duplicates', async () => {
     const fixture = await insertRecoverableFixture();
@@ -901,14 +986,25 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
       mismatchedAudit.batchId,
     ))[0].items[0].recoveryEvidence).toBeUndefined();
 
-    const zero = await insertRecoverableFixture({ approvedSource: false });
-    await insertQueueOnlyRecoveryAudit(zero);
+    const zero = await insertRecoverableFixture({
+      approvedSource: false,
+      errorCode: 'NOT_LOGGED_IN',
+      errorMessage: 'RedNote creator login is required in the persistent browser profile',
+    });
+    await insertQueueOnlyRecoveryAudit(zero, {
+      priorErrorCode: 'NOT_LOGGED_IN',
+      priorErrorMessage:
+        'RedNote creator login is required in the persistent browser profile',
+    });
     expect((await listStoredPublishBatches(
       zero.workspaceId,
       zero.batchId,
     ))[0].items[0].recoveryEvidence).toBeUndefined();
 
-    const multiple = await insertRecoverableFixture();
+    const multiple = await insertRecoverableFixture({
+      errorCode: 'NOT_LOGGED_IN',
+      errorMessage: 'RedNote creator login is required in the persistent browser profile',
+    });
     await database.query(
       `INSERT INTO rednote_publish_attempts (
         id, workspace_id, idempotency_key, contract_revision,
@@ -930,7 +1026,11 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
       FROM rednote_publish_attempts WHERE id = $2`,
       [crypto.randomUUID(), multiple.sourceAttemptId],
     );
-    await insertQueueOnlyRecoveryAudit(multiple);
+    await insertQueueOnlyRecoveryAudit(multiple, {
+      priorErrorCode: 'NOT_LOGGED_IN',
+      priorErrorMessage:
+        'RedNote creator login is required in the persistent browser profile',
+    });
     const projected = await listStoredPublishBatches(
       multiple.workspaceId,
       multiple.batchId,
@@ -941,8 +1041,15 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
   });
 
   it('keeps the queued repair action visible when lineage creation rolls back', async () => {
-    const fixture = await insertRecoverableFixture();
-    await insertQueueOnlyRecoveryAudit(fixture);
+    const fixture = await insertRecoverableFixture({
+      errorCode: 'NOT_LOGGED_IN',
+      errorMessage: 'RedNote creator login is required in the persistent browser profile',
+    });
+    await insertQueueOnlyRecoveryAudit(fixture, {
+      priorErrorCode: 'NOT_LOGGED_IN',
+      priorErrorMessage:
+        'RedNote creator login is required in the persistent browser profile',
+    });
     failQueryContaining = 'INSERT INTO rednote_publish_attempt_events';
 
     await expect(recoverStoredApprovedPublishJob(
@@ -974,7 +1081,7 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
       fixture.batchId,
     ))[0].items[0].recoveryEvidence).toEqual({
       ...fixture.input,
-      priorErrorCode: 'BOUNDED_BATCH_BYPASS_DISABLED',
+      priorErrorCode: 'NOT_LOGGED_IN',
       claimAttempts: 1,
       latestAuditedClaimAttempts: 1,
     });
@@ -1036,7 +1143,10 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
   });
 
   it('rolls back the audit, generation, supersession, events, and requeue together', async () => {
-    const fixture = await insertRecoverableFixture();
+    const fixture = await insertRecoverableFixture({
+      errorCode: 'NOT_LOGGED_IN',
+      errorMessage: 'RedNote creator login is required in the persistent browser profile',
+    });
     failQueryContaining = 'INSERT INTO rednote_publish_attempt_events';
 
     await expect(recoverStoredApprovedPublishJob(
@@ -1085,7 +1195,7 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
     );
     expect(job.rows).toEqual([{
       status: 'failed',
-      error_code: 'BOUNDED_BATCH_BYPASS_DISABLED',
+      error_code: 'NOT_LOGGED_IN',
       claim_attempts: 1,
     }]);
   });

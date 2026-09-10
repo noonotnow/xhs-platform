@@ -181,7 +181,7 @@ caching.
 | `GET /api/rednote-publications/:noteId/evidence?workspaceId=:workspaceId` | Read current authenticated-account, xsec-access, public-index, and restriction evidence |
 | `POST /api/rednote-publications/:noteId/evidence` | Append one strict, token-free `rednote-evidence/v1` observation |
 | `POST /admin/api/local-publish-job-success-attestations` | Access-authenticated exact scheduled-success attestation; immutable receipt, dispatch quarantine, and immediate worker release handshake |
-| `POST /admin/api/publish-job-recoveries` | Cloudflare Access operator action that requeues the same exact approved job only for a pre-dispatch `BOUNDED_BATCH_BYPASS_DISABLED` terminal claim generation and writes one append-only audit per generation |
+| `POST /admin/api/publish-job-recoveries` | Cloudflare Access operator action that requeues the same exact approved job only for an allowlisted pre-dispatch terminal failure: existing `BOUNDED_BATCH_BYPASS_DISABLED`, or `NOT_LOGGED_IN` with the exact canonical persistent-browser-profile message. It writes one append-only audit per generation and creates fresh attempt lineage without reactivating the terminal attempt. |
 | `GET /admin/api/manual-post-handlings` | Access-authenticated durable manual handling state for Admin |
 | `POST /admin/api/manual-post-handlings` | Access-authenticated exact Approved-revision marker; warnings do not block operator truth |
 | `GET /api/rednote-metrics/due?limit=20` | Bounded metrics batch with a distinct token and lease per post |

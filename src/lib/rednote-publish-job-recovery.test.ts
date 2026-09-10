@@ -79,6 +79,26 @@ function candidate(
 }
 
 describe('bounded publish job recovery validation', () => {
+  const loginFailure = {
+    jobErrorCode: 'NOT_LOGGED_IN',
+    jobErrorMessage: 'RedNote creator login is required in the persistent browser profile',
+  };
+
+  it('accepts only the canonical NOT_LOGGED_IN code and message pair', () => {
+    expect(validateRecoveryCandidate(candidate(loginFailure), input, actor)).toBe('recover');
+
+    for (const jobErrorMessage of [
+      'Login required',
+      'RedNote creator login is required in the persistent browser profile ',
+      'rednote creator login is required in the persistent browser profile',
+    ]) {
+      expect(() => validateRecoveryCandidate(candidate({
+        ...loginFailure,
+        jobErrorMessage,
+      }), input, actor)).toThrow(/exact recoverable terminal pre-dispatch/i);
+    }
+  });
+
   it('accepts only the exact failed approved job and exact queued idempotent retry', () => {
     expect(validateRecoveryCandidate(candidate(), input, actor)).toBe('recover');
     const recovered = candidate({
@@ -94,6 +114,8 @@ describe('bounded publish job recovery validation', () => {
         ...input,
         recoveredBy: actor,
         recoveredAt: '2026-08-04T17:30:00.000Z',
+        priorErrorCode: 'BOUNDED_BATCH_BYPASS_DISABLED',
+        priorErrorMessage: 'Worker bypass is disabled',
         priorClaimAttempts: 1,
         priorClaimedAt: '2026-08-04T17:04:33.424Z',
         priorCompletedAt: '2026-08-04T17:04:33.963Z',
@@ -116,7 +138,7 @@ describe('bounded publish job recovery validation', () => {
       { ...recovered, jobStatus: 'claimed' },
       input,
       actor,
-    )).toThrow(/distinct later terminal/i);
+    )).toThrow(/distinct later recoverable terminal/i);
   });
 
   it('requires immutable audit attribution and retains actor binding for refailures', () => {
@@ -139,6 +161,20 @@ describe('bounded publish job recovery validation', () => {
       jobCompletedAt: null,
       audit: { ...audit, recoveredBy: '' },
     }), input, 'repairer@example.com')).toThrow(/audit actor is unavailable/i);
+    expect(() => validateRecoveryCandidate(candidate({
+      itemState: 'queued',
+      jobStatus: 'queued',
+      jobErrorCode: null,
+      jobClaimToken: null,
+      jobClaimedAt: null,
+      jobClaimExpiresAt: null,
+      jobCompletedAt: null,
+      audit: {
+        ...audit,
+        priorErrorCode: 'NOT_LOGGED_IN',
+        priorErrorMessage: 'Login required',
+      },
+    }), input, 'repairer@example.com')).toThrow(/latest audited claim generation/i);
     expect(() => validateRecoveryCandidate(candidate({
       jobClaimAttempts: 2,
       jobClaimedAt: '2026-08-04T17:30:08.000Z',
@@ -247,6 +283,7 @@ describe('bounded publish job recovery validation', () => {
     ],
   ])('rejects repeat recovery for %s', (_label, overrides) => {
     expect(() => validateRecoveryCandidate(candidate(Object.assign({
+      ...loginFailure,
       jobClaimAttempts: 2,
       jobClaimedAt: '2026-08-04T17:30:08.000Z',
       jobCompletedAt: '2026-08-04T17:30:08.500Z',
@@ -259,7 +296,7 @@ describe('bounded publish job recovery validation', () => {
         priorClaimedAt: '2026-08-04T17:04:33.424Z',
         priorCompletedAt: '2026-08-04T17:04:33.963Z',
       },
-    }, overrides)), input, actor)).toThrow(/distinct later terminal/i);
+    }, overrides)), input, actor)).toThrow(/distinct later recoverable terminal/i);
   });
 
   it.each([
@@ -273,7 +310,10 @@ describe('bounded publish job recovery validation', () => {
     ['verified timestamp', { verifiedAt: '2026-08-04T18:00:00.000Z' }],
     ['reconciled timestamp', { reconciledAt: '2026-08-04T18:00:00.000Z' }],
   ])('rejects %s evidence', (_label, overrides) => {
-    expect(() => validateRecoveryCandidate(candidate(overrides), input, actor))
+    expect(() => validateRecoveryCandidate(candidate({
+      ...loginFailure,
+      ...overrides,
+    }), input, actor))
       .toThrow(/staging, dispatch, publication, or verification evidence/i);
   });
 
@@ -323,24 +363,24 @@ describe('bounded publish job recovery validation', () => {
       candidate({ jobErrorCode: 'STAGING_FAILED' }),
       input,
       actor,
-    )).toThrow(/only the exact terminal bypass-disabled failure/i);
+    )).toThrow(/exact recoverable terminal pre-dispatch failure/i);
     expect(() => validateRecoveryCandidate(
       candidate({ itemState: 'queued' }),
       input,
       actor,
-    )).toThrow(/only the exact terminal bypass-disabled failure/i);
+    )).toThrow(/exact recoverable terminal pre-dispatch failure/i);
     expect(() => validateRecoveryCandidate(
       candidate({ jobStatus: 'claimed' }),
       input,
       actor,
-    )).toThrow(/only the exact terminal bypass-disabled failure/i);
+    )).toThrow(/exact recoverable terminal pre-dispatch failure/i);
     expect(() => validateRecoveryCandidate(
       candidate({ jobCompletedAt: null }),
       input,
       actor,
-    )).toThrow(/only the exact terminal bypass-disabled failure/i);
+    )).toThrow(/exact recoverable terminal pre-dispatch failure/i);
     expect(() => validateRecoveryCandidate(
-      candidate({ activeOwnership: true }),
+      candidate({ ...loginFailure, activeOwnership: true }),
       input,
       actor,
     )).toThrow(/another publish or reconciliation lifecycle/i);

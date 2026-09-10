@@ -794,11 +794,15 @@ export default function ReadyPostsPanel({ workspaceId }: { workspaceId: string }
   ) {
     const fixedHydrationFailure =
       evidence.priorErrorCode === 'AMBIGUOUS_CREATOR_UI';
+    const creatorLoginFailure =
+      evidence.priorErrorCode === 'NOT_LOGGED_IN';
     const confirmed = window.confirm(
       `${repairMissingAttemptLineage ? 'Repair attempt lineage for' : 'Recover'} ` +
       `the exact already-approved job for "${title}"?\n\n` +
       (fixedHydrationFailure
         ? 'Fixed failure: image-mode pre-staging hydration could not uniquely identify the upload mode.\n'
+        : creatorLoginFailure
+          ? 'Recorded failure: the persistent Creator browser profile required login before staging.\n'
         : '') +
       `Job ${evidence.jobId}\n` +
       `Batch ${evidence.batchId}\n` +
@@ -1506,7 +1510,8 @@ export default function ReadyPostsPanel({ workspaceId }: { workspaceId: string }
               an audited recovery that still lacks its fresh attempt lineage. Recovery preserves
               the approved job and creates one fresh approved worker attempt generation with no
               second approval or replacement local job. The fixed hydration failure is eligible
-              only as a proven, immediately later terminal claim generation. Any currently
+              only as a proven, immediately later terminal claim generation. A Creator login
+              failure is eligible only for its canonical pre-staging code and message. Any currently
               authenticated authorized Admin may complete a missing-lineage repair; the original
               audit actor is preserved and the repair operator is recorded separately. A later
               failed-generation recovery remains bound to the original recovery identity.
@@ -1534,7 +1539,9 @@ export default function ReadyPostsPanel({ workspaceId }: { workspaceId: string }
                     Recovery reason: {item.recoveryEvidence.priorErrorCode ===
                     'AMBIGUOUS_CREATOR_UI'
                       ? 'Fixed image-mode pre-staging hydration failure'
-                      : 'Bounded-batch bypass disabled'}
+                      : item.recoveryEvidence.priorErrorCode === 'NOT_LOGGED_IN'
+                        ? 'Persistent Creator browser profile required login before staging'
+                        : 'Bounded-batch bypass disabled'}
                   </small>
                   <small>
                     Terminal failure generation: <code>
