@@ -2,6 +2,15 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { describe, expect, it } from 'vitest';
 
+function normalizedFunctionDefinition(migration: string, functionName: string) {
+  const escapedName = functionName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = migration.match(new RegExp(
+    `CREATE OR REPLACE FUNCTION ${escapedName}\\([\\s\\S]*?\\n\\$\\$;`,
+  ));
+  if (!match) throw new Error(`Missing ${functionName} definition`);
+  return match[0].replace(/\s+/g, ' ').trim();
+}
+
 describe('generation-aware recovery migration', () => {
   it('replaces row uniqueness with attempt-scoped uniqueness without mutating audit rows', () => {
     const migration = readFileSync(
@@ -53,5 +62,57 @@ describe('generation-aware recovery migration', () => {
     expect(migration).toContain("'NOT_LOGGED_IN'");
     expect(migration).not.toMatch(/\bUPDATE\b|\bDELETE FROM\b|\bINSERT INTO\b/i);
     expect(migration).not.toContain('prevent_rednote_publish_job_recovery_mutation');
+  });
+
+  it('treats only a coherent rejected v2 result as non-publication evidence', () => {
+    const migration = readFileSync(
+      join(
+        process.cwd(),
+        'migrations/033_rejected_worker_result_recovery_evidence.sql',
+      ),
+      'utf8',
+    );
+    expect(migration).toContain(
+      'rednote_publish_excluded_job_has_recovery_evidence',
+    );
+    expect(migration).toContain(
+      "job.receipt_contract_version = 'rednote-worker-result/v2'",
+    );
+    expect(migration).toContain("job.receipt_outcome = 'rejected'");
+    expect(migration).toContain('job.receipt_acknowledged_at IS NOT NULL');
+    for (const evidenceColumn of [
+      'authenticated_account_id',
+      'authenticated_account_at',
+      'xsec_accessible_at',
+      'public_index_status',
+      'public_index_checked_at',
+      'provider_restriction_status',
+      'provider_restriction_reported_at',
+    ]) {
+      expect(migration).toContain(`job.${evidenceColumn} IS NOT NULL`);
+    }
+    expect(migration).toContain('rednote_publish_recovery_revision_blockers');
+    expect(migration).not.toMatch(/\bUPDATE\b|\bDELETE FROM\b|\bINSERT INTO\b/i);
+  });
+
+  it('keeps fresh-install and incremental recovery function bodies identical', () => {
+    const freshInstall = readFileSync(
+      join(process.cwd(), 'migrations/030_revision_aware_publish_lifecycle.sql'),
+      'utf8',
+    );
+    const incremental = readFileSync(
+      join(
+        process.cwd(),
+        'migrations/033_rejected_worker_result_recovery_evidence.sql',
+      ),
+      'utf8',
+    );
+    for (const functionName of [
+      'rednote_publish_excluded_job_has_recovery_evidence',
+      'rednote_publish_recovery_revision_blockers',
+    ]) {
+      expect(normalizedFunctionDefinition(incremental, functionName))
+        .toBe(normalizedFunctionDefinition(freshInstall, functionName));
+    }
   });
 });

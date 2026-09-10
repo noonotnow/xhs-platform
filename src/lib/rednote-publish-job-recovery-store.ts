@@ -515,7 +515,7 @@ export async function recoverStoredApprovedPublishJobTransaction(
     const ownership = await client.query<OwnershipRow>(
       `SELECT EXISTS (
          SELECT 1
-         FROM rednote_publish_revision_blockers(
+         FROM rednote_publish_recovery_revision_blockers(
            $1,
            $2,
            $3,
@@ -639,6 +639,9 @@ export async function recoverStoredApprovedPublishJobTransaction(
            error_code = NULL,
            error_message = NULL,
            completed_at = NULL,
+           receipt_contract_version = NULL,
+           receipt_outcome = NULL,
+           receipt_acknowledged_at = NULL,
            updated_at = CURRENT_TIMESTAMP
        WHERE id = $1::uuid
          AND batch_item_id = $2::uuid

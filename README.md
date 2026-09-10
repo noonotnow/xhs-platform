@@ -546,6 +546,12 @@ the missing attempt generation for a queue-only recovery audit.
 `NOT_LOGGED_IN` code in that audit, without changing any lifecycle row. Apply
 migration 032 before deploying platform code that exposes this recovery reason.
 A database already through migration 031 needs only migration 032.
+`migrations/033_rejected_worker_result_recovery_evidence.sql` keeps a coherent
+acknowledged `rednote-worker-result/v2` rejection from being mistaken for
+publication evidence when evaluating the excluded recovery job. Other receipt
+shapes and all staging, dispatch, publication, reconciliation, or alternate
+attempt evidence continue to block recovery. A database already through
+migration 032 needs only migration 033.
 
 This is the only supported recovery for a bounded job that terminal-failed
 before staging or dispatch with either existing exact error
@@ -573,10 +579,12 @@ Use this deployment and operator sequence exactly:
      -f migrations/031_recovery_attempt_generations.sql
    psql "$XHS_DATABASE_POSTGRES_URL_NON_POOLING" -v ON_ERROR_STOP=1 \
      -f migrations/032_recover_creator_login_failure.sql
+   psql "$XHS_DATABASE_POSTGRES_URL_NON_POOLING" -v ON_ERROR_STOP=1 \
+     -f migrations/033_rejected_worker_result_recovery_evidence.sql
    ```
 
 3. Deploy the platform release containing the recovery API and UI only after
-   all required migrations, including 032, succeed. Do not rebuild, supersede,
+   all required migrations, including 033, succeed. Do not rebuild, supersede,
    or approve a batch and do not create a replacement job.
 4. In `/admin`, refresh **Bounded batch approval**. **Eligible pre-dispatch
    recovery** appears only when the approved batch, two-way item/job linkage,
