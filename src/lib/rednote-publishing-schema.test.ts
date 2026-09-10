@@ -11,16 +11,17 @@ import {
 
 describe('RedNote publishing schema migration gate', () => {
   it('normalizes an exact expected set into migration order', () => {
-    expect(parseExpectedMissing(['033', '021', '018', '020', '018'])).toEqual([
+    expect(parseExpectedMissing(['034', '033', '021', '018', '020', '018'])).toEqual([
       '018',
       '020',
       '021',
       '033',
+      '034',
     ]);
   });
 
   it('rejects migration names outside the controlled set', () => {
-    expect(() => parseExpectedMissing(['034'])).toThrow(
+    expect(() => parseExpectedMissing(['035'])).toThrow(
       'expectedMissing contains an unsupported migration',
     );
   });
@@ -43,7 +44,8 @@ describe('RedNote publishing schema migration gate', () => {
       '031': true,
       '032': true,
       '033': true,
-    })).toEqual(['019', '020', '023']);
+      '034': false,
+    })).toEqual(['019', '020', '023', '034']);
   });
 
   it('retains expected and actual state for a safe 409 response', () => {

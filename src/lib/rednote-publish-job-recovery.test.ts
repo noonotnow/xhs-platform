@@ -114,6 +114,7 @@ describe('bounded publish job recovery validation', () => {
       'Creator date-picker did not retain the scheduled time (got "2026-09-10 24:20", expected "2026-09-12 07:20")',
       'Creator date-picker did not retain the scheduled time (got "2026-02-29 17:20", expected "2026-09-12 07:20")',
       'Creator date-picker did not retain the scheduled time (got "2026-09-10 17:20", expected "2026-04-31 07:20")',
+      'Creator date-picker did not retain the scheduled time (got "2026-09-10 17:20", expected "2026-09-10 17:20")',
       'Creator date-picker did not retain the scheduled time (got "2026-09-10 17:20", expected 2026-09-12 07:20)',
       'Creator date-picker did not retain the scheduled time (got "2026-09-10 17:20" expected "2026-09-12 07:20")',
       'Creator date-picker did not retain scheduled time (got "2026-09-10 17:20", expected "2026-09-12 07:20")',

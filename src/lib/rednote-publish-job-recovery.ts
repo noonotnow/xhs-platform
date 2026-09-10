@@ -103,6 +103,7 @@ function isExactScheduleReadbackMismatchMessage(value: string | null | undefined
   const match = value?.match(SCHEDULE_READBACK_MISMATCH_MESSAGE);
   return Boolean(
     match &&
+    match[1] !== match[2] &&
     isValidScheduleReadbackDateTime(match[1]) &&
     isValidScheduleReadbackDateTime(match[2]),
   );
