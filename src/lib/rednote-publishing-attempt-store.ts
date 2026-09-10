@@ -398,7 +398,7 @@ async function assertNoCompetingPublishLifecycle(
 ) {
   const blocker = await client.query<{ lifecycle_id: string }>(
     `SELECT lifecycle_id
-     FROM rednote_publish_revision_blockers(
+     FROM rednote_publish_recovery_revision_blockers(
        $1,
        $2,
        $3,

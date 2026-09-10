@@ -258,7 +258,7 @@ describe('stored approved publish job recovery', () => {
       String(statement).startsWith('SELECT attempt.id'));
     expect(sourceCall?.[1]?.[2]).toBe('2026-08-04 17:04:33.963900+00');
     const ownership = statements.find((value) => value.includes('AS active_ownership'))!;
-    expect(ownership).toContain('rednote_publish_revision_blockers');
+    expect(ownership).toContain('rednote_publish_recovery_revision_blockers');
     const ownershipCall = mocks.query.mock.calls.find(([statement]) =>
       String(statement).includes('AS active_ownership'));
     expect(ownershipCall?.[1]).toEqual([

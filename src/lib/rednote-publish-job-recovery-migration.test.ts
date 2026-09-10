@@ -54,4 +54,24 @@ describe('generation-aware recovery migration', () => {
     expect(migration).not.toMatch(/\bUPDATE\b|\bDELETE FROM\b|\bINSERT INTO\b/i);
     expect(migration).not.toContain('prevent_rednote_publish_job_recovery_mutation');
   });
+
+  it('treats only a coherent rejected v2 result as non-publication evidence', () => {
+    const migration = readFileSync(
+      join(
+        process.cwd(),
+        'migrations/033_rejected_worker_result_recovery_evidence.sql',
+      ),
+      'utf8',
+    );
+    expect(migration).toContain(
+      'rednote_publish_excluded_job_has_recovery_evidence',
+    );
+    expect(migration).toContain(
+      "job.receipt_contract_version = 'rednote-worker-result/v2'",
+    );
+    expect(migration).toContain("job.receipt_outcome = 'rejected'");
+    expect(migration).toContain('job.receipt_acknowledged_at IS NOT NULL');
+    expect(migration).toContain('rednote_publish_recovery_revision_blockers');
+    expect(migration).not.toMatch(/\bUPDATE\b|\bDELETE FROM\b|\bINSERT INTO\b/i);
+  });
 });

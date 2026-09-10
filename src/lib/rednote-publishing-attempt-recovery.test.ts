@@ -222,7 +222,7 @@ describe('Ready x3 pre-provider failure recovery', () => {
 
     it('fails closed before requeue when a competing newer lifecycle owns the page', async () => {
       mocks.query.mockImplementation(async (statement: string) => {
-        if (statement.includes('rednote_publish_revision_blockers')) {
+        if (statement.includes('rednote_publish_recovery_revision_blockers')) {
           return {
             rows: [{
               lifecycle_id: 'newer-batch-item',

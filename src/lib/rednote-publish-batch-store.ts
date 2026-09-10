@@ -525,7 +525,7 @@ export async function listStoredPublishBatches(workspaceId: string, batchId?: st
         source_attempts.source_count AS recovery_source_attempt_count,
         NOT EXISTS (
           SELECT 1
-          FROM rednote_publish_revision_blockers(
+          FROM rednote_publish_recovery_revision_blockers(
             item.workspace_id,
             item.notion_page_id,
             item.snapshot->>'notionLastEditedTime',

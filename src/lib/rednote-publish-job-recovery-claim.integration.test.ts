@@ -50,6 +50,9 @@ vi.mock('@/lib/db', () => ({
 }));
 
 import {
+  submitLocalPublishJobResult,
+} from '@/lib/local-publish-jobs';
+import {
   claimNextStoredLocalPublishJob,
 } from '@/lib/local-publish-job-store';
 import {
@@ -57,7 +60,10 @@ import {
   recoverStoredApprovedPublishJob,
 } from '@/lib/rednote-publish-job-recovery-store';
 import { listStoredPublishBatches } from '@/lib/rednote-publish-batch-store';
-import { readRednotePublishingOperational } from '@/lib/rednote-publishing-attempt-store';
+import {
+  bindLinkedAttemptClaim,
+  readRednotePublishingOperational,
+} from '@/lib/rednote-publishing-attempt-store';
 
 const MIGRATIONS = [
   '002_xhs_publish_receipts.sql',
@@ -93,6 +99,7 @@ const MIGRATIONS = [
   '030_revision_aware_publish_lifecycle.sql',
   '031_recovery_attempt_generations.sql',
   '032_recover_creator_login_failure.sql',
+  '033_rejected_worker_result_recovery_evidence.sql',
 ] as const;
 
 const EXACT_JOB_ID = 'c6203283-be7d-46ce-a38b-9a7f90eef75d';
@@ -155,6 +162,7 @@ async function insertRecoverableFixture({
   notionPageId = `page-${crypto.randomUUID()}`,
   workspaceId = `workspace-${crypto.randomUUID()}`,
   approvedSource = true,
+  readyX3Authorization = true,
   errorCode = 'BOUNDED_BATCH_BYPASS_DISABLED',
   errorMessage = 'bounded batch enforcement',
 }: {
@@ -164,16 +172,17 @@ async function insertRecoverableFixture({
   notionPageId?: string;
   workspaceId?: string;
   approvedSource?: boolean;
+  readyX3Authorization?: boolean;
   errorCode?: string;
   errorMessage?: string;
 } = {}): Promise<RecoveryFixture> {
   const batchId = crypto.randomUUID();
   const sourceAttemptId = crypto.randomUUID();
   const sourceClaimToken = crypto.randomUUID();
-  const now = new Date().toISOString();
-  const terminalBase = new Date(Date.now() - 60_000).toISOString();
-  const completedAt = terminalBase.replace('Z', '900Z');
-  const terminalAt = terminalBase.replace('Z', '400Z');
+  const approvedAt = new Date(Date.now() - 120_000).toISOString();
+  const claimedAt = new Date(Date.now() - 60_000).toISOString();
+  const terminalAt = new Date(Date.now() - 59_500).toISOString();
+  const completedAt = new Date(Date.now() - 59_000).toISOString();
   const snapshot = frozenSnapshot(notionPageId, revision);
 
   await database.query(
@@ -192,7 +201,7 @@ async function insertRecoverableFixture({
       workspaceId,
       notionPageId,
       JSON.stringify(snapshot),
-      now,
+      claimedAt,
       completedAt,
       errorCode,
       errorMessage,
@@ -205,7 +214,7 @@ async function insertRecoverableFixture({
     ) VALUES (
       $1, $2, 'bootstrap', 'approved', $3, $4, $4, 'day-16-operator'
     )`,
-    [batchId, workspaceId, EXACT_MANIFEST, now],
+    [batchId, workspaceId, EXACT_MANIFEST, approvedAt],
   );
   await database.query(
     `INSERT INTO rednote_publish_batch_items (
@@ -223,7 +232,7 @@ async function insertRecoverableFixture({
       JSON.stringify(snapshot),
       ITEM_HASH,
       jobId,
-      now,
+      approvedAt,
     ],
   );
   await database.query(
@@ -259,11 +268,11 @@ async function insertRecoverableFixture({
       FROZEN_DIGEST,
       revision,
       snapshot.publishAt,
-      now,
+      approvedAt,
       terminalAt,
-      approvedSource ? now : null,
-      approvedSource ? 'ready_x3' : null,
-      approvedSource
+      approvedSource ? approvedAt : null,
+      approvedSource && readyX3Authorization ? 'ready_x3' : null,
+      approvedSource && readyX3Authorization
         ? JSON.stringify({ action: 'schedule', maxLateMinutes: 30 })
         : null,
       sourceClaimToken,
@@ -285,7 +294,7 @@ async function insertRecoverableFixture({
     jobId,
     sourceAttemptId,
     workspaceId,
-    claimedAt: now,
+    claimedAt,
     completedAt,
     terminalAt,
     input: {
@@ -727,6 +736,363 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
       `SELECT * FROM rednote_publication_evidence WHERE attempt_id = $1`,
       [historicalAttemptId],
     )).rows).toEqual(evidenceBefore.rows);
+  }, 30_000);
+
+  it('projects a prior recovery after a second bound claim ends in a canonical login rejection', async () => {
+    const notionPageId = 'page-day-16-login-refailure';
+    const fixture = await insertRecoverableFixture({
+      revision: EXACT_REVISION,
+      notionPageId,
+      readyX3Authorization: false,
+      errorCode: 'NOT_LOGGED_IN',
+      errorMessage:
+        'RedNote creator login is required in the persistent browser profile',
+    });
+    await insertQueueOnlyRecoveryAudit(fixture, {
+      recoveredBy: ORIGINAL_AUDIT_ACTOR,
+      priorErrorCode: 'NOT_LOGGED_IN',
+      priorErrorMessage:
+        'RedNote creator login is required in the persistent browser profile',
+    });
+
+    const repaired = await recoverStoredApprovedPublishJob(
+      fixture.input,
+      REPAIR_OPERATOR,
+    );
+    expect(repaired).toMatchObject({
+      jobId: fixture.jobId,
+      priorClaimAttempts: 1,
+      alreadyRecovered: true,
+    });
+
+    const claimToken = crypto.randomUUID();
+    const claimed = await claimNextStoredLocalPublishJob(
+      300,
+      'dispatch',
+      undefined,
+      fixture.workspaceId,
+      claimToken,
+    );
+    expect(claimed).toMatchObject({
+      id: fixture.jobId,
+      status: 'claimed',
+      claimToken,
+    });
+    await bindLinkedAttemptClaim(
+      fixture.workspaceId,
+      fixture.jobId,
+      claimToken,
+      claimed!.claimExpiresAt!,
+    );
+
+    await expect(submitLocalPublishJobResult(
+      fixture.jobId,
+      claimToken,
+      {
+        contractVersion: 'rednote-worker-result/v2',
+        outcome: 'rejected',
+        occurredAt: new Date().toISOString(),
+        code: 'NOT_LOGGED_IN',
+        message:
+          'RedNote creator login is required in the persistent browser profile',
+      },
+      fixture.workspaceId,
+    )).resolves.toMatchObject({
+      id: fixture.jobId,
+      status: 'failed',
+      errorCode: 'NOT_LOGGED_IN',
+    });
+
+    const failedJob = await database.query<{
+      claim_attempts: number;
+      claimed_at: string;
+      completed_at: string;
+      receipt_contract_version: string;
+      receipt_outcome: string;
+      receipt_acknowledged_at: string;
+      verification_attempts: number;
+    }>(
+      `SELECT
+         claim_attempts,
+         claimed_at,
+         completed_at,
+         receipt_contract_version,
+         receipt_outcome,
+         receipt_acknowledged_at,
+         verification_attempts
+       FROM local_publish_jobs
+       WHERE id = $1`,
+      [fixture.jobId],
+    );
+    expect(failedJob.rows[0]).toMatchObject({
+      claim_attempts: 2,
+      receipt_contract_version: 'rednote-worker-result/v2',
+      receipt_outcome: 'rejected',
+      verification_attempts: 0,
+    });
+    expect(new Date(failedJob.rows[0]!.completed_at).getTime())
+      .toBeGreaterThan(new Date(failedJob.rows[0]!.claimed_at).getTime());
+    expect(failedJob.rows[0]!.receipt_acknowledged_at).toBeTruthy();
+
+    const attempts = await database.query<{
+      id: string;
+      active: boolean;
+      terminal_outcome: string;
+      terminal_at: string;
+      receipt_lookup_state: string;
+      dispatch_authorized_at: string | null;
+      supersedes_attempt_id: string | null;
+      superseded_by_attempt_id: string | null;
+      claim_token: string | null;
+    }>(
+      `SELECT
+         id,
+         active,
+         terminal_outcome,
+         terminal_at,
+         receipt_lookup_state,
+         dispatch_authorized_at,
+         supersedes_attempt_id,
+         superseded_by_attempt_id,
+         claim_token
+       FROM rednote_publish_attempts
+       WHERE source_local_publish_job_id = $1
+       ORDER BY created_at, id`,
+      [fixture.jobId],
+    );
+    expect(attempts.rows).toHaveLength(2);
+    const source = attempts.rows.find(({ id }) => id === fixture.sourceAttemptId);
+    const replacement = attempts.rows.find(({ id }) => id !== fixture.sourceAttemptId);
+    if (!replacement) throw new Error('Expected a repaired replacement attempt');
+    expect(source).toMatchObject({
+      active: false,
+      terminal_outcome: 'known_failed',
+      receipt_lookup_state: 'not_required',
+      superseded_by_attempt_id: replacement.id,
+    });
+    expect(replacement).toMatchObject({
+      active: false,
+      terminal_outcome: 'known_failed',
+      receipt_lookup_state: 'not_required',
+      dispatch_authorized_at: null,
+      supersedes_attempt_id: fixture.sourceAttemptId,
+      superseded_by_attempt_id: null,
+      claim_token: claimToken,
+    });
+
+    const genericBlockers = await database.query<{ lifecycle_state: string }>(
+      `SELECT lifecycle_state
+       FROM rednote_publish_revision_blockers($1, $2, $3, $4, $5, $6)`,
+      [
+        fixture.workspaceId,
+        notionPageId,
+        EXACT_REVISION,
+        fixture.batchItemId,
+        fixture.jobId,
+        replacement.id,
+      ],
+    );
+    expect(genericBlockers.rows.map(({ lifecycle_state }) => lifecycle_state))
+      .toContain('excluded_local_job:evidence');
+    const recoveryBlockers = await database.query<{ lifecycle_state: string }>(
+      `SELECT lifecycle_state
+       FROM rednote_publish_recovery_revision_blockers(
+         $1, $2, $3, $4, $5, $6
+       )`,
+      [
+        fixture.workspaceId,
+        notionPageId,
+        EXACT_REVISION,
+        fixture.batchItemId,
+        fixture.jobId,
+        replacement.id,
+      ],
+    );
+    expect(recoveryBlockers.rows).toEqual([]);
+
+    const batches = await listStoredPublishBatches(
+      fixture.workspaceId,
+      fixture.batchId,
+    );
+    expect(batches[0].items[0].recoveryEvidence).toEqual({
+      ...fixture.input,
+      priorErrorCode: 'NOT_LOGGED_IN',
+      claimAttempts: 2,
+      latestAuditedClaimAttempts: 1,
+    });
+    expect(batches[0].items[0].recoveryEvidence)
+      .not.toHaveProperty('recoveredBy');
+
+    const blockingReceiptShapes = [
+      {
+        contractVersion: 'rednote-worker-result/v2',
+        outcome: 'rejected',
+        acknowledgedAt: null,
+      },
+      {
+        contractVersion: 'rednote-worker-result/v2',
+        outcome: 'acknowledged',
+        acknowledgedAt: '2026-09-09T23:13:54.148Z',
+      },
+      {
+        contractVersion: 'rednote-worker-result/v1',
+        outcome: 'rejected',
+        acknowledgedAt: '2026-09-09T23:13:54.148Z',
+      },
+      {
+        contractVersion: null,
+        outcome: 'rejected',
+        acknowledgedAt: '2026-09-09T23:13:54.148Z',
+      },
+      {
+        contractVersion: 'rednote-worker-result/v2',
+        outcome: null,
+        acknowledgedAt: '2026-09-09T23:13:54.148Z',
+      },
+    ] as const;
+    for (const receipt of blockingReceiptShapes) {
+      await database.query(
+        `UPDATE local_publish_jobs
+         SET receipt_contract_version = $2,
+             receipt_outcome = $3,
+             receipt_acknowledged_at = $4
+         WHERE id = $1`,
+        [
+          fixture.jobId,
+          receipt.contractVersion,
+          receipt.outcome,
+          receipt.acknowledgedAt,
+        ],
+      );
+      expect((await listStoredPublishBatches(
+        fixture.workspaceId,
+        fixture.batchId,
+      ))[0].items[0].recoveryEvidence).toBeUndefined();
+    }
+    await database.query(
+      `UPDATE local_publish_jobs
+       SET receipt_contract_version = 'rednote-worker-result/v2',
+           receipt_outcome = 'rejected',
+           receipt_acknowledged_at = '2026-09-09T23:13:54.148Z'
+       WHERE id = $1`,
+      [fixture.jobId],
+    );
+
+    await expect(recoverStoredApprovedPublishJob(
+      fixture.input,
+      ORIGINAL_AUDIT_ACTOR,
+    )).resolves.toMatchObject({
+      jobId: fixture.jobId,
+      priorClaimAttempts: 2,
+      alreadyRecovered: false,
+    });
+    expect(await countRows(
+      'rednote_publish_recovery_attempt_generations',
+      `WHERE recovery_id IN (
+         SELECT id
+         FROM rednote_publish_job_recoveries
+         WHERE local_publish_job_id = $1
+       )`,
+      [fixture.jobId],
+    )).toBe(2);
+    expect(await countRows(
+      'rednote_publish_job_recoveries',
+      'WHERE local_publish_job_id = $1',
+      [fixture.jobId],
+    )).toBe(2);
+
+    const requeuedJob = await database.query<{
+      status: string;
+      claim_attempts: number;
+      claimed_at: string | null;
+      completed_at: string | null;
+      receipt_contract_version: string | null;
+      receipt_outcome: string | null;
+      receipt_acknowledged_at: string | null;
+    }>(
+      `SELECT
+         status,
+         claim_attempts,
+         claimed_at,
+         completed_at,
+         receipt_contract_version,
+         receipt_outcome,
+         receipt_acknowledged_at
+       FROM local_publish_jobs
+       WHERE id = $1`,
+      [fixture.jobId],
+    );
+    expect(requeuedJob.rows[0]).toEqual({
+      status: 'queued',
+      claim_attempts: 2,
+      claimed_at: null,
+      completed_at: null,
+      receipt_contract_version: null,
+      receipt_outcome: null,
+      receipt_acknowledged_at: null,
+    });
+
+    const lateClaimToken = crypto.randomUUID();
+    const lateClaim = await claimNextStoredLocalPublishJob(
+      0,
+      'dispatch',
+      undefined,
+      fixture.workspaceId,
+      lateClaimToken,
+    );
+    expect(lateClaim).toMatchObject({
+      id: fixture.jobId,
+      status: 'claimed',
+      claimToken: lateClaimToken,
+    });
+    await bindLinkedAttemptClaim(
+      fixture.workspaceId,
+      fixture.jobId,
+      lateClaimToken,
+      lateClaim!.claimExpiresAt!,
+    );
+    await expect(submitLocalPublishJobResult(
+      fixture.jobId,
+      lateClaimToken,
+      {
+        contractVersion: 'rednote-worker-result/v2',
+        outcome: 'rejected',
+        occurredAt: new Date().toISOString(),
+        code: 'NOT_LOGGED_IN',
+        message:
+          'RedNote creator login is required in the persistent browser profile',
+      },
+      fixture.workspaceId,
+    )).resolves.toMatchObject({
+      id: fixture.jobId,
+      status: 'failed',
+      receiptOutcome: 'rejected',
+      errorCode: 'NOT_LOGGED_IN',
+    });
+    expect((await database.query<{ claim_attempts: number }>(
+      'SELECT claim_attempts FROM local_publish_jobs WHERE id = $1',
+      [fixture.jobId],
+    )).rows[0]?.claim_attempts).toBe(3);
+    expect(await countRows(
+      'rednote_publish_attempts',
+      'WHERE source_local_publish_job_id = $1',
+      [fixture.jobId],
+    )).toBe(3);
+    expect(await countRows(
+      'rednote_publish_attempt_events',
+      `WHERE attempt_id IN (
+         SELECT id
+         FROM rednote_publish_attempts
+         WHERE source_local_publish_job_id = $1
+       )
+       AND event_type = 'execution_evidence'
+       AND diagnostics->>'kind' = 'late_terminal_result_accepted'`,
+      [fixture.jobId],
+    )).toBe(1);
+    expect((await listStoredPublishBatches(
+      fixture.workspaceId,
+      fixture.batchId,
+    ))[0].items[0].recoveryEvidence).toBeUndefined();
   }, 30_000);
 
   it('hides and rejects a spoofed NOT_LOGGED_IN message', async () => {
