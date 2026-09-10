@@ -2,8 +2,17 @@ import { NextRequest, NextResponse } from 'next/server';
 import { validateCloudflareAccessRequest } from '@/lib/cloudflare-access';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
 import { normalizeLocalPublishJobError } from '@/lib/local-publish-jobs';
-import { parseRednotePublishJobRecoveryInput } from '@/lib/rednote-publish-job-recovery';
-import { recoverStoredApprovedPublishJob } from '@/lib/rednote-publish-job-recovery-store';
+import {
+  parseBrowserClosedPublishJobRecoveryInput,
+  parseRednotePublishJobRecoveryInput,
+} from '@/lib/rednote-publish-job-recovery';
+import {
+  recoverStoredApprovedPublishJob,
+  recoverStoredBrowserClosedPrePublishJob,
+} from '@/lib/rednote-publish-job-recovery-store';
+import {
+  BROWSER_CLOSED_PRE_PUBLISH_CONFIRMATION,
+} from '@/lib/rednote-publish-job-recovery-contract';
 import type {
   PublicRednotePublishJobRecovery,
   RednotePublishJobRecovery,
@@ -59,10 +68,19 @@ export async function POST(request: NextRequest) {
         400,
       );
     }
-    const recovery = await recoverStoredApprovedPublishJob(
-      parseRednotePublishJobRecoveryInput(body),
-      operator.email,
+    const browserClosedRecovery = Boolean(
+      body &&
+      typeof body === 'object' &&
+      !Array.isArray(body) &&
+      (body as Record<string, unknown>).confirmed ===
+        BROWSER_CLOSED_PRE_PUBLISH_CONFIRMATION,
     );
+    const input = browserClosedRecovery
+      ? parseBrowserClosedPublishJobRecoveryInput(body)
+      : parseRednotePublishJobRecoveryInput(body);
+    const recovery = browserClosedRecovery
+      ? await recoverStoredBrowserClosedPrePublishJob(input, operator.email)
+      : await recoverStoredApprovedPublishJob(input, operator.email);
     return NextResponse.json(
       { recovery: publicRecovery(recovery) },
       { status: recovery.alreadyRecovered ? 200 : 201, headers: NO_STORE_HEADERS },

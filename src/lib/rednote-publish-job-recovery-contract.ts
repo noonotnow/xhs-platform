@@ -1,0 +1,5 @@
+export const BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE = 'INTERNAL_ERROR';
+export const BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE =
+  'page.waitForTimeout: Target page, context or browser has been closed';
+export const BROWSER_CLOSED_PRE_PUBLISH_CONFIRMATION =
+  'RECOVER_EXACT_BROWSER_CLOSED_PREPUBLISH_FAILURE';

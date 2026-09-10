@@ -232,6 +232,7 @@ export interface OperatorSuccessAttestationSummary
 }
 
 export interface RednotePublishJobRecoveryEvidence {
+  recoveryKind: 'standard' | 'browser_closed_pre_publish';
   batchId: string;
   manifestHash: string;
   itemId: string;
@@ -242,7 +243,8 @@ export interface RednotePublishJobRecoveryEvidence {
     | 'BOUNDED_BATCH_BYPASS_DISABLED'
     | 'AMBIGUOUS_CREATOR_UI'
     | 'NOT_LOGGED_IN'
-    | 'SCHEDULE_READBACK_MISMATCH';
+    | 'SCHEDULE_READBACK_MISMATCH'
+    | 'INTERNAL_ERROR';
   claimAttempts: number;
   latestAuditedClaimAttempts?: number;
 }
@@ -250,7 +252,10 @@ export interface RednotePublishJobRecoveryEvidence {
 export interface RednotePublishJobRecovery
   extends Omit<
     RednotePublishJobRecoveryEvidence,
-    'priorErrorCode' | 'claimAttempts' | 'latestAuditedClaimAttempts'
+    | 'recoveryKind'
+    | 'priorErrorCode'
+    | 'claimAttempts'
+    | 'latestAuditedClaimAttempts'
   > {
   id: string;
   approvedAt: string;

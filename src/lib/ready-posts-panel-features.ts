@@ -3,7 +3,13 @@ import {
   isCanonicalMediaMov,
   isCanonicalMediaVideo,
 } from '@/lib/canonical-media';
-import type { LocalPublishMediaType } from '@/types/local-publish-job';
+import {
+  BROWSER_CLOSED_PRE_PUBLISH_CONFIRMATION,
+} from '@/lib/rednote-publish-job-recovery-contract';
+import type {
+  LocalPublishMediaType,
+  RednotePublishJobRecoveryEvidence,
+} from '@/types/local-publish-job';
 import type { ReadyXhsPost } from '@/types/ready-post';
 
 export const READY_POSTS_PANEL_FEATURES = {
@@ -60,4 +66,46 @@ export function readyPostMediaPreview(
     rejectedUrls: rejectedUrls.filter((url, index) => rejectedUrls.indexOf(url) === index),
     thumbnailUrl,
   };
+}
+
+export function readyPostRecoveryAction(
+  evidence: RednotePublishJobRecoveryEvidence,
+  repairMissingAttemptLineage = false,
+) {
+  const browserClosed =
+    evidence.recoveryKind === 'browser_closed_pre_publish';
+  const reason = browserClosed
+    ? 'Browser closed during approved pre-Publish media loading'
+    : evidence.priorErrorCode === 'AMBIGUOUS_CREATOR_UI'
+      ? 'Fixed image-mode pre-staging hydration failure'
+      : evidence.priorErrorCode === 'NOT_LOGGED_IN'
+        ? 'Persistent Creator browser profile required login before staging'
+        : evidence.priorErrorCode === 'SCHEDULE_READBACK_MISMATCH'
+          ? 'Creator did not retain the approved scheduled time before staging'
+          : 'Bounded-batch bypass disabled';
+  return {
+    confirmation: browserClosed
+      ? BROWSER_CLOSED_PRE_PUBLISH_CONFIRMATION
+      : true,
+    reason,
+    failureDetail: browserClosed
+      ? 'Recorded failure: the browser closed while loading approved media before Publish.\n'
+      : evidence.priorErrorCode === 'AMBIGUOUS_CREATOR_UI'
+        ? 'Fixed failure: image-mode pre-staging hydration could not uniquely identify the upload mode.\n'
+        : evidence.priorErrorCode === 'NOT_LOGGED_IN'
+          ? 'Recorded failure: the persistent Creator browser profile required login before staging.\n'
+          : evidence.priorErrorCode === 'SCHEDULE_READBACK_MISMATCH'
+            ? 'Recorded failure: Creator did not retain the approved scheduled time before staging.\n'
+            : '',
+    idleLabel: repairMissingAttemptLineage
+      ? 'Repair missing attempt lineage'
+      : browserClosed
+        ? 'Confirm browser-closed recovery'
+        : 'Confirm exact-job recovery',
+    busyLabel: repairMissingAttemptLineage
+      ? 'Repairing attempt lineage…'
+      : browserClosed
+        ? 'Recovering browser-closed job…'
+        : 'Requeueing exact job…',
+  } as const;
 }

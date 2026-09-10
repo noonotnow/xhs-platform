@@ -5,6 +5,7 @@ import {
   validateRecoveryCandidate,
   type ExistingRecoveryAudit,
   type RecoveryCandidateState,
+  type RednotePublishJobRecoveryKind,
   type RednotePublishJobRecoveryInput,
 } from '@/lib/rednote-publish-job-recovery';
 import type {
@@ -385,6 +386,7 @@ export async function recoverStoredApprovedPublishJobTransaction(
   client: Pick<PoolClient, 'query'>,
   input: RednotePublishJobRecoveryInput,
   recoveredBy: string,
+  recoveryKind: RednotePublishJobRecoveryKind = 'standard',
 ) {
   try {
     await client.query('BEGIN');
@@ -537,6 +539,7 @@ export async function recoverStoredApprovedPublishJobTransaction(
       candidate(row, ownership.rows[0]?.active_ownership === true),
       input,
       recoveredBy,
+      recoveryKind,
     );
     if (!row.approved_at) {
       throw new LocalPublishJobError(
@@ -718,6 +721,23 @@ export async function recoverStoredApprovedPublishJob(
       client,
       input,
       recoveredBy,
+    );
+  } finally {
+    client.release();
+  }
+}
+
+export async function recoverStoredBrowserClosedPrePublishJob(
+  input: RednotePublishJobRecoveryInput,
+  recoveredBy: string,
+) {
+  const client = await getPool().connect();
+  try {
+    return await recoverStoredApprovedPublishJobTransaction(
+      client,
+      input,
+      recoveredBy,
+      'browser_closed_pre_publish',
     );
   } finally {
     client.release();

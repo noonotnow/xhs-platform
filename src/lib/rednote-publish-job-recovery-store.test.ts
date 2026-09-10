@@ -14,7 +14,13 @@ vi.mock('@/lib/db', () => ({
   }),
 }));
 
-import { recoverStoredApprovedPublishJob } from '@/lib/rednote-publish-job-recovery-store';
+import {
+  recoverStoredApprovedPublishJob,
+  recoverStoredBrowserClosedPrePublishJob,
+} from '@/lib/rednote-publish-job-recovery-store';
+import {
+  BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
+} from '@/lib/rednote-publish-job-recovery-contract';
 import type { RednotePublishJobRecoveryInput } from '@/lib/rednote-publish-job-recovery';
 
 const input: RednotePublishJobRecoveryInput = {
@@ -140,6 +146,78 @@ describe('stored approved publish job recovery', () => {
   beforeEach(() => {
     mocks.query.mockReset();
     mocks.release.mockReset();
+  });
+
+  it('keeps browser-closed recovery behind the dedicated store operation', async () => {
+    const browserClosedRow = {
+      ...row(),
+      job_error_code: 'INTERNAL_ERROR',
+      job_error_message: BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
+    };
+    const mockRecoveryQueries = () => {
+      mocks.query.mockImplementation(async (statement: string) => {
+        if (statement.includes('SELECT workspace_id, notion_page_id')) {
+          return { rows: [{
+            workspace_id: browserClosedRow.workspace_id,
+            notion_page_id: browserClosedRow.notion_page_id,
+          }] };
+        }
+        if (statement.includes('FROM local_publish_jobs AS job')) {
+          return { rows: [browserClosedRow] };
+        }
+        if (statement.includes('AS active_ownership')) {
+          return { rows: [{ active_ownership: false }] };
+        }
+        if (statement.includes('INSERT INTO rednote_publish_job_recoveries')) {
+          return {
+            rows: [{
+              id: recoveryId,
+              recovered_at: '2026-08-04T17:30:00.000Z',
+              snapshot_revision: input.snapshotRevision,
+              prior_claim_attempts: 1,
+              prior_completed_at_raw: '2026-08-04 17:04:33.963900+00',
+            }],
+          };
+        }
+        const generation = generationResponse(statement);
+        if (generation) return generation;
+        if (statement.includes('UPDATE local_publish_jobs')) {
+          return { rows: [], rowCount: 1 };
+        }
+        if (statement.includes('FROM rednote_publish_batch_items')) {
+          return {
+            rows: [{
+              state: 'queued',
+              local_publish_job_id: input.jobId,
+            }],
+          };
+        }
+        return { rows: [], rowCount: 1 };
+      });
+    };
+
+    mockRecoveryQueries();
+    await expect(recoverStoredApprovedPublishJob(input, actor))
+      .rejects.toMatchObject({ code: 'RECOVERY_PRECONDITION_FAILED' });
+    expect(mocks.query.mock.calls.some(([statement]) =>
+      String(statement).includes('INSERT INTO rednote_publish_job_recoveries')))
+      .toBe(false);
+
+    mocks.query.mockReset();
+    mockRecoveryQueries();
+    await expect(recoverStoredBrowserClosedPrePublishJob(input, actor))
+      .resolves.toMatchObject({
+        id: recoveryId,
+        ...input,
+        recoveredBy: actor,
+        alreadyRecovered: false,
+      });
+    const auditCall = mocks.query.mock.calls.find(([statement]) =>
+      String(statement).includes('INSERT INTO rednote_publish_job_recoveries'));
+    expect(auditCall?.[1]?.slice(6, 8)).toEqual([
+      'INTERNAL_ERROR',
+      BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
+    ]);
   });
 
   it('writes one audit and requeues the same job without changing approval or identity', async () => {

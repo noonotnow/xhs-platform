@@ -4,8 +4,12 @@ import { isDeepStrictEqual } from 'util';
 import { getPool, sql } from '@/lib/db';
 import {
   exactRecoverablePublishJobError,
+  isExactBrowserClosedPrePublishFailure,
   RECOVERABLE_AMBIGUOUS_CREATOR_ERROR,
 } from '@/lib/rednote-publish-job-recovery';
+import {
+  BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
+} from '@/lib/rednote-publish-job-recovery-contract';
 import type {
   LocalPublishSnapshot,
   PublishBatch,
@@ -171,13 +175,27 @@ function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
     row.recovery_job_error_code,
     row.recovery_job_error_message,
   );
+  const browserClosedPrePublishFailure =
+    isExactBrowserClosedPrePublishFailure(
+      row.recovery_job_error_code,
+      row.recovery_job_error_message,
+    );
+  const recoveryKind = browserClosedPrePublishFailure
+    ? 'browser_closed_pre_publish' as const
+    : exactRecoverableError
+      ? 'standard' as const
+      : null;
   const recoverableError = (
-    exactRecoverableError &&
+    recoveryKind &&
     (
       row.recovery_job_error_code !== RECOVERABLE_AMBIGUOUS_CREATOR_ERROR ||
       !firstRecovery
     )
-  ) ? exactRecoverableError : null;
+  ) ? (
+      browserClosedPrePublishFailure
+        ? BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE
+        : exactRecoverableError
+    ) : null;
   const failedRecoveryEligible = Boolean(
     batch?.status === 'approved' &&
     batch.approved_at &&
@@ -206,9 +224,17 @@ function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
     row.recovery_no_active_ownership === true
   );
   const queuedRepairError = matchingAuditEvidence
-    ? exactRecoverablePublishJobError(
-        row.recovery_audit_error_code,
-        row.recovery_audit_error_message,
+    ? (
+        exactRecoverablePublishJobError(
+          row.recovery_audit_error_code,
+          row.recovery_audit_error_message,
+        ) ||
+        (isExactBrowserClosedPrePublishFailure(
+          row.recovery_audit_error_code,
+          row.recovery_audit_error_message,
+        )
+          ? BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE
+          : null)
       )
     : null;
   const queuedRepairEligible = Boolean(
@@ -249,6 +275,16 @@ function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
   const projectedClaimAttempts = queuedRepairEligible
     ? row.recovery_audit_claim_attempts
     : row.recovery_claim_attempts;
+  const projectedRecoveryKind = queuedRepairEligible
+    ? (
+        isExactBrowserClosedPrePublishFailure(
+          row.recovery_audit_error_code,
+          row.recovery_audit_error_message,
+        )
+          ? 'browser_closed_pre_publish' as const
+          : 'standard' as const
+      )
+    : recoveryKind;
   return {
     id: row.id,
     notionPageId: row.notion_page_id,
@@ -262,6 +298,7 @@ function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
     ...(recoveryEligible
       ? {
           recoveryEvidence: {
+            recoveryKind: projectedRecoveryKind!,
             batchId: batch!.id,
             manifestHash: batch!.manifest_hash,
             itemId: row.id,

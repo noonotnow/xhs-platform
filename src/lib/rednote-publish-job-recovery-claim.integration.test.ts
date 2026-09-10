@@ -58,7 +58,11 @@ import {
 import {
   PublishJobRecoveryError,
   recoverStoredApprovedPublishJob,
+  recoverStoredBrowserClosedPrePublishJob,
 } from '@/lib/rednote-publish-job-recovery-store';
+import {
+  BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
+} from '@/lib/rednote-publish-job-recovery-contract';
 import { listStoredPublishBatches } from '@/lib/rednote-publish-batch-store';
 import {
   bindLinkedAttemptClaim,
@@ -102,6 +106,7 @@ const MIGRATIONS = [
   '032_recover_creator_login_failure.sql',
   '033_rejected_worker_result_recovery_evidence.sql',
   '034_recover_schedule_readback_mismatch.sql',
+  '035_recover_browser_closed_pre_publish.sql',
 ] as const;
 
 const EXACT_JOB_ID = 'c6203283-be7d-46ce-a38b-9a7f90eef75d';
@@ -120,7 +125,7 @@ function frozenSnapshot(
   notionPageId: string,
   revision = EXACT_REVISION,
 ): LocalPublishSnapshot {
-  const mediaUrl = 'https://example.com/recovery.png';
+  const mediaUrl = 'https://example.com/approved-large-video.mp4';
   return {
     notionPageId,
     notionLastEditedTime: revision,
@@ -129,10 +134,10 @@ function frozenSnapshot(
     caption: 'The frozen caption must survive recovery and claim.',
     tags: ['recovery', 'bounded'],
     platform: 'RedNote',
-    mediaType: 'image',
+    mediaType: 'video',
     mediaIndex: 0,
     mediaUrl,
-    media: [rednotePublishMedia('image', mediaUrl)],
+    media: [rednotePublishMedia('video', mediaUrl)],
     expectedAccountId: 'creator-account',
     publishAt: '2026-09-09T02:00:00.000Z',
   };
@@ -523,15 +528,15 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
     await database.close();
   });
 
-  it('creates one immutable generation and makes the exact job claimable exactly once', async () => {
+  it('recovers the exact browser-closed video job into one immutable claim generation', async () => {
     const fixture = await insertRecoverableFixture({
       jobId: EXACT_JOB_ID,
       batchItemId: EXACT_BATCH_ITEM_ID,
       revision: EXACT_REVISION,
       notionPageId: 'page-day-16-exact-recovery',
-      workspaceId: 'default',
-      errorCode: 'NOT_LOGGED_IN',
-      errorMessage: 'RedNote creator login is required in the persistent browser profile',
+      workspaceId: 'legacy-local-publish',
+      errorCode: 'INTERNAL_ERROR',
+      errorMessage: BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
     });
     const historicalAttemptId = await insertHistoricalEvidenceFixture();
     const historicalBefore = await database.query<Record<string, unknown>>(
@@ -552,7 +557,8 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
     );
     expect(beforeRecovery[0].items[0].recoveryEvidence).toEqual({
       ...fixture.input,
-      priorErrorCode: 'NOT_LOGGED_IN',
+      recoveryKind: 'browser_closed_pre_publish',
+      priorErrorCode: 'INTERNAL_ERROR',
       claimAttempts: 1,
     });
     expect(beforeRecovery[0].items[0].recoveryEvidence)
@@ -566,7 +572,14 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
       [EXACT_JOB_ID],
     )).toMatchObject({ rows: [{ claim_attempts: 1 }] });
 
-    const recovered = await recoverStoredApprovedPublishJob(
+    await expect(recoverStoredApprovedPublishJob(
+      fixture.input,
+      RECOVERED_BY,
+    )).rejects.toMatchObject({
+      code: 'RECOVERY_PRECONDITION_FAILED',
+    });
+
+    const recovered = await recoverStoredBrowserClosedPrePublishJob(
       fixture.input,
       RECOVERED_BY,
     );
@@ -644,9 +657,8 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
       [EXACT_JOB_ID],
     )).toMatchObject({
       rows: [{
-        prior_error_code: 'NOT_LOGGED_IN',
-        prior_error_message:
-          'RedNote creator login is required in the persistent browser profile',
+        prior_error_code: 'INTERNAL_ERROR',
+        prior_error_message: BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
       }],
     });
     expect(await countRows(
@@ -688,7 +700,7 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
       .map(({ id }) => id)
       .sort()).toEqual([fixture.sourceAttemptId, replacement?.id].sort());
 
-    await expect(recoverStoredApprovedPublishJob(
+    await expect(recoverStoredBrowserClosedPrePublishJob(
       fixture.input,
       RECOVERED_BY,
     )).resolves.toMatchObject({
@@ -805,6 +817,7 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
       fixture.batchId,
     ))[0].items[0].recoveryEvidence).toEqual({
       ...fixture.input,
+      recoveryKind: 'standard',
       priorErrorCode: 'SCHEDULE_READBACK_MISMATCH',
       claimAttempts: 1,
     });
@@ -1141,6 +1154,7 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
     );
     expect(batches[0].items[0].recoveryEvidence).toEqual({
       ...fixture.input,
+      recoveryKind: 'standard',
       priorErrorCode: 'NOT_LOGGED_IN',
       claimAttempts: 2,
       latestAuditedClaimAttempts: 1,
@@ -1284,6 +1298,7 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
       fixture.batchId,
     ))[0].items[0].recoveryEvidence).toEqual({
       ...fixture.input,
+      recoveryKind: 'standard',
       priorErrorCode: 'NOT_LOGGED_IN',
       claimAttempts: 2,
       latestAuditedClaimAttempts: 1,
@@ -1457,6 +1472,7 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
     expect(before[0].items).toHaveLength(1);
     expect(before[0].items[0].recoveryEvidence).toEqual({
       ...fixture.input,
+      recoveryKind: 'standard',
       priorErrorCode: 'BOUNDED_BATCH_BYPASS_DISABLED',
       claimAttempts: 1,
       latestAuditedClaimAttempts: 1,
@@ -1758,6 +1774,7 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
       fixture.batchId,
     ))[0].items[0].recoveryEvidence).toEqual({
       ...fixture.input,
+      recoveryKind: 'standard',
       priorErrorCode: 'NOT_LOGGED_IN',
       claimAttempts: 1,
       latestAuditedClaimAttempts: 1,
