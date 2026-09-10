@@ -9,11 +9,14 @@ export const RECOVERABLE_AMBIGUOUS_CREATOR_MESSAGE =
 export const RECOVERABLE_NOT_LOGGED_IN_ERROR = 'NOT_LOGGED_IN';
 export const RECOVERABLE_NOT_LOGGED_IN_MESSAGE =
   'RedNote creator login is required in the persistent browser profile';
+export const RECOVERABLE_SCHEDULE_READBACK_MISMATCH_ERROR =
+  'SCHEDULE_READBACK_MISMATCH';
 
 export type RecoverableRednotePublishJobError =
   | typeof RECOVERABLE_BOUNDED_BATCH_ERROR
   | typeof RECOVERABLE_AMBIGUOUS_CREATOR_ERROR
-  | typeof RECOVERABLE_NOT_LOGGED_IN_ERROR;
+  | typeof RECOVERABLE_NOT_LOGGED_IN_ERROR
+  | typeof RECOVERABLE_SCHEDULE_READBACK_MISMATCH_ERROR;
 
 export interface RednotePublishJobRecoveryInput {
   batchId: string;
@@ -79,6 +82,31 @@ export interface RecoveryCandidateState {
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
+const SCHEDULE_READBACK_MISMATCH_MESSAGE =
+  /^Creator date-picker did not retain the scheduled time \(got "(\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]) (?:[01]\d|2[0-3]):[0-5]\d)", expected "(\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]) (?:[01]\d|2[0-3]):[0-5]\d)"\)$/;
+
+function isValidScheduleReadbackDateTime(value: string) {
+  const [year, month, day, hour, minute] = value.split(/[- :]/).map(Number);
+  const date = new Date(0);
+  date.setUTCFullYear(year, month - 1, day);
+  date.setUTCHours(hour, minute, 0, 0);
+  return (
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day &&
+    date.getUTCHours() === hour &&
+    date.getUTCMinutes() === minute
+  );
+}
+
+function isExactScheduleReadbackMismatchMessage(value: string | null | undefined) {
+  const match = value?.match(SCHEDULE_READBACK_MISMATCH_MESSAGE);
+  return Boolean(
+    match &&
+    isValidScheduleReadbackDateTime(match[1]) &&
+    isValidScheduleReadbackDateTime(match[2]),
+  );
+}
 
 function recoveryError(message: string, code = 'RECOVERY_PRECONDITION_FAILED') {
   return new LocalPublishJobError(message, code, 409);
@@ -100,6 +128,12 @@ export function exactRecoverablePublishJobError(
   if (
     errorCode === RECOVERABLE_NOT_LOGGED_IN_ERROR &&
     errorMessage === RECOVERABLE_NOT_LOGGED_IN_MESSAGE
+  ) {
+    return errorCode;
+  }
+  if (
+    errorCode === RECOVERABLE_SCHEDULE_READBACK_MISMATCH_ERROR &&
+    isExactScheduleReadbackMismatchMessage(errorMessage)
   ) {
     return errorCode;
   }

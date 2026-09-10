@@ -99,6 +99,38 @@ describe('bounded publish job recovery validation', () => {
     }
   });
 
+  it('accepts only a canonical SCHEDULE_READBACK_MISMATCH message', () => {
+    const scheduleReadbackMismatch = {
+      jobErrorCode: 'SCHEDULE_READBACK_MISMATCH',
+      jobErrorMessage:
+        'Creator date-picker did not retain the scheduled time (got "2026-09-10 17:20", expected "2026-09-12 07:20")',
+    };
+    expect(validateRecoveryCandidate(candidate(scheduleReadbackMismatch), input, actor))
+      .toBe('recover');
+
+    for (const jobErrorMessage of [
+      'Creator date-picker did not retain the scheduled time (got "2026-09-10 17:20", expected "2026-09-12 07:20") ',
+      'Creator date-picker did not retain the scheduled time (got "2026-9-10 17:20", expected "2026-09-12 07:20")',
+      'Creator date-picker did not retain the scheduled time (got "2026-09-10 24:20", expected "2026-09-12 07:20")',
+      'Creator date-picker did not retain the scheduled time (got "2026-02-29 17:20", expected "2026-09-12 07:20")',
+      'Creator date-picker did not retain the scheduled time (got "2026-09-10 17:20", expected "2026-04-31 07:20")',
+      'Creator date-picker did not retain the scheduled time (got "2026-09-10 17:20", expected 2026-09-12 07:20)',
+      'Creator date-picker did not retain the scheduled time (got "2026-09-10 17:20" expected "2026-09-12 07:20")',
+      'Creator date-picker did not retain scheduled time (got "2026-09-10 17:20", expected "2026-09-12 07:20")',
+      'creator date-picker did not retain the scheduled time (got "2026-09-10 17:20", expected "2026-09-12 07:20")',
+      'Unexpected failure: Creator date-picker did not retain the scheduled time (got "2026-09-10 17:20", expected "2026-09-12 07:20")',
+    ]) {
+      expect(() => validateRecoveryCandidate(candidate({
+        ...scheduleReadbackMismatch,
+        jobErrorMessage,
+      }), input, actor)).toThrow(/exact recoverable terminal pre-dispatch/i);
+    }
+    expect(() => validateRecoveryCandidate(candidate({
+      ...scheduleReadbackMismatch,
+      jobErrorCode: 'SCHEDULE_READBACK_MISMATCH_RETRY',
+    }), input, actor)).toThrow(/exact recoverable terminal pre-dispatch/i);
+  });
+
   it('accepts only the exact failed approved job and exact queued idempotent retry', () => {
     expect(validateRecoveryCandidate(candidate(), input, actor)).toBe('recover');
     const recovered = candidate({
