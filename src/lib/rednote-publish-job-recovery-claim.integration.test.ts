@@ -101,6 +101,7 @@ const MIGRATIONS = [
   '031_recovery_attempt_generations.sql',
   '032_recover_creator_login_failure.sql',
   '033_rejected_worker_result_recovery_evidence.sql',
+  '034_recover_schedule_readback_mismatch.sql',
 ] as const;
 
 const EXACT_JOB_ID = 'c6203283-be7d-46ce-a38b-9a7f90eef75d';
@@ -381,7 +382,7 @@ async function countRows(table: string, where = '', params: unknown[] = []) {
 }
 
 async function readRecoveryMutationState(jobId: string) {
-  const [job, attempts, recoveries, generations, events] = await Promise.all([
+  const [job, attempts, recoveries, generations, events, publicationEvidence] = await Promise.all([
     database.query<Record<string, unknown>>(
       'SELECT * FROM local_publish_jobs WHERE id = $1',
       [jobId],
@@ -415,6 +416,13 @@ async function readRecoveryMutationState(jobId: string) {
        ORDER BY event.occurred_at, event.id`,
       [jobId],
     ),
+    database.query<Record<string, unknown>>(
+      `SELECT *
+       FROM rednote_publication_evidence
+       WHERE local_publish_job_id = $1
+       ORDER BY captured_at, id`,
+      [jobId],
+    ),
   ]);
   return {
     job: job.rows,
@@ -422,6 +430,7 @@ async function readRecoveryMutationState(jobId: string) {
     recoveries: recoveries.rows,
     generations: generations.rows,
     events: events.rows,
+    publicationEvidence: publicationEvidence.rows,
   };
 }
 
@@ -783,6 +792,176 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
       [historicalAttemptId],
     )).rows).toEqual(evidenceBefore.rows);
   }, 30_000);
+
+  it('projects and recovers an exact pre-dispatch schedule readback mismatch', async () => {
+    const fixture = await insertRecoverableFixture({
+      errorCode: 'SCHEDULE_READBACK_MISMATCH',
+      errorMessage:
+        'Creator date-picker did not retain the scheduled time (got "2026-09-10 17:20", expected "2026-09-12 07:20")',
+    });
+
+    expect((await listStoredPublishBatches(
+      fixture.workspaceId,
+      fixture.batchId,
+    ))[0].items[0].recoveryEvidence).toEqual({
+      ...fixture.input,
+      priorErrorCode: 'SCHEDULE_READBACK_MISMATCH',
+      claimAttempts: 1,
+    });
+
+    await expect(recoverStoredApprovedPublishJob(
+      fixture.input,
+      RECOVERED_BY,
+    )).resolves.toMatchObject({
+      jobId: fixture.jobId,
+      priorClaimAttempts: 1,
+      alreadyRecovered: false,
+    });
+    expect(await database.query<{
+      status: string;
+      error_code: string | null;
+      error_message: string | null;
+    }>(
+      `SELECT status, error_code, error_message
+       FROM local_publish_jobs
+       WHERE id = $1`,
+      [fixture.jobId],
+    )).toMatchObject({
+      rows: [{
+        status: 'queued',
+        error_code: null,
+        error_message: null,
+      }],
+    });
+    expect(await database.query<{
+      prior_error_code: string;
+      prior_error_message: string;
+    }>(
+      `SELECT prior_error_code, prior_error_message
+       FROM rednote_publish_job_recoveries
+       WHERE local_publish_job_id = $1`,
+      [fixture.jobId],
+    )).toMatchObject({
+      rows: [{
+        prior_error_code: 'SCHEDULE_READBACK_MISMATCH',
+        prior_error_message:
+          'Creator date-picker did not retain the scheduled time (got "2026-09-10 17:20", expected "2026-09-12 07:20")',
+      }],
+    });
+  });
+
+  it('rejects malformed schedule readback failures without mutating recovery state', async () => {
+    const fixture = await insertRecoverableFixture({
+      errorCode: 'SCHEDULE_READBACK_MISMATCH',
+      errorMessage:
+        'Creator date-picker did not retain the scheduled time (got "2026-09-10 17:20", expected "2026-09-12 7:20")',
+    });
+    const before = await readRecoveryMutationState(fixture.jobId);
+
+    expect((await listStoredPublishBatches(
+      fixture.workspaceId,
+      fixture.batchId,
+    ))[0].items[0].recoveryEvidence).toBeUndefined();
+    await expect(recoverStoredApprovedPublishJob(
+      fixture.input,
+      RECOVERED_BY,
+    )).rejects.toMatchObject({
+      code: 'RECOVERY_PRECONDITION_FAILED',
+      status: 409,
+    } satisfies Partial<PublishJobRecoveryError>);
+    expect(await readRecoveryMutationState(fixture.jobId)).toEqual(before);
+  });
+
+  it('keeps schedule readback recovery blocked without mutation once lifecycle or publication evidence exists', async () => {
+    const fixture = await insertRecoverableFixture({
+      errorCode: 'SCHEDULE_READBACK_MISMATCH',
+      errorMessage:
+        'Creator date-picker did not retain the scheduled time (got "2026-09-10 17:20", expected "2026-09-12 07:20")',
+    });
+    const blockingEvidence = [
+      {
+        set: "staged_at = '2026-09-10T17:20:00.000Z'",
+        clear: 'staged_at = NULL',
+      },
+      {
+        set: "dispatch_authorized_at = '2026-09-10T17:20:00.000Z'",
+        clear: 'dispatch_authorized_at = NULL',
+      },
+      {
+        set: "dispatched_at = '2026-09-10T17:20:00.000Z'",
+        clear: 'dispatched_at = NULL',
+      },
+      {
+        set: "note_id = 'rednote-note-id'",
+        clear: 'note_id = NULL',
+      },
+      {
+        set: "share_url = 'https://www.rednote.com/explore/rednote-note-id'",
+        clear: 'share_url = NULL',
+      },
+      {
+        set: "next_verification_at = '2026-09-10T17:20:00.000Z'",
+        clear: 'next_verification_at = NULL',
+      },
+      {
+        set: 'verification_attempts = 1',
+        clear: 'verification_attempts = 0',
+      },
+      {
+        set: "verified_at = '2026-09-10T17:20:00.000Z'",
+        clear: 'verified_at = NULL',
+      },
+      {
+        set: "reconciled_at = '2026-09-10T17:20:00.000Z'",
+        clear: 'reconciled_at = NULL',
+      },
+    ] as const;
+
+    for (const evidence of blockingEvidence) {
+      await database.query(
+        `UPDATE local_publish_jobs SET ${evidence.set} WHERE id = $1`,
+        [fixture.jobId],
+      );
+      const before = await readRecoveryMutationState(fixture.jobId);
+      expect((await listStoredPublishBatches(
+        fixture.workspaceId,
+        fixture.batchId,
+      ))[0].items[0].recoveryEvidence).toBeUndefined();
+      await expect(recoverStoredApprovedPublishJob(
+        fixture.input,
+        RECOVERED_BY,
+      )).rejects.toMatchObject({
+        code: 'RECOVERY_PRECONDITION_FAILED',
+        status: 409,
+      } satisfies Partial<PublishJobRecoveryError>);
+      expect(await readRecoveryMutationState(fixture.jobId)).toEqual(before);
+      await database.query(
+        `UPDATE local_publish_jobs SET ${evidence.clear} WHERE id = $1`,
+        [fixture.jobId],
+      );
+    }
+
+    await database.query(
+      `INSERT INTO rednote_publication_evidence (
+        workspace_id, local_publish_job_id, note_id, evidence_kind,
+        captured_at, account_id, evidence_status
+      ) VALUES (
+        $1, $2, 'rednote-note-id', 'authenticated_account',
+        '2026-09-10T17:20:00.000Z', 'creator-account', 'owned'
+      )`,
+      [fixture.workspaceId, fixture.jobId],
+    );
+    const beforePublicationEvidence = await readRecoveryMutationState(fixture.jobId);
+    await expect(recoverStoredApprovedPublishJob(
+      fixture.input,
+      RECOVERED_BY,
+    )).rejects.toMatchObject({
+      code: 'RECOVERY_PRECONDITION_FAILED',
+      status: 409,
+    } satisfies Partial<PublishJobRecoveryError>);
+    expect(await readRecoveryMutationState(fixture.jobId))
+      .toEqual(beforePublicationEvidence);
+  });
 
   it('projects a prior recovery after a second bound claim ends in a canonical login rejection', async () => {
     const notionPageId = 'page-day-16-login-refailure';

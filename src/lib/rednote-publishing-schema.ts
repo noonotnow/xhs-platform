@@ -19,6 +19,7 @@ export const REDNOTE_SCHEMA_MIGRATIONS = [
   '031',
   '032',
   '033',
+  '034',
 ] as const;
 export type RednoteSchemaMigration = (typeof REDNOTE_SCHEMA_MIGRATIONS)[number];
 export type RednoteSchemaReadiness = Record<RednoteSchemaMigration, boolean>;
@@ -84,6 +85,7 @@ const migrationFiles: Record<RednoteSchemaMigration, readonly string[]> = {
   '031': ['031_recovery_attempt_generations.sql'],
   '032': ['032_recover_creator_login_failure.sql'],
   '033': ['033_rejected_worker_result_recovery_evidence.sql'],
+  '034': ['034_recover_schedule_readback_mismatch.sql'],
 };
 
 const READINESS_SQL = `
@@ -208,6 +210,12 @@ const READINESS_SQL = `
         'routine_body',
         NULL,
         'rednote_publish_recovery_revision_blockers'
+      ),
+      (
+        '034',
+        'constraint_value',
+        'rednote_publish_job_recoveries',
+        'SCHEDULE_READBACK_MISMATCH'
       )
   )
   SELECT

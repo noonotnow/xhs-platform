@@ -552,15 +552,21 @@ publication evidence when evaluating the excluded recovery job. Other receipt
 shapes and all staging, dispatch, publication, reconciliation, or alternate
 attempt evidence continue to block recovery. A database already through
 migration 032 needs only migration 033.
+`migrations/034_recover_schedule_readback_mismatch.sql` additively permits the
+`SCHEDULE_READBACK_MISMATCH` code in the immutable recovery audit. Apply
+migration 034 before deploying platform code that exposes this recovery reason.
+A database already through migration 033 needs only migration 034.
 
 This is the only supported recovery for a bounded job that terminal-failed
 before staging or dispatch with either existing exact error
 `BOUNDED_BATCH_BYPASS_DISABLED`, or code `NOT_LOGGED_IN` and exact message
-`RedNote creator login is required in the persistent browser profile`. It
-updates the original `local_publish_jobs` row back to `queued` and creates a
-fresh approved worker attempt while preserving the terminal source attempt. It
-does not create a job, replace an item, rebuild or approve a manifest, change the
-frozen snapshot or publish time, or change the original batch approval.
+`RedNote creator login is required in the persistent browser profile`, or code
+`SCHEDULE_READBACK_MISMATCH` and the exact date-picker readback message with
+valid, differing `got` and `expected` values. It updates the original
+`local_publish_jobs` row back to `queued` and creates a fresh approved worker
+attempt while preserving the terminal source attempt. It does not create a job,
+replace an item, rebuild or approve a manifest, change the frozen snapshot or
+publish time, or change the original batch approval.
 
 Use this deployment and operator sequence exactly:
 
@@ -581,10 +587,12 @@ Use this deployment and operator sequence exactly:
      -f migrations/032_recover_creator_login_failure.sql
    psql "$XHS_DATABASE_POSTGRES_URL_NON_POOLING" -v ON_ERROR_STOP=1 \
      -f migrations/033_rejected_worker_result_recovery_evidence.sql
+   psql "$XHS_DATABASE_POSTGRES_URL_NON_POOLING" -v ON_ERROR_STOP=1 \
+     -f migrations/034_recover_schedule_readback_mismatch.sql
    ```
 
 3. Deploy the platform release containing the recovery API and UI only after
-   all required migrations, including 033, succeed. Do not rebuild, supersede,
+   all required migrations, including 034, succeed. Do not rebuild, supersede,
    or approve a batch and do not create a replacement job.
 4. In `/admin`, refresh **Bounded batch approval**. **Eligible pre-dispatch
    recovery** appears only when the approved batch, two-way item/job linkage,

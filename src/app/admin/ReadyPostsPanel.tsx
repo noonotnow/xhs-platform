@@ -796,6 +796,8 @@ export default function ReadyPostsPanel({ workspaceId }: { workspaceId: string }
       evidence.priorErrorCode === 'AMBIGUOUS_CREATOR_UI';
     const creatorLoginFailure =
       evidence.priorErrorCode === 'NOT_LOGGED_IN';
+    const scheduleReadbackMismatch =
+      evidence.priorErrorCode === 'SCHEDULE_READBACK_MISMATCH';
     const confirmed = window.confirm(
       `${repairMissingAttemptLineage ? 'Repair attempt lineage for' : 'Recover'} ` +
       `the exact already-approved job for "${title}"?\n\n` +
@@ -803,7 +805,9 @@ export default function ReadyPostsPanel({ workspaceId }: { workspaceId: string }
         ? 'Fixed failure: image-mode pre-staging hydration could not uniquely identify the upload mode.\n'
         : creatorLoginFailure
           ? 'Recorded failure: the persistent Creator browser profile required login before staging.\n'
-        : '') +
+          : scheduleReadbackMismatch
+            ? 'Recorded failure: Creator did not retain the approved scheduled time before staging.\n'
+            : '') +
       `Job ${evidence.jobId}\n` +
       `Batch ${evidence.batchId}\n` +
       `Item ${evidence.itemId}\n` +
@@ -1541,7 +1545,10 @@ export default function ReadyPostsPanel({ workspaceId }: { workspaceId: string }
                       ? 'Fixed image-mode pre-staging hydration failure'
                       : item.recoveryEvidence.priorErrorCode === 'NOT_LOGGED_IN'
                         ? 'Persistent Creator browser profile required login before staging'
-                        : 'Bounded-batch bypass disabled'}
+                        : item.recoveryEvidence.priorErrorCode ===
+                            'SCHEDULE_READBACK_MISMATCH'
+                          ? 'Creator did not retain the approved scheduled time before staging'
+                          : 'Bounded-batch bypass disabled'}
                   </small>
                   <small>
                     Terminal failure generation: <code>

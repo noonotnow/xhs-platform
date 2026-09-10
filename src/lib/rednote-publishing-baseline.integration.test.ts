@@ -48,6 +48,7 @@ const migrationFiles = [
   '031_recovery_attempt_generations.sql',
   '032_recover_creator_login_failure.sql',
   '033_rejected_worker_result_recovery_evidence.sql',
+  '034_recover_schedule_readback_mismatch.sql',
 ] as const;
 
 function stable(value: unknown): string {
@@ -2355,6 +2356,18 @@ describe('canonical local publishing migration chain', () => {
     await expect(database.exec(migration)).resolves.toBeDefined();
   });
 
+  it('can reapply migration 034 without mutating recovery audit rows', async () => {
+    const migration = await readFile(
+      path.join(
+        process.cwd(),
+        'migrations',
+        '034_recover_schedule_readback_mismatch.sql',
+      ),
+      'utf8',
+    );
+    await expect(database.exec(migration)).resolves.toBeDefined();
+  });
+
   it('stores body-equivalent recovery functions from migrations 030 and 033', async () => {
     const migration030 = await readFile(
       path.join(
@@ -2514,13 +2527,14 @@ describe('canonical local publishing migration chain', () => {
       expect(before['030']).toBe(false);
       const applied = await applyExpectedRednoteSchemaMigrations(
         client,
-        ['030', '031', '032', '033'],
+        ['030', '031', '032', '033', '034'],
       );
-      expect(applied.applied).toEqual(['030', '031', '032', '033']);
+      expect(applied.applied).toEqual(['030', '031', '032', '033', '034']);
       expect(applied.after['030']).toBe(true);
       expect(applied.after['031']).toBe(true);
       expect(applied.after['032']).toBe(true);
       expect(applied.after['033']).toBe(true);
+      expect(applied.after['034']).toBe(true);
 
       await previousSchema.exec(`
         DROP FUNCTION rednote_publish_revision_blockers(TEXT, TEXT, TEXT);

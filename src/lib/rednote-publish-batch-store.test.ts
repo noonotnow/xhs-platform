@@ -435,12 +435,44 @@ describe('stored RedNote bootstrap replacement', () => {
       .mockResolvedValueOnce({
         rows: [{
           ...item,
+          recovery_job_error_code: 'SCHEDULE_READBACK_MISMATCH',
+          recovery_job_error_message:
+            'Creator date-picker did not retain the scheduled time (got "2026-09-10 17:20", expected "2026-09-12 07:20")',
+        }],
+      });
+    const scheduleReadbackMismatch = await listStoredPublishBatches('workspace-1', batchId);
+    expect(scheduleReadbackMismatch[0].items[0].recoveryEvidence).toMatchObject({
+      priorErrorCode: 'SCHEDULE_READBACK_MISMATCH',
+      claimAttempts: 1,
+    });
+
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [batchRow(batchId, 'approved', hash)] })
+      .mockResolvedValueOnce({
+        rows: [{
+          ...item,
           recovery_job_error_code: 'NOT_LOGGED_IN',
           recovery_job_error_message: 'Login required',
         }],
       });
     const spoofedLoginFailure = await listStoredPublishBatches('workspace-1', batchId);
     expect(spoofedLoginFailure[0].items[0].recoveryEvidence).toBeUndefined();
+
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [batchRow(batchId, 'approved', hash)] })
+      .mockResolvedValueOnce({
+        rows: [{
+          ...item,
+          recovery_job_error_code: 'SCHEDULE_READBACK_MISMATCH',
+          recovery_job_error_message:
+            'Creator date-picker did not retain the scheduled time (got "2026-09-10 17:20", expected "2026-09-12 7:20")',
+        }],
+      });
+    const spoofedScheduleReadbackMismatch = await listStoredPublishBatches(
+      'workspace-1',
+      batchId,
+    );
+    expect(spoofedScheduleReadbackMismatch[0].items[0].recoveryEvidence).toBeUndefined();
 
     for (const unsafeEvidence of [
       { recovery_claimed_at: null },
