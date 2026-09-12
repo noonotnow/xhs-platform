@@ -50,6 +50,7 @@ import {
   READY_POSTS_PANEL_FEATURES,
   readyPostMediaPreview,
   readyPostRecoveryAction,
+  requestedReadyPostIsMissing,
   resolveReadyPostSelection,
   type ReadyPostMediaChoice,
 } from '@/lib/ready-posts-panel-features';
@@ -422,6 +423,10 @@ export default function ReadyPostsPanel({
   const selected = useMemo(
     () => posts.find((post) => post.id === selectedId) ?? posts[0],
     [posts, selectedId],
+  );
+  const requestedPostMissing = !loading && requestedReadyPostIsMissing(
+    posts,
+    initialNotionPageId,
   );
   const activeUnpublishedPosts = useMemo(
     () => posts.filter((post) =>
@@ -1585,6 +1590,13 @@ export default function ReadyPostsPanel({
           </div>
         ))}
       </section>
+      )}
+
+      {requestedPostMissing && (
+        <p className={styles.handoffMissingNotice} role="status">
+          Requested XHS handoff record <code>{initialNotionPageId}</code> no longer exists.
+          Showing the current available selection instead; no action was started.
+        </p>
       )}
 
       {loading && posts.length === 0 ? (

@@ -3,6 +3,7 @@ import {
   READY_POSTS_PANEL_FEATURES,
   readyPostMediaPreview,
   readyPostRecoveryAction,
+  requestedReadyPostIsMissing,
   resolveReadyPostSelection,
 } from '@/lib/ready-posts-panel-features';
 import {
@@ -20,6 +21,16 @@ describe('Ready posts panel feature visibility', () => {
       .toBe('matching-notion-page');
     expect(resolveReadyPostSelection(posts, 'first', 'missing')).toBe('first');
     expect(resolveReadyPostSelection(posts, '', 'missing')).toBe('first');
+  });
+
+  it('reports a missing requested handoff without changing fallback selection', () => {
+    const posts = [{ id: 'first' }, { id: 'second' }];
+
+    expect(requestedReadyPostIsMissing(posts, 'missing-browser-safe-id')).toBe(true);
+    expect(requestedReadyPostIsMissing(posts, 'second')).toBe(false);
+    expect(requestedReadyPostIsMissing(posts)).toBe(false);
+    expect(resolveReadyPostSelection(posts, 'second', 'missing-browser-safe-id'))
+      .toBe('second');
   });
 
   it('shows bounded batch approval without restoring legacy execution audits', () => {

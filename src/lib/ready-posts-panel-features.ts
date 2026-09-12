@@ -17,6 +17,16 @@ export const READY_POSTS_PANEL_FEATURES = {
   legacyExecutionAudits: false,
 } as const;
 
+export function requestedReadyPostIsMissing(
+  posts: ReadonlyArray<{ id: string }>,
+  requestedNotionPageId?: string,
+) {
+  return Boolean(
+    requestedNotionPageId &&
+    !posts.some((post) => post.id === requestedNotionPageId),
+  );
+}
+
 export function resolveReadyPostSelection(
   posts: ReadonlyArray<{ id: string }>,
   currentId: string,
