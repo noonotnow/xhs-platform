@@ -1010,9 +1010,6 @@
   font-size: 1.125rem;
 }
 
-.handoffHeading p,
-.assetAction p,
-.experimental p,
 .handoffMissingNotice {
   margin: 0 0 14px;
   color: #713f12;
@@ -1027,6 +1024,9 @@
   overflow-wrap: anywhere;
 }
 
+.handoffHeading p,
+.assetAction p,
+.experimental p,
 .backfillNotice {
   margin: 5px 0 0;
   font-size: 0.8125rem;
