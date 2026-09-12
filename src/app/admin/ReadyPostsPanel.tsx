@@ -370,9 +370,11 @@ function manualReconciliationStatusCopy(
 export default function ReadyPostsPanel({
   workspaceId,
   initialNotionPageId,
+  onNotionPageIdChange,
 }: {
   workspaceId: string;
   initialNotionPageId?: string;
+  onNotionPageIdChange?: (notionPageId: string) => void;
 }) {
   const [posts, setPosts] = useState<ReadyXhsPost[]>([]);
   const [jobs, setJobs] = useState<LocalPublishJobSummary[]>([]);
@@ -1150,6 +1152,7 @@ export default function ReadyPostsPanel({
         type="button"
         onClick={() => {
           setSelectedId(post.id);
+          onNotionPageIdChange?.(post.id);
           setError('');
         }}
       >

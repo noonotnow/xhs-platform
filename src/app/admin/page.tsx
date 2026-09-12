@@ -71,6 +71,16 @@ export default function AdminPage() {
     'Content-Type': 'application/json',
   };
 
+  const updateSelectedNotionPageId = useCallback((notionPageId: string) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set('notionPageId', notionPageId);
+    window.history.replaceState(
+      window.history.state,
+      '',
+      `${url.pathname}${url.search}${url.hash}`,
+    );
+  }, []);
+
   async function checkSession() {
     const path = '/admin/api/xhs/session';
     try {
@@ -457,6 +467,7 @@ export default function AdminPage() {
       <ReadyPostsPanel
           workspaceId={LEGACY_LOCAL_PUBLISH_WORKSPACE_ID}
           initialNotionPageId={requestedNotionPageId}
+          onNotionPageIdChange={updateSelectedNotionPageId}
         />
 
       <details style={{ marginBottom: 24, padding: 16, background: '#f7f7f5', borderRadius: 10, border: '1px solid #d8d8d3' }}>
