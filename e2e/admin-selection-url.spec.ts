@@ -71,7 +71,7 @@ function expectBrowserSafeSelectionUrl(urlString: string, selectedId: string) {
 
   expect(url.pathname).toBe('/admin');
   expect(url.hash).toBe('#ready-posts-heading');
-  expect([...url.searchParams.entries()]).toEqual([
+  expect(Array.from(url.searchParams.entries())).toEqual([
     ['view', 'ready'],
     ['campaign', 'fall-launch'],
     ['notionPageId', selectedId],
