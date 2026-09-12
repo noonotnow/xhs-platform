@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useRef, useCallback } from 'react';
-import { useSearchParams } from 'next/navigation';
 import ReadyPostsPanel from './ReadyPostsPanel';
 import { responseJson } from '@/lib/response-json';
 import {
@@ -29,8 +28,10 @@ function formatFileSize(bytes: number): string {
 }
 
 export default function AdminPage() {
-  const searchParams = useSearchParams();
-  const requestedNotionPageId = searchParams.get('notionPageId')?.trim() || undefined;
+  const [requestedNotionPageId] = useState(() => {
+    if (typeof window === 'undefined') return undefined;
+    return new URLSearchParams(window.location.search).get('notionPageId')?.trim() || undefined;
+  });
   const [cookieStr, setCookieStr] = useState('');
   const [sessionValid, setSessionValid] = useState<boolean | null>(null);
   const [publishForm, setPublishForm] = useState({
