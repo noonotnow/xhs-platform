@@ -3,6 +3,7 @@ import {
   READY_POSTS_PANEL_FEATURES,
   readyPostMediaPreview,
   readyPostRecoveryAction,
+  resolveReadyPostSelection,
 } from '@/lib/ready-posts-panel-features';
 import {
   BROWSER_CLOSED_PRE_PUBLISH_CONFIRMATION,
@@ -12,6 +13,15 @@ import type {
 } from '@/types/local-publish-job';
 
 describe('Ready posts panel feature visibility', () => {
+  it('opens the matching Notion record from a browser-safe deep link', () => {
+    const posts = [{ id: 'first' }, { id: 'matching-notion-page' }];
+
+    expect(resolveReadyPostSelection(posts, 'first', 'matching-notion-page'))
+      .toBe('matching-notion-page');
+    expect(resolveReadyPostSelection(posts, 'first', 'missing')).toBe('first');
+    expect(resolveReadyPostSelection(posts, '', 'missing')).toBe('first');
+  });
+
   it('shows bounded batch approval without restoring legacy execution audits', () => {
     expect(READY_POSTS_PANEL_FEATURES).toEqual({
       boundedBatchApproval: true,

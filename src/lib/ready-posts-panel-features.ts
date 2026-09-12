@@ -17,6 +17,18 @@ export const READY_POSTS_PANEL_FEATURES = {
   legacyExecutionAudits: false,
 } as const;
 
+export function resolveReadyPostSelection(
+  posts: ReadonlyArray<{ id: string }>,
+  currentId: string,
+  requestedNotionPageId?: string,
+) {
+  if (requestedNotionPageId && posts.some((post) => post.id === requestedNotionPageId)) {
+    return requestedNotionPageId;
+  }
+  if (posts.some((post) => post.id === currentId)) return currentId;
+  return posts[0]?.id ?? '';
+}
+
 export type ReadyPostMediaChoice = {
   type: LocalPublishMediaType;
   index: number;

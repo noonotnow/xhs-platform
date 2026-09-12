@@ -50,6 +50,7 @@ import {
   READY_POSTS_PANEL_FEATURES,
   readyPostMediaPreview,
   readyPostRecoveryAction,
+  resolveReadyPostSelection,
   type ReadyPostMediaChoice,
 } from '@/lib/ready-posts-panel-features';
 import {
@@ -365,7 +366,13 @@ function manualReconciliationStatusCopy(
   };
 }
 
-export default function ReadyPostsPanel({ workspaceId }: { workspaceId: string }) {
+export default function ReadyPostsPanel({
+  workspaceId,
+  initialNotionPageId,
+}: {
+  workspaceId: string;
+  initialNotionPageId?: string;
+}) {
   const [posts, setPosts] = useState<ReadyXhsPost[]>([]);
   const [jobs, setJobs] = useState<LocalPublishJobSummary[]>([]);
   const [successAttestationCandidates, setSuccessAttestationCandidates] = useState<
@@ -393,7 +400,7 @@ export default function ReadyPostsPanel({ workspaceId }: { workspaceId: string }
   const [manualHandlingMode, setManualHandlingMode] =
     useState<ManualHandlingMode>('scheduled');
   const [manualHandlingSubmitting, setManualHandlingSubmitting] = useState(false);
-  const [selectedId, setSelectedId] = useState('');
+  const [selectedId, setSelectedId] = useState(initialNotionPageId ?? '');
   const [loading, setLoading] = useState(true);
   const [queueing, setQueueing] = useState(false);
   const [error, setError] = useState('');
@@ -536,14 +543,14 @@ export default function ReadyPostsPanel({ workspaceId }: { workspaceId: string }
       setPosts(data.posts);
       setWarnings(data.warnings);
       setSelectedId((current) =>
-        data.posts.some((post) => post.id === current) ? current : data.posts[0]?.id ?? '',
+        resolveReadyPostSelection(data.posts, current, initialNotionPageId),
       );
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : 'Failed to load ready posts');
     } finally {
       setLoading(false);
     }
-  }, [workspaceId]);
+  }, [initialNotionPageId, workspaceId]);
 
   const loadBatches = useCallback(async () => {
     try {

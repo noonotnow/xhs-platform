@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useRef, useCallback } from 'react';
+import { useSearchParams } from 'next/navigation';
 import ReadyPostsPanel from './ReadyPostsPanel';
 import { responseJson } from '@/lib/response-json';
 import {
@@ -28,6 +29,8 @@ function formatFileSize(bytes: number): string {
 }
 
 export default function AdminPage() {
+  const searchParams = useSearchParams();
+  const requestedNotionPageId = searchParams.get('notionPageId')?.trim() || undefined;
   const [cookieStr, setCookieStr] = useState('');
   const [sessionValid, setSessionValid] = useState<boolean | null>(null);
   const [publishForm, setPublishForm] = useState({
@@ -450,7 +453,10 @@ export default function AdminPage() {
         </section>
       </details>
 
-      <ReadyPostsPanel workspaceId={LEGACY_LOCAL_PUBLISH_WORKSPACE_ID} />
+      <ReadyPostsPanel
+          workspaceId={LEGACY_LOCAL_PUBLISH_WORKSPACE_ID}
+          initialNotionPageId={requestedNotionPageId}
+        />
 
       <details style={{ marginBottom: 24, padding: 16, background: '#f7f7f5', borderRadius: 10, border: '1px solid #d8d8d3' }}>
         <summary style={{ cursor: 'pointer', fontWeight: 700 }}>
