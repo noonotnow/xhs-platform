@@ -28,6 +28,10 @@ function formatFileSize(bytes: number): string {
 }
 
 export default function AdminPage() {
+  const [requestedNotionPageId] = useState(() => {
+    if (typeof window === 'undefined') return undefined;
+    return new URLSearchParams(window.location.search).get('notionPageId')?.trim() || undefined;
+  });
   const [cookieStr, setCookieStr] = useState('');
   const [sessionValid, setSessionValid] = useState<boolean | null>(null);
   const [publishForm, setPublishForm] = useState({
@@ -450,7 +454,10 @@ export default function AdminPage() {
         </section>
       </details>
 
-      <ReadyPostsPanel workspaceId={LEGACY_LOCAL_PUBLISH_WORKSPACE_ID} />
+      <ReadyPostsPanel
+          workspaceId={LEGACY_LOCAL_PUBLISH_WORKSPACE_ID}
+          initialNotionPageId={requestedNotionPageId}
+        />
 
       <details style={{ marginBottom: 24, padding: 16, background: '#f7f7f5', borderRadius: 10, border: '1px solid #d8d8d3' }}>
         <summary style={{ cursor: 'pointer', fontWeight: 700 }}>
