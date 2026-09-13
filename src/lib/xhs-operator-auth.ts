@@ -8,6 +8,7 @@ function checkOperatorToken(headers: Headers): OperatorTokenCheck {
   const configured = [
     process.env.XHS_PLATFORM_OPERATOR_TOKEN?.trim(),
     process.env.XHS_PLATFORM_API_TOKEN?.trim(),
+    process.env.XHS_PLATFORM_ACCEPTANCE_TOKEN?.trim(),
   ].filter((token): token is string => Boolean(token));
   const configuredTokens = configured.filter(
     (token, index) => configured.indexOf(token) === index,
