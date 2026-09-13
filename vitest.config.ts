@@ -8,10 +8,11 @@ export default defineConfig({
     enforce: 'pre',
     async transform(code, id) {
       if (!id.endsWith('.tsx')) return;
-      return transformWithEsbuild(code, id, {
+      const result = await transformWithEsbuild(code, id, {
         loader: 'tsx',
         jsx: 'automatic',
       });
+      return { code: result.code, map: JSON.stringify(result.map) };
     },
   }],
   resolve: {
