@@ -24,6 +24,15 @@ describe('admin middleware', () => {
     expect(validateCloudflareAccessRequest).not.toHaveBeenCalled();
   });
 
+  it('lets PLAN execution reach its route-level bearer authentication', async () => {
+    const response = await middleware(new NextRequest(
+      'https://xhs.justlikekatie.com/admin/api/plan-execution?notionPageId=post-1',
+    ));
+
+    expect(response.headers.get('x-middleware-next')).toBe('1');
+    expect(validateCloudflareAccessRequest).not.toHaveBeenCalled();
+  });
+
   it('keeps the human admin UI behind Cloudflare identity validation', async () => {
     validateCloudflareAccessRequest.mockResolvedValue({ email: 'operator@example.com' });
 
