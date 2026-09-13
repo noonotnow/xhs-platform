@@ -5,6 +5,7 @@ const MACHINE_API_PREFIXES = [
   '/admin/api/local-publish-jobs',
   '/admin/api/rednote-publish-attempts',
   '/admin/api/manual-reconciliations',
+  '/admin/api/plan-execution',
 ];
 
 function isMachineApi(pathname: string) {
