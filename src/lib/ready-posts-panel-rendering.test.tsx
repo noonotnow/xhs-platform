@@ -101,4 +101,196 @@ describe('ReadyPostsPanel handoff notice', () => {
     );
     expect(mutationRequests).toEqual([]);
   });
+
+  it('prepares only the selected Post and leaves approval as a separate action', async () => {
+    const scheduledPost = {
+      ...readyPost,
+      scheduledDate: '2099-09-12T14:00:00.000Z',
+      publishAt: '2099-09-12T14:00:00.000Z',
+    };
+    const preparedBatch = {
+      id: 'prepared-batch',
+      workspaceId: 'workspace-test',
+      kind: 'on_demand',
+      status: 'pending_approval',
+      manifestHash: 'manifest-on-demand-1',
+      createdAt: '2099-09-12T12:00:00.000Z',
+      items: [{
+        id: 'prepared-item',
+        notionPageId: readyPost.id,
+        snapshot: {
+          notionPageId: readyPost.id,
+          headline: readyPost.headline,
+          title: readyPost.headline,
+          caption: readyPost.caption,
+          tags: readyPost.tags,
+          platform: 'RedNote',
+          mediaType: 'image',
+          mediaIndex: 0,
+          mediaUrl: 'https://example.com/image.jpg',
+          publishAt: scheduledPost.publishAt,
+          notionLastEditedTime: '2099-09-11T12:00:00.000Z',
+          expectedAccountId: 'account-1',
+        },
+        itemHash: 'item-on-demand-1',
+        state: 'needs_approval',
+        dispatchMode: 'scheduled',
+        lateBySeconds: 0,
+      }],
+      blockedCandidates: [],
+    };
+    const responses: Record<string, unknown> = {
+      '/admin/api/ready-posts': { posts: [scheduledPost], warnings: [] },
+      '/admin/api/local-publish-jobs': {
+        jobs: [],
+        successAttestationCandidates: [],
+      },
+      '/admin/api/external-post-reconciliations': { reconciliations: [] },
+      '/admin/api/manual-reconciliations': { reconciliations: [] },
+      '/admin/api/publish-batches': { batches: [] },
+    };
+    const requestSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async (input, init) => {
+        const path = String(input);
+        if (init?.method === 'POST' && path === '/admin/api/publish-batches') {
+          responses['/admin/api/publish-batches'] = { batches: [preparedBatch] };
+          return new Response(JSON.stringify({
+            batch: preparedBatch,
+          }), {
+            status: 201,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (!(path in responses)) {
+          throw new Error(`Unexpected request: ${init?.method ?? 'GET'} ${path}`);
+        }
+        return new Response(JSON.stringify(responses[path]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      },
+    );
+
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(createElement(ReadyPostsPanel, {
+        workspaceId: 'workspace-test',
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const prepareButton = Array.from(container.querySelectorAll('button'))
+      .find((button) => button.textContent === 'Prepare selected review candidate');
+    expect(prepareButton).toBeDefined();
+    await act(async () => {
+      prepareButton?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const mutationRequests = requestSpy.mock.calls.filter(([, init]) =>
+      init?.method === 'POST',
+    );
+    expect(mutationRequests).toHaveLength(1);
+    expect(JSON.parse(String(mutationRequests[0][1]?.body))).toEqual({
+      action: 'prepare',
+      notionPageId: readyPost.id,
+    });
+    expect(container.textContent).toContain('manifest-on-demand-1');
+    expect(container.textContent).toContain('Approve this exact manifest');
+    expect(container.textContent).toContain(
+      'Preparing the selected Post only creates a review candidate',
+    );
+    expect(container.textContent).toContain(
+      'Bootstrap is a separate recovery/setup workflow',
+    );
+  });
+
+  it('keeps the approved bootstrap ledger visible when another Post is selected', async () => {
+    const otherPost = {
+      ...readyPost,
+      id: 'other-notion-page',
+      headline: 'Other post',
+    };
+    const approvedBootstrapBatch = {
+      id: 'approved-bootstrap-batch',
+      workspaceId: 'workspace-test',
+      kind: 'bootstrap',
+      status: 'approved',
+      manifestHash: 'approved-bootstrap-manifest',
+      createdAt: '2099-09-12T12:00:00.000Z',
+      approvedAt: '2099-09-12T12:05:00.000Z',
+      approvedBy: 'operator@example.com',
+      items: [{
+        id: 'approved-bootstrap-item',
+        notionPageId: readyPost.id,
+        snapshot: {
+          notionPageId: readyPost.id,
+          headline: readyPost.headline,
+          title: readyPost.headline,
+          caption: readyPost.caption,
+          tags: readyPost.tags,
+          platform: 'RedNote',
+          mediaType: 'image',
+          mediaIndex: 0,
+          mediaUrl: 'https://example.com/image.jpg',
+          publishAt: '2099-09-12T14:00:00.000Z',
+          notionLastEditedTime: readyPost.lastEditedTime,
+          expectedAccountId: 'account-1',
+        },
+        itemHash: 'approved-bootstrap-item-hash',
+        state: 'scheduled',
+        dispatchMode: 'scheduled',
+        lateBySeconds: 0,
+      }],
+      blockedCandidates: [],
+    };
+    const responses: Record<string, unknown> = {
+      '/admin/api/ready-posts': { posts: [readyPost, otherPost], warnings: [] },
+      '/admin/api/local-publish-jobs': {
+        jobs: [],
+        successAttestationCandidates: [],
+      },
+      '/admin/api/external-post-reconciliations': { reconciliations: [] },
+      '/admin/api/manual-reconciliations': { reconciliations: [] },
+      '/admin/api/publish-batches': { batches: [approvedBootstrapBatch] },
+    };
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const path = String(input);
+      if (!(path in responses)) {
+        throw new Error(`Unexpected request: GET ${path}`);
+      }
+      return new Response(JSON.stringify(responses[path]), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(createElement(ReadyPostsPanel, {
+        workspaceId: 'workspace-test',
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('Active scheduled batch');
+    const otherPostButton = Array.from(container.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes(otherPost.headline));
+    expect(otherPostButton).toBeDefined();
+
+    await act(async () => {
+      otherPostButton?.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('Active scheduled batch');
+    expect(container.textContent).toContain('approved-boo');
+  });
 });

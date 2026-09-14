@@ -4,17 +4,23 @@ import { NextRequest } from 'next/server';
 const mocks = vi.hoisted(() => ({
   validateAccess: vi.fn(),
   create: vi.fn(),
+  prepare: vi.fn(),
   approve: vi.fn(),
   list: vi.fn(),
 }));
 vi.mock('@/lib/cloudflare-access', () => ({
   validateCloudflareAccessRequest: mocks.validateAccess,
 }));
-vi.mock('@/lib/rednote-publish-batches', () => ({
-  createPublishBatch: mocks.create,
-  approvePublishBatch: mocks.approve,
-  listPublishBatches: mocks.list,
-}));
+vi.mock('@/lib/rednote-publish-batches', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@/lib/rednote-publish-batches')>();
+  return {
+    ...original,
+    createPublishBatch: mocks.create,
+    preparePublishBatch: mocks.prepare,
+    approvePublishBatch: mocks.approve,
+    listPublishBatches: mocks.list,
+  };
+});
 
 import { POST } from '@/app/api/xhs/publish-batches/route';
 
@@ -33,7 +39,27 @@ describe('publish batch route', () => {
     vi.clearAllMocks();
     mocks.validateAccess.mockResolvedValue({ email: 'operator@example.com' });
     mocks.create.mockResolvedValue({ id: 'batch' });
+    mocks.prepare.mockResolvedValue({ id: 'prepared-batch', status: 'pending_approval' });
     mocks.approve.mockResolvedValue({ id: 'batch', status: 'approved' });
+  });
+
+  it('prepares exactly one explicitly selected canonical Post without approving it', async () => {
+    const missing = await POST(request({ action: 'prepare' }));
+    expect(missing.status).toBe(400);
+    expect(mocks.prepare).not.toHaveBeenCalled();
+
+    const response = await POST(request({
+      action: 'prepare',
+      notionPageId: '  selected-page-id  ',
+    }));
+
+    expect(response.status).toBe(201);
+    expect(mocks.prepare).toHaveBeenCalledWith(
+      'selected-page-id',
+      'legacy-local-publish',
+    );
+    expect(mocks.create).not.toHaveBeenCalled();
+    expect(mocks.approve).not.toHaveBeenCalled();
   });
 
   it('rejects a selected-card batch request without a workspace header', async () => {

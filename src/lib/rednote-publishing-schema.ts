@@ -22,6 +22,7 @@ export const REDNOTE_SCHEMA_MIGRATIONS = [
   '034',
   '035',
   '036',
+  '037',
 ] as const;
 export type RednoteSchemaMigration = (typeof REDNOTE_SCHEMA_MIGRATIONS)[number];
 export type RednoteSchemaReadiness = Record<RednoteSchemaMigration, boolean>;
@@ -90,6 +91,7 @@ const migrationFiles: Record<RednoteSchemaMigration, readonly string[]> = {
   '034': ['034_recover_schedule_readback_mismatch.sql'],
   '035': ['035_recover_browser_closed_pre_publish.sql'],
   '036': ['036_allow_stable_browser_closed_pre_publish.sql'],
+  '037': ['037_on_demand_publish_batches.sql'],
 };
 
 const READINESS_SQL = `
@@ -232,6 +234,12 @@ const READINESS_SQL = `
         'constraint_value',
         'rednote_publish_job_recoveries',
         'BROWSER_CLOSED_PRE_PUBLISH'
+      ),
+      (
+        '037',
+        'constraint_value',
+        'rednote_publish_batches',
+        'on_demand'
       )
   )
   SELECT

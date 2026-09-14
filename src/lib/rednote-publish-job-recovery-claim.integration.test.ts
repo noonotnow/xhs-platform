@@ -111,6 +111,7 @@ const MIGRATIONS = [
   '034_recover_schedule_readback_mismatch.sql',
   '035_recover_browser_closed_pre_publish.sql',
   '036_allow_stable_browser_closed_pre_publish.sql',
+  '037_on_demand_publish_batches.sql',
 ] as const;
 
 const EXACT_JOB_ID = 'c6203283-be7d-46ce-a38b-9a7f90eef75d';
