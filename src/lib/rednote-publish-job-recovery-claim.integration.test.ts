@@ -61,7 +61,10 @@ import {
   recoverStoredBrowserClosedPrePublishJob,
 } from '@/lib/rednote-publish-job-recovery-store';
 import {
+  BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
   BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
+  LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
+  LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
 } from '@/lib/rednote-publish-job-recovery-contract';
 import { listStoredPublishBatches } from '@/lib/rednote-publish-batch-store';
 import {
@@ -107,6 +110,7 @@ const MIGRATIONS = [
   '033_rejected_worker_result_recovery_evidence.sql',
   '034_recover_schedule_readback_mismatch.sql',
   '035_recover_browser_closed_pre_publish.sql',
+  '036_allow_stable_browser_closed_pre_publish.sql',
 ] as const;
 
 const EXACT_JOB_ID = 'c6203283-be7d-46ce-a38b-9a7f90eef75d';
@@ -535,8 +539,8 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
       revision: EXACT_REVISION,
       notionPageId: 'page-day-16-exact-recovery',
       workspaceId: 'legacy-local-publish',
-      errorCode: 'INTERNAL_ERROR',
-      errorMessage: BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
+      errorCode: LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
+      errorMessage: LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
     });
     const historicalAttemptId = await insertHistoricalEvidenceFixture();
     const historicalBefore = await database.query<Record<string, unknown>>(
@@ -658,7 +662,7 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
     )).toMatchObject({
       rows: [{
         prior_error_code: 'INTERNAL_ERROR',
-        prior_error_message: BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
+        prior_error_message: LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
       }],
     });
     expect(await countRows(
@@ -804,6 +808,60 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
       [historicalAttemptId],
     )).rows).toEqual(evidenceBefore.rows);
   }, 30_000);
+
+  it('persists and recovers the stable pre-publish browser-closed evidence', async () => {
+    const jobId = '51ef3ed6-b6e5-4a70-aef7-460d84c45604';
+    const itemId = '587c9f10-6f7d-42f6-a28c-2d13fae8a73d';
+    const fixture = await insertRecoverableFixture({
+      jobId,
+      batchItemId: itemId,
+      revision: '2026-08-05T17:04:33.000Z',
+      notionPageId: 'page-stable-browser-closed-recovery',
+      workspaceId: 'legacy-local-publish',
+      errorCode: BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
+      errorMessage: BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
+    });
+
+    expect((await listStoredPublishBatches(
+      fixture.workspaceId,
+      fixture.batchId,
+    ))[0].items[0].recoveryEvidence).toEqual({
+      ...fixture.input,
+      recoveryKind: 'browser_closed_pre_publish',
+      priorErrorCode: BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
+      claimAttempts: 1,
+    });
+
+    await expect(recoverStoredBrowserClosedPrePublishJob(
+      fixture.input,
+      RECOVERED_BY,
+    )).resolves.toMatchObject({
+      jobId,
+      itemId,
+      priorClaimAttempts: 1,
+      alreadyRecovered: false,
+    });
+    expect(await database.query<{
+      prior_error_code: string;
+      prior_error_message: string;
+    }>(
+      `SELECT prior_error_code, prior_error_message
+       FROM rednote_publish_job_recoveries
+       WHERE local_publish_job_id = $1`,
+      [jobId],
+    )).toMatchObject({
+      rows: [{
+        prior_error_code: BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
+        prior_error_message: BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
+      }],
+    });
+    expect(await database.query<{ status: string; error_code: string | null }>(
+      `SELECT status, error_code FROM local_publish_jobs WHERE id = $1`,
+      [jobId],
+    )).toMatchObject({
+      rows: [{ status: 'queued', error_code: null }],
+    });
+  });
 
   it('projects and recovers an exact pre-dispatch schedule readback mismatch', async () => {
     const fixture = await insertRecoverableFixture({

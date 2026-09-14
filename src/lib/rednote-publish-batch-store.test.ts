@@ -24,6 +24,12 @@ import {
   listStoredPublishBatches,
   storedManifestHash,
 } from '@/lib/rednote-publish-batch-store';
+import {
+  BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
+  BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
+  LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
+  LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
+} from '@/lib/rednote-publish-job-recovery-contract';
 import type {
   LocalPublishSnapshot,
   PublishBatchStatus,
@@ -454,15 +460,30 @@ describe('stored RedNote bootstrap replacement', () => {
       .mockResolvedValueOnce({
         rows: [{
           ...item,
-          recovery_job_error_code: 'INTERNAL_ERROR',
-          recovery_job_error_message:
-            'page.waitForTimeout: Target page, context or browser has been closed',
+          recovery_job_error_code: LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
+          recovery_job_error_message: LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
         }],
       });
     const browserClosed = await listStoredPublishBatches('workspace-1', batchId);
     expect(browserClosed[0].items[0].recoveryEvidence).toMatchObject({
       recoveryKind: 'browser_closed_pre_publish',
-      priorErrorCode: 'INTERNAL_ERROR',
+      priorErrorCode: LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
+      claimAttempts: 1,
+    });
+
+    mocks.sql
+      .mockResolvedValueOnce({ rows: [batchRow(batchId, 'approved', hash)] })
+      .mockResolvedValueOnce({
+        rows: [{
+          ...item,
+          recovery_job_error_code: BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
+          recovery_job_error_message: BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
+        }],
+      });
+    const stableBrowserClosed = await listStoredPublishBatches('workspace-1', batchId);
+    expect(stableBrowserClosed[0].items[0].recoveryEvidence).toMatchObject({
+      recoveryKind: 'browser_closed_pre_publish',
+      priorErrorCode: BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
       claimAttempts: 1,
     });
 

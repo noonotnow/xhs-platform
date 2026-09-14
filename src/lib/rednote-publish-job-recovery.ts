@@ -4,6 +4,8 @@ import {
   BROWSER_CLOSED_PRE_PUBLISH_CONFIRMATION,
   BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
   BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
+  LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
+  LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
 } from '@/lib/rednote-publish-job-recovery-contract';
 import type { LocalPublishSnapshot } from '@/types/local-publish-job';
 
@@ -155,8 +157,13 @@ export function isExactBrowserClosedPrePublishFailure(
   errorMessage: string | null | undefined,
 ) {
   return (
-    errorCode === BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE &&
-    errorMessage === BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE
+    (
+      errorCode === BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE &&
+      errorMessage === BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE
+    ) || (
+      errorCode === LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE &&
+      errorMessage === LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE
+    )
   );
 }
 

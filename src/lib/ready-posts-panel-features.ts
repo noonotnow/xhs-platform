@@ -96,8 +96,13 @@ export function readyPostRecoveryAction(
 ) {
   const browserClosed =
     evidence.recoveryKind === 'browser_closed_pre_publish';
+  const stableBrowserClosed =
+    browserClosed &&
+    evidence.priorErrorCode === 'BROWSER_CLOSED_PRE_PUBLISH';
   const reason = browserClosed
-    ? 'Browser closed during approved pre-Publish media loading'
+    ? stableBrowserClosed
+      ? 'Browser closed before any Publish activation'
+      : 'Browser closed during approved pre-Publish media loading'
     : evidence.priorErrorCode === 'AMBIGUOUS_CREATOR_UI'
       ? 'Fixed image-mode pre-staging hydration failure'
       : evidence.priorErrorCode === 'NOT_LOGGED_IN'
@@ -111,7 +116,9 @@ export function readyPostRecoveryAction(
       : true,
     reason,
     failureDetail: browserClosed
-      ? 'Recorded failure: the browser closed while loading approved media before Publish.\n'
+      ? stableBrowserClosed
+        ? 'Recorded failure: the browser closed before any Publish activation.\n'
+        : 'Recorded failure: the browser closed while loading approved media before Publish.\n'
       : evidence.priorErrorCode === 'AMBIGUOUS_CREATOR_UI'
         ? 'Fixed failure: image-mode pre-staging hydration could not uniquely identify the upload mode.\n'
         : evidence.priorErrorCode === 'NOT_LOGGED_IN'

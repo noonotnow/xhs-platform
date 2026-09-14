@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import type { LocalPublishJobSummary, PublishBatch } from '@/types/local-publish-job';
+import type {
+  LocalPublishJobSummary,
+  PublishBatch,
+  RednotePublishJobRecoveryEvidence,
+} from '@/types/local-publish-job';
 import { projectPlanExecution } from '@/lib/plan-execution-projection';
+import {
+  BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
+  BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
+} from '@/lib/rednote-publish-job-recovery-contract';
 
 function job(values: Partial<LocalPublishJobSummary> = {}): LocalPublishJobSummary {
   return {
@@ -65,6 +73,39 @@ describe('PLAN execution projection', () => {
       retryEligible: true,
       publicationRuledOut: true,
       recoveryEvidence: recovery,
+    });
+  });
+
+  it('projects stable pre-publish closure evidence as retryable', () => {
+    const stableRecovery: RednotePublishJobRecoveryEvidence = {
+      ...recovery,
+      recoveryKind: 'browser_closed_pre_publish' as const,
+      priorErrorCode: BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
+    };
+    const stableBatches = batches();
+    stableBatches[0].items[0].recoveryEvidence = stableRecovery;
+
+    expect(projectPlanExecution('page-1', [job({
+      status: 'failed',
+      errorCode: BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
+      errorMessage: BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
+    })], stableBatches)).toMatchObject({
+      state: 'failed_recoverable_pre_publish',
+      retryEligible: true,
+      publicationRuledOut: true,
+      recoveryEvidence: stableRecovery,
+    });
+  });
+
+  it('does not infer retryability from closure evidence after Publish activation', () => {
+    expect(projectPlanExecution('page-1', [job({
+      status: 'failed',
+      errorCode: 'BROWSER_CLOSED_AFTER_PUBLISH',
+      errorMessage: 'Creator browser closed after Publish activation',
+    })], [])).toMatchObject({
+      state: 'failed_not_recoverable',
+      retryEligible: false,
+      publicationRuledOut: false,
     });
   });
 
