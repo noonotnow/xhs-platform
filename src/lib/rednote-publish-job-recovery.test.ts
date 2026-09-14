@@ -190,6 +190,7 @@ describe('bounded publish job recovery validation', () => {
         BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
       ],
       [BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE, 'Creator browser closed before publish activation'],
+      [BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE, 'Creator browser closed after publish activation'],
     ] as const) {
       expect(isExactBrowserClosedPrePublishFailure(jobErrorCode, jobErrorMessage)).toBe(false);
       expect(() => validateRecoveryCandidate(

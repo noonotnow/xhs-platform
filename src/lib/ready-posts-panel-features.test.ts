@@ -82,6 +82,17 @@ describe('Ready posts panel feature visibility', () => {
       idleLabel: 'Confirm browser-closed recovery',
       busyLabel: 'Recovering browser-closed job…',
     });
+    expect(readyPostRecoveryAction({
+      ...evidence,
+      priorErrorCode: 'BROWSER_CLOSED_PRE_PUBLISH',
+    })).toEqual({
+      confirmation: BROWSER_CLOSED_PRE_PUBLISH_CONFIRMATION,
+      reason: 'Browser closed before any Publish activation',
+      failureDetail:
+        'Recorded failure: the browser closed before any Publish activation.\n',
+      idleLabel: 'Confirm browser-closed recovery',
+      busyLabel: 'Recovering browser-closed job…',
+    });
     expect(readyPostRecoveryAction(
       { ...evidence, recoveryKind: 'standard', priorErrorCode: 'NOT_LOGGED_IN' },
     )).toMatchObject({
