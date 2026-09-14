@@ -1,10 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
   claimNextLocalPublishJob,
+  claimActivatedLocalPublishJob,
   normalizeLocalPublishJobError,
   validateExpectedVerificationJobId,
 } from '@/lib/local-publish-jobs';
-import { requireLocalPublishWorker } from '@/lib/local-publish-worker-auth';
+import {
+  parseLocalPublishWorkerId,
+  requireLocalPublishWorker,
+} from '@/lib/local-publish-worker-auth';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
 import type { LocalPublishWorkLane } from '@/types/local-publish-job';
 import { parseWorkspaceId } from '@/lib/workspace-id';
@@ -33,10 +37,16 @@ export async function GET(request: NextRequest) {
       );
     }
     const expectedJobIds = request.nextUrl.searchParams.getAll('expectedJobId');
+    const activationIds = request.nextUrl.searchParams.getAll('activationId');
+    const nonces = request.nextUrl.searchParams.getAll('nonce');
     const expectedJobId = expectedJobIds[0];
-    if (expectedJobIds.length > 1) {
+    if (
+      expectedJobIds.length > 1
+      || activationIds.length > 1
+      || nonces.length > 1
+    ) {
       throw new LocalPublishJobError(
-        'expectedJobId must be one exact UUID',
+        'Activation selectors must each occur exactly once',
         'VALIDATION_ERROR',
         400,
       );
@@ -50,10 +60,29 @@ export async function GET(request: NextRequest) {
         400,
       );
     }
-    if (expectedJobId !== undefined) {
+    const activationId = activationIds[0];
+    const nonce = nonces[0];
+    const hasActivationSelector = activationId !== undefined || nonce !== undefined;
+    if (expectedJobId !== undefined && !hasActivationSelector) {
       validateExpectedVerificationJobId(lane, expectedJobId);
     }
-    const job = expectedJobId
+    if (hasActivationSelector && expectedJobId === undefined) {
+      throw new LocalPublishJobError(
+        'Activation dispatch requires expectedJobId',
+        'VALIDATION_ERROR',
+        400,
+      );
+    }
+    const job = hasActivationSelector
+      ? await claimActivatedLocalPublishJob(
+        { lane, expectedJobId, activationId, nonce },
+        workspaceId,
+        claimToken,
+        parseLocalPublishWorkerId(
+          request.headers.get('x-local-publish-worker-id'),
+        ),
+      )
+      : expectedJobId
       ? await claimNextLocalPublishJob(lane, expectedJobId, workspaceId, claimToken)
       : await claimNextLocalPublishJob(lane, undefined, workspaceId, claimToken);
     if (!job) {

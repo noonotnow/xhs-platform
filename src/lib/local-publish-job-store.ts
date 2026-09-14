@@ -520,12 +520,22 @@ export async function claimNextStoredLocalPublishJob(
         AND (
         (
           ${lane} IN ('all', 'dispatch')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM local_publish_dispatch_activations AS dispatch_hold
+            WHERE dispatch_hold.state IN ('active', 'consumed')
+          )
           AND status = 'claimed'
           AND claim_token = ${claimToken}::uuid
           AND claim_expires_at > CURRENT_TIMESTAMP
         )
         OR (
           ${lane} IN ('all', 'dispatch')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM local_publish_dispatch_activations AS dispatch_hold
+            WHERE dispatch_hold.state IN ('active', 'consumed')
+          )
           AND status = 'queued'
           AND EXISTS (
             SELECT 1
@@ -656,6 +666,238 @@ export async function claimNextStoredLocalPublishJob(
   const row = result.rows[0];
   if (!row?.claim_token || !row.claim_expires_at) return null;
   return claimedResponse(row);
+}
+
+export async function claimExactActivatedStoredLocalPublishJob(
+  leaseSeconds: number,
+  workspaceId: string,
+  expectedJobId: string,
+  activationId: string,
+  nonceDigest: string,
+  claimToken: string,
+  authenticatedWorkerId: string,
+): Promise<ClaimedLocalPublishJob & {
+  dispatchActivation: {
+    id: string;
+    generation: number;
+    consumedAt: string;
+    releaseRequired: true;
+  };
+}> {
+  const client = await getPool().connect();
+  let claimed: LocalPublishJobRow | undefined;
+  let generation = 0;
+  let consumedAt: Date | string | undefined;
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      "SELECT pg_advisory_xact_lock(hashtextextended('local-publish-dispatch-activation', 0))",
+    );
+    const target = await client.query<{
+      generation: number;
+      worker_id: string;
+    } & QueryResultRow>(
+      `SELECT activation.generation, activation.expected_worker_id AS worker_id
+       FROM local_publish_dispatch_activations activation
+       JOIN local_publish_jobs job
+         ON job.id = activation.local_publish_job_id
+        AND job.workspace_id = activation.workspace_id
+       JOIN rednote_publish_batch_items item
+         ON item.id = activation.batch_item_id
+        AND item.id = job.batch_item_id
+        AND item.batch_id = activation.batch_id
+        AND item.local_publish_job_id = job.id
+        AND item.item_hash = activation.item_hash
+        AND terminal_expired_batch_claim_digest(item.snapshot) =
+          activation.item_hash
+        AND terminal_expired_batch_claim_digest(job.snapshot) =
+          activation.item_hash
+       JOIN rednote_publish_batches batch
+         ON batch.id = activation.batch_id
+        AND batch.manifest_hash = activation.manifest_hash
+        AND batch.approved_at IS NOT NULL
+        AND batch.status IN ('approved', 'partially_approved')
+       JOIN local_publish_worker_heartbeats heartbeat
+         ON heartbeat.workspace_id = activation.workspace_id
+        AND heartbeat.worker_id = activation.expected_worker_id
+        AND heartbeat.contract_revision =
+          activation.expected_worker_contract_revision
+        AND heartbeat.compatibility_revision =
+          activation.expected_worker_compatibility_revision
+        AND heartbeat.lease_expires_at > CURRENT_TIMESTAMP
+       WHERE activation.id = $1::uuid
+         AND activation.local_publish_job_id = $2::uuid
+         AND activation.workspace_id = $3
+         AND activation.nonce_digest = $4
+         AND activation.expected_worker_id = $5
+         AND activation.state = 'active'
+         AND activation.expires_at > CURRENT_TIMESTAMP
+         AND job.status = 'queued'
+         AND job.snapshot->>'notionLastEditedTime' =
+           activation.source_revision
+         AND item.state = 'queued'
+       FOR UPDATE OF activation, job, item, batch, heartbeat`,
+      [
+        activationId,
+        expectedJobId,
+        workspaceId,
+        nonceDigest,
+        authenticatedWorkerId,
+      ],
+    );
+    if (!target.rows[0]) {
+      throw new LocalPublishJobError(
+        'The exact dispatch activation is not claimable',
+        'DISPATCH_ACTIVATION_NOT_CLAIMABLE',
+        409,
+      );
+    }
+    generation = target.rows[0].generation;
+    const attempt = await client.query<{
+      id: string;
+      recovery_generations: string;
+    } & QueryResultRow>(
+      `SELECT attempt.id,
+         (
+           SELECT COUNT(*)::text
+           FROM rednote_publish_recovery_attempt_generations generation
+           JOIN rednote_publish_attempts generated
+             ON generated.id = generation.recovery_attempt_id
+           WHERE generated.source_local_publish_job_id = $1::uuid
+         ) AS recovery_generations
+       FROM rednote_publish_attempts attempt
+       WHERE attempt.workspace_id = $2
+         AND attempt.source_local_publish_job_id = $1::uuid
+         AND attempt.executor_type = 'worker'
+         AND attempt.active
+         AND attempt.approved_at IS NOT NULL
+         AND attempt.terminal_outcome IS NULL
+         AND attempt.dispatch_authorized_at IS NULL
+         AND attempt.superseded_by_attempt_id IS NULL
+         AND attempt.payload_revision = (
+           SELECT source_revision
+           FROM local_publish_dispatch_activations
+           WHERE id = $3::uuid
+         )
+         AND (
+           attempt.claim_token IS NULL
+           OR attempt.claim_expires_at <= CURRENT_TIMESTAMP
+         )
+       FOR UPDATE`,
+      [expectedJobId, workspaceId, activationId],
+    );
+    if (
+      attempt.rows.length !== 1
+      || Number(attempt.rows[0].recovery_generations) !== generation
+    ) {
+      throw new LocalPublishJobError(
+        'The exact attempt generation does not match the dispatch activation',
+        'DISPATCH_ACTIVATION_GENERATION_MISMATCH',
+        409,
+      );
+    }
+    const jobs = await client.query<LocalPublishJobRow>(
+      `UPDATE local_publish_jobs
+       SET status = 'claimed',
+           claim_token = $3::uuid,
+           claim_attempts = claim_attempts + 1,
+           claimed_at = CURRENT_TIMESTAMP,
+           claim_expires_at =
+             CURRENT_TIMESTAMP + ($4 * INTERVAL '1 second'),
+           error_code = NULL,
+           error_message = NULL,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1::uuid
+         AND workspace_id = $2
+         AND status = 'queued'
+         AND external_disposition_request_id IS NULL
+       RETURNING *`,
+      [expectedJobId, workspaceId, claimToken, leaseSeconds],
+    );
+    claimed = jobs.rows[0];
+    if (!claimed?.claim_expires_at) {
+      throw new LocalPublishJobError(
+        'The exact dispatch job changed before it could be claimed',
+        'DISPATCH_ACTIVATION_NOT_CLAIMABLE',
+        409,
+      );
+    }
+    const attempts = await client.query(
+      `UPDATE rednote_publish_attempts
+       SET claim_token = $2::uuid,
+           claim_expires_at = $3
+       WHERE id = $1::uuid
+         AND active
+         AND approved_at IS NOT NULL
+         AND terminal_outcome IS NULL
+         AND dispatch_authorized_at IS NULL
+       RETURNING id`,
+      [attempt.rows[0].id, claimToken, claimed.claim_expires_at],
+    );
+    if (attempts.rowCount !== 1) {
+      throw new LocalPublishJobError(
+        'The exact publishing attempt changed before it could be claimed',
+        'DISPATCH_ACTIVATION_NOT_CLAIMABLE',
+        409,
+      );
+    }
+    const consumed = await client.query<{ consumed_at: Date | string } & QueryResultRow>(
+      `UPDATE local_publish_dispatch_activations
+       SET state = 'consumed',
+           consumed_at = CURRENT_TIMESTAMP,
+           consumed_by = $2
+       WHERE id = $1::uuid
+         AND state = 'active'
+       RETURNING consumed_at`,
+      [activationId, authenticatedWorkerId],
+    );
+    consumedAt = consumed.rows[0]?.consumed_at;
+    if (!consumedAt) {
+      throw new LocalPublishJobError(
+        'The dispatch activation was already consumed',
+        'DISPATCH_ACTIVATION_NOT_CLAIMABLE',
+        409,
+      );
+    }
+    await client.query(
+      `INSERT INTO local_publish_dispatch_activation_events (
+         activation_id, event_type, actor_type, actor_id, details
+       ) VALUES ($1::uuid, 'consumed', 'worker', $2, $3::jsonb)`,
+      [
+        activationId,
+        authenticatedWorkerId,
+        JSON.stringify({ jobId: expectedJobId, generation }),
+      ],
+    );
+    await client.query(
+      `INSERT INTO rednote_publish_attempt_events(
+         attempt_id, event_type, occurred_at, actor_type, actor_id
+       ) VALUES($1::uuid, 'worker_claimed', CURRENT_TIMESTAMP, 'worker', $2)`,
+      [attempt.rows[0].id, authenticatedWorkerId],
+    );
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+  if (!claimed || !consumedAt) {
+    throw new LocalPublishJobError(
+      'The exact dispatch activation did not produce a claim',
+      'DISPATCH_ACTIVATION_NOT_CLAIMABLE',
+      409,
+    );
+  }
+  return {
+    ...(await claimedResponse(claimed)),
+    dispatchActivation: {
+      id: activationId,
+      generation,
+      consumedAt: timestamp(consumedAt),
+      releaseRequired: true,
+    },
+  };
 }
 
 export async function releaseExpiredStoredLocalPublishClaims() {

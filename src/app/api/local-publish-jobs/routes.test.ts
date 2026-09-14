@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   queue: vi.fn(),
   list: vi.fn(),
   claim: vi.fn(),
+  claimActivated: vi.fn(),
   authorize: vi.fn(),
   submit: vi.fn(),
   attestationCandidates: vi.fn(),
@@ -25,6 +26,7 @@ vi.mock('@/lib/local-publish-jobs', async (importOriginal) => {
     queueLocalPublishJob: mocks.queue,
     getLocalPublishJobSummaries: mocks.list,
     claimNextLocalPublishJob: mocks.claim,
+    claimActivatedLocalPublishJob: mocks.claimActivated,
     authorizeLocalPublishJob: mocks.authorize,
     submitLocalPublishJobResult: mocks.submit,
   };
@@ -350,6 +352,78 @@ describe('local publish job routes', () => {
       error: 'The expected verification job is not currently claimable',
       code: 'EXPECTED_JOB_NOT_CLAIMABLE',
     });
+  });
+
+  it('forwards only the complete exact dispatch activation tuple', async () => {
+      const activationId = '44444444-4444-4444-8444-444444444444';
+      const nonce = 'n'.repeat(43);
+      mocks.claimActivated.mockResolvedValue({
+        id: jobId,
+        status: 'claimed',
+        claimToken,
+        dispatchActivation: {
+          id: activationId,
+          generation: 1,
+          releaseRequired: true,
+        },
+      });
+
+      const response = await claimJob(request(
+        `/api/local-publish-jobs/next?lane=dispatch&expectedJobId=${jobId}` +
+          `&activationId=${activationId}&nonce=${nonce}`,
+        { headers: {
+          Authorization: 'Bearer ' + workerToken,
+          'X-Local-Publish-Claim-Token': claimToken,
+          'X-Workspace-Id': 'workspace-one',
+          'X-Local-Publish-Worker-Id': 'worker-one',
+        } },
+      ));
+
+      expect(response.status).toBe(200);
+      expect(mocks.claimActivated).toHaveBeenCalledWith(
+        {
+          lane: 'dispatch',
+          expectedJobId: jobId,
+          activationId,
+          nonce,
+        },
+        'workspace-one',
+        claimToken,
+        'worker-one',
+      );
+      expect(mocks.claim).not.toHaveBeenCalled();
+    });
+
+    it('never falls back to generic dispatch for partial or rejected activations', async () => {
+      const activationId = '44444444-4444-4444-8444-444444444444';
+      mocks.claimActivated.mockRejectedValue(new LocalPublishJobError(
+        'The exact dispatch activation is not claimable',
+        'DISPATCH_ACTIVATION_NOT_CLAIMABLE',
+        409,
+      ));
+      const partial = await claimJob(request(
+        `/api/local-publish-jobs/next?lane=dispatch&activationId=${activationId}`,
+        { headers: {
+          Authorization: 'Bearer ' + workerToken,
+          'X-Workspace-Id': 'workspace-one',
+          'X-Local-Publish-Claim-Token': claimToken,
+          'X-Local-Publish-Worker-Id': 'worker-one',
+        } },
+      ));
+      const rejected = await claimJob(request(
+        `/api/local-publish-jobs/next?lane=dispatch&expectedJobId=${jobId}` +
+          `&activationId=${activationId}&nonce=${'n'.repeat(43)}`,
+        { headers: {
+          Authorization: 'Bearer ' + workerToken,
+          'X-Workspace-Id': 'workspace-one',
+          'X-Local-Publish-Claim-Token': claimToken,
+          'X-Local-Publish-Worker-Id': 'worker-one',
+        } },
+      ));
+
+      expect(partial.status).toBe(400);
+      expect(rejected.status).toBe(409);
+      expect(mocks.claim).not.toHaveBeenCalled();
   });
 
   it('rejects malformed, repeated, or non-verification exact selectors before claiming', async () => {

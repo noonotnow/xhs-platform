@@ -52,6 +52,7 @@ const migrationFiles = [
   '035_recover_browser_closed_pre_publish.sql',
   '036_allow_stable_browser_closed_pre_publish.sql',
   '037_on_demand_publish_batches.sql',
+  '038_exact_job_dispatch_activations.sql',
 ] as const;
 
 function stable(value: unknown): string {
@@ -492,6 +493,35 @@ describe('canonical local publishing migration chain', () => {
     );
   }
 
+  async function insertRecoveryActivation(
+    fixture: Awaited<ReturnType<typeof insertRecoverablePublishJob>>,
+  ) {
+    await database.query(
+      `INSERT INTO local_publish_dispatch_activations(
+         workspace_id, local_publish_job_id, batch_id, batch_item_id,
+         manifest_hash, item_hash, source_revision, expected_worker_id,
+         expected_worker_contract_revision,
+         expected_worker_compatibility_revision, generation, nonce_digest,
+         state, created_by, authorized_at, authorized_by, expires_at
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6, $7, 'worker-recovery',
+         'publishing-v1', 'ready-x3/v1', 1, $8, 'active', $9,
+         CURRENT_TIMESTAMP, $9, CURRENT_TIMESTAMP + INTERVAL '1 hour'
+       )`,
+      [
+        fixture.workspaceId,
+        fixture.jobId,
+        fixture.input.batchId,
+        fixture.itemId,
+        fixture.input.manifestHash,
+        fixture.input.itemHash,
+        fixture.revision,
+        'e'.repeat(64),
+        fixture.actor,
+      ],
+    );
+  }
+
   async function expectTerminalReclassificationRejected(attemptId: string) {
     await database.exec('BEGIN');
     try {
@@ -533,6 +563,7 @@ describe('canonical local publishing migration chain', () => {
           `2026-09-08T${String(15 - index).padStart(2, '0')}:37:00.000Z`,
         );
       }
+      await insertRecoveryActivation(fixture);
       const blockers = await database.query(
         `SELECT *
          FROM rednote_publish_revision_blockers(
@@ -605,6 +636,13 @@ describe('canonical local publishing migration chain', () => {
         job_status: blockerCount === 0 ? 'queued' : 'failed',
         recovery_count: blockerCount === 0 ? '1' : '0',
       });
+      await database.query(
+        `UPDATE local_publish_dispatch_activations
+         SET state='cancelled',cancelled_at=CURRENT_TIMESTAMP,cancelled_by=$2,
+             cancellation_reason='test cleanup'
+         WHERE local_publish_job_id=$1`,
+        [fixture.jobId, fixture.actor],
+      );
     },
   );
 
@@ -2560,6 +2598,8 @@ describe('canonical local publishing migration chain', () => {
             'CREATE OR REPLACE FUNCTION rednote_publish_excluded_job_has_recovery_evidence',
           ) || statement.includes(
             'DROP CONSTRAINT IF EXISTS rednote_publish_batches_kind_check',
+          ) || statement.includes(
+            'CREATE TABLE IF NOT EXISTS local_publish_dispatch_activations',
           )) {
             await previousSchema.exec(statement);
             return { rows: [], rowCount: 1 };
@@ -2572,7 +2612,7 @@ describe('canonical local publishing migration chain', () => {
       expect(before['030']).toBe(false);
       const applied = await applyExpectedRednoteSchemaMigrations(
         client,
-        ['030', '031', '032', '033', '034', '035', '036', '037'],
+        ['030', '031', '032', '033', '034', '035', '036', '037', '038'],
       );
       expect(applied.applied).toEqual([
         '030',
@@ -2583,6 +2623,7 @@ describe('canonical local publishing migration chain', () => {
         '035',
         '036',
         '037',
+        '038',
       ]);
       expect(applied.after['030']).toBe(true);
       expect(applied.after['031']).toBe(true);
@@ -2592,6 +2633,7 @@ describe('canonical local publishing migration chain', () => {
       expect(applied.after['035']).toBe(true);
       expect(applied.after['036']).toBe(true);
       expect(applied.after['037']).toBe(true);
+      expect(applied.after['038']).toBe(true);
 
       await previousSchema.exec(`
         DROP FUNCTION rednote_publish_revision_blockers(TEXT, TEXT, TEXT);

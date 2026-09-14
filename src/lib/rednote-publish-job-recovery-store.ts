@@ -1,6 +1,7 @@
 import type { PoolClient, QueryResultRow } from 'pg';
 import { getPool } from '@/lib/db';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
+import { assertExactActiveDispatchRecovery } from '@/lib/local-publish-dispatch-activation';
 import {
   validateRecoveryCandidate,
   type ExistingRecoveryAudit,
@@ -393,6 +394,9 @@ export async function recoverStoredApprovedPublishJobTransaction(
     await client.query(
       "SELECT pg_advisory_xact_lock(hashtextextended('rednote-bootstrap-batch', 0))",
     );
+    await client.query(
+      "SELECT pg_advisory_xact_lock(hashtextextended('local-publish-dispatch-activation', 0))",
+    );
     const identity = await client.query<{
       workspace_id: string;
       notion_page_id: string;
@@ -410,6 +414,7 @@ export async function recoverStoredApprovedPublishJobTransaction(
         409,
       );
     }
+    await assertExactActiveDispatchRecovery(client, input.jobId);
     await client.query(
       'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
       [`${target.workspace_id}:${target.notion_page_id}`],

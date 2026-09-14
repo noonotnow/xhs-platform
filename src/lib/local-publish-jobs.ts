@@ -10,6 +10,7 @@ import {
 import {
   authorizeStoredLocalPublishJob,
   claimNextStoredLocalPublishJob,
+  claimExactActivatedStoredLocalPublishJob,
   completeStoredLocalPublishReconciliation,
   consumeStoredDispatchAuthorization,
   deferStoredLocalPublishVerification,
@@ -31,6 +32,7 @@ import {
   type StoredLocalPublishJob,
   heartbeatStoredLocalPublishJob,
 } from '@/lib/local-publish-job-store';
+import { dispatchActivationNonceDigest } from '@/lib/local-publish-dispatch-activation';
 import {
   isRednoteNoteId,
   normalizeRednoteShareUrl,
@@ -694,6 +696,7 @@ export function validateExpectedVerificationJobId(
       400,
     );
   }
+
   if (lane !== 'verification') {
     throw new LocalPublishJobError(
       'expectedJobId requires lane=verification',
@@ -701,6 +704,53 @@ export function validateExpectedVerificationJobId(
       400,
     );
   }
+}
+
+export function validateExactDispatchActivationInput(input: {
+  lane: LocalPublishWorkLane;
+  expectedJobId?: string;
+  activationId?: string;
+  nonce?: string;
+}) {
+  if (
+    input.lane !== 'dispatch'
+    || !input.expectedJobId
+    || !UUID_PATTERN.test(input.expectedJobId)
+    || !input.activationId
+    || !UUID_PATTERN.test(input.activationId)
+    || !input.nonce
+    || input.nonce.length < 32
+    || input.nonce.length > 200
+  ) {
+    throw new LocalPublishJobError(
+      'Exact dispatch requires lane=dispatch, expectedJobId, activationId, and nonce',
+      'VALIDATION_ERROR',
+      400,
+    );
+  }
+}
+
+export async function claimActivatedLocalPublishJob(
+  input: {
+    lane: LocalPublishWorkLane;
+    expectedJobId?: string;
+    activationId?: string;
+    nonce?: string;
+  },
+  workspaceId: string,
+  claimToken: string,
+  workerId: string,
+) {
+  validateExactDispatchActivationInput(input);
+  return claimExactActivatedStoredLocalPublishJob(
+    leaseSeconds(),
+    workspaceId,
+    input.expectedJobId!,
+    input.activationId!,
+    dispatchActivationNonceDigest(input.nonce!),
+    claimToken,
+    workerId,
+  );
 }
 
 export async function claimNextLocalPublishJob(

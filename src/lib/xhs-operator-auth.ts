@@ -46,3 +46,27 @@ export async function requireXhsOperator(
     );
   }
 }
+
+export async function requireXhsOperatorIdentity(
+  request: Pick<Request, 'headers'>,
+): Promise<{ identity: string } | { response: NextResponse }> {
+  const tokenCheck = checkOperatorToken(request.headers);
+  if (tokenCheck === 'authorized') {
+    return { identity: 'authenticated-xhs-operator-token' };
+  }
+  try {
+    const access = await validateCloudflareAccessRequest(request);
+    return { identity: access.email };
+  } catch (error) {
+    console.warn(
+      'XHS operator access denied:',
+      error instanceof Error ? error.message : 'Unknown validation error',
+    );
+    return {
+      response: NextResponse.json(
+        { error: 'Unauthorized', code: 'XHS_OPERATOR_AUTH_' + tokenCheck.toUpperCase() },
+        { status: 401, headers: { 'X-XHS-Auth-Reason': tokenCheck } },
+      ),
+    };
+  }
+}

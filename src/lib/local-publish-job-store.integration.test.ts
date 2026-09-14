@@ -293,6 +293,9 @@ describe('local publish job PostgreSQL execution', () => {
         provider_restriction_status text,
         provider_restriction_reported_at timestamptz
       );
+      CREATE TABLE local_publish_dispatch_activations (
+        state text NOT NULL
+      );
       CREATE TABLE rednote_publish_batches (
          id uuid PRIMARY KEY,
          manifest_hash text NOT NULL,

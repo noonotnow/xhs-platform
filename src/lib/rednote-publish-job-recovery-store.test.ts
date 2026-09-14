@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   query: vi.fn(),
   release: vi.fn(),
+  assertExactRecovery: vi.fn(),
 }));
 
 vi.mock('@/lib/db', () => ({
@@ -13,6 +14,14 @@ vi.mock('@/lib/db', () => ({
     }),
   }),
 }));
+
+vi.mock('@/lib/local-publish-dispatch-activation', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@/lib/local-publish-dispatch-activation')>();
+  return {
+    ...original,
+    assertExactActiveDispatchRecovery: mocks.assertExactRecovery,
+  };
+});
 
 import {
   recoverStoredApprovedPublishJob,

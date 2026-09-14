@@ -15,6 +15,17 @@ const notion = vi.hoisted(() => ({
 const lifecycle = vi.hoisted(() => ({
   listBlockers: vi.fn(),
 }));
+const dispatchActivation = vi.hoisted(() => ({
+  assertNoHold: vi.fn(),
+}));
+
+vi.mock('@/lib/local-publish-dispatch-activation', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@/lib/local-publish-dispatch-activation')>();
+  return {
+    ...original,
+    assertNoDispatchActivationHold: dispatchActivation.assertNoHold,
+  };
+});
 
 vi.mock('@/lib/rednote-publish-batch-store', async (importOriginal) => {
   const original = await importOriginal<typeof import('@/lib/rednote-publish-batch-store')>();
