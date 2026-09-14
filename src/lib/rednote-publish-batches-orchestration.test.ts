@@ -146,6 +146,27 @@ const readyPost = {
   manualWarnings: [],
   publishBlockers: [],
 };
+const frozenOnDemandSnapshot = {
+  ...snapshot,
+  title: snapshot.headline,
+};
+
+function pendingOnDemandBatch() {
+  return {
+    ...batch,
+    kind: 'on_demand' as const,
+    status: 'pending_approval' as const,
+    manifestHash: 'on-demand-manifest',
+    items: [{
+      ...batch.items[0],
+      snapshot: frozenOnDemandSnapshot,
+      itemHash: manifestHash(frozenOnDemandSnapshot),
+      dispatchMode: 'scheduled' as const,
+      state: 'needs_approval' as const,
+      localPublishJobId: undefined,
+    }],
+  };
+}
 
 describe('on-demand RedNote batch preparation', () => {
   beforeEach(() => {
@@ -202,6 +223,47 @@ describe('on-demand RedNote batch preparation', () => {
       dispatchMode: 'scheduled',
       lateBySeconds: 0,
     }]));
+    expect(stores.approve).not.toHaveBeenCalled();
+    expect(attempts.createBatchLinked).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['past', '2099-08-04T13:31:00.000Z'],
+    ['equal to now', snapshot.publishAt],
+  ])('rejects a %s schedule without creating any publishing lifecycle', async (
+    _label,
+    now,
+  ) => {
+    await expect(preparePublishBatch(
+      snapshot.notionPageId,
+      'workspace-1',
+      new Date(now),
+    )).rejects.toMatchObject({
+      code: 'POST_NOT_ELIGIBLE',
+      status: 409,
+    });
+
+    expect(stores.create).not.toHaveBeenCalled();
+    expect(stores.approve).not.toHaveBeenCalled();
+    expect(attempts.createBatchLinked).not.toHaveBeenCalled();
+  });
+
+  it('rejects a Draft even when its publish packet checkbox is true', async () => {
+    notion.getReadyPost.mockResolvedValue({
+      ...readyPost,
+      status: 'Draft',
+    });
+
+    await expect(preparePublishBatch(
+      snapshot.notionPageId,
+      'workspace-1',
+      new Date('2099-08-01T12:00:00.000Z'),
+    )).rejects.toMatchObject({
+      code: 'POST_NOT_ELIGIBLE',
+      status: 409,
+    });
+
+    expect(stores.create).not.toHaveBeenCalled();
     expect(stores.approve).not.toHaveBeenCalled();
     expect(attempts.createBatchLinked).not.toHaveBeenCalled();
   });
@@ -349,17 +411,7 @@ describe('approved RedNote batch attempt materialization', () => {
   });
 
   it('invalidates a changed on-demand source before creating a job or attempt', async () => {
-    const pendingBatch = {
-      ...batch,
-      kind: 'on_demand' as const,
-      status: 'pending_approval' as const,
-      items: [{
-        ...batch.items[0],
-        itemHash: manifestHash(snapshot),
-        state: 'needs_approval' as const,
-        localPublishJobId: undefined,
-      }],
-    };
+    const pendingBatch = pendingOnDemandBatch();
     const invalidatedBatch = {
       ...pendingBatch,
       status: 'partially_approved' as const,
@@ -396,5 +448,133 @@ describe('approved RedNote batch attempt materialization', () => {
       'workspace-1',
     );
     expect(attempts.createBatchLinked).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['due', snapshot.publishAt],
+    ['past', '2099-08-04T13:31:00.000Z'],
+  ])('invalidates an on-demand candidate that is %s before job insertion', async (
+    _label,
+    now,
+  ) => {
+    const pendingBatch = pendingOnDemandBatch();
+    const invalidatedBatch = {
+      ...pendingBatch,
+      status: 'partially_approved' as const,
+      items: [{
+        ...pendingBatch.items[0],
+        state: 'invalidated' as const,
+        invalidationReason:
+          'ScheduledDate must be strictly in the future for on-demand publishing.',
+      }],
+    };
+    stores.list
+      .mockResolvedValueOnce([pendingBatch])
+      .mockResolvedValueOnce([invalidatedBatch]);
+    stores.approve.mockResolvedValue(invalidatedBatch);
+    notion.getReadyPost.mockResolvedValue(readyPost);
+
+    await expect(approvePublishBatch(
+      pendingBatch.id,
+      pendingBatch.manifestHash,
+      'operator@example.com',
+      'workspace-1',
+      new Date(now),
+    )).resolves.toEqual(invalidatedBatch);
+
+    expect(stores.approve).toHaveBeenCalledWith(
+      pendingBatch.id,
+      pendingBatch.manifestHash,
+      'operator@example.com',
+      [{
+        itemId: pendingBatch.items[0].id,
+        approved: false,
+        reason:
+          'ScheduledDate must be strictly in the future for on-demand publishing.',
+      }],
+      'workspace-1',
+    );
+    expect(attempts.createBatchLinked).not.toHaveBeenCalled();
+  });
+
+  it('invalidates a non-Ready on-demand source before job insertion', async () => {
+    const pendingBatch = pendingOnDemandBatch();
+    const invalidatedBatch = {
+      ...pendingBatch,
+      status: 'partially_approved' as const,
+      items: [{
+        ...pendingBatch.items[0],
+        state: 'invalidated' as const,
+        invalidationReason:
+          'Canonical Notion Status must be Ready for on-demand publishing.',
+      }],
+    };
+    stores.list
+      .mockResolvedValueOnce([pendingBatch])
+      .mockResolvedValueOnce([invalidatedBatch]);
+    stores.approve.mockResolvedValue(invalidatedBatch);
+    notion.getReadyPost.mockResolvedValue({
+      ...readyPost,
+      status: 'Draft',
+    });
+
+    await expect(approvePublishBatch(
+      pendingBatch.id,
+      pendingBatch.manifestHash,
+      'operator@example.com',
+      'workspace-1',
+      new Date('2099-08-01T12:00:00.000Z'),
+    )).resolves.toEqual(invalidatedBatch);
+
+    expect(stores.approve).toHaveBeenCalledWith(
+      pendingBatch.id,
+      pendingBatch.manifestHash,
+      'operator@example.com',
+      [{
+        itemId: pendingBatch.items[0].id,
+        approved: false,
+        reason:
+          'Canonical Notion Status must be Ready for on-demand publishing.',
+      }],
+      'workspace-1',
+    );
+    expect(attempts.createBatchLinked).not.toHaveBeenCalled();
+  });
+
+  it('approves an unchanged Ready on-demand source while it remains future scheduled', async () => {
+    const pendingBatch = pendingOnDemandBatch();
+    const approvedBatch = {
+      ...pendingBatch,
+      status: 'approved' as const,
+      items: [{
+        ...pendingBatch.items[0],
+        state: 'approved' as const,
+      }],
+    };
+    stores.list
+      .mockResolvedValueOnce([pendingBatch])
+      .mockResolvedValueOnce([approvedBatch]);
+    stores.approve.mockResolvedValue(approvedBatch);
+    notion.getReadyPost.mockResolvedValue(readyPost);
+
+    await expect(approvePublishBatch(
+      pendingBatch.id,
+      pendingBatch.manifestHash,
+      'operator@example.com',
+      'workspace-1',
+      new Date('2099-08-01T12:00:00.000Z'),
+    )).resolves.toEqual(approvedBatch);
+
+    expect(stores.approve).toHaveBeenCalledWith(
+      pendingBatch.id,
+      pendingBatch.manifestHash,
+      'operator@example.com',
+      [{
+        itemId: pendingBatch.items[0].id,
+        approved: true,
+        reason: undefined,
+      }],
+      'workspace-1',
+    );
   });
 });

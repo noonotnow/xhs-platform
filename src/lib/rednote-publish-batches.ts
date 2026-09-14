@@ -110,6 +110,18 @@ export function buildBatchSnapshot(
   };
 }
 
+function onDemandIneligibilityReason(post: ReadyXhsPost, now: Date) {
+  if (post.status.trim() !== 'Ready') {
+    return 'Canonical Notion Status must be Ready for on-demand publishing.';
+  }
+  if (!post.publishAt) return null;
+  const publishAt = new Date(post.publishAt);
+  if (!Number.isNaN(publishAt.getTime()) && publishAt.getTime() <= now.getTime()) {
+    return 'ScheduledDate must be strictly in the future for on-demand publishing.';
+  }
+  return null;
+}
+
 function zonedParts(date: Date) {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: REDNOTE_TIME_ZONE,
@@ -185,6 +197,7 @@ export function buildBatchItems(
 ) {
   const weekly = weeklyWindow(now);
   return posts.flatMap((post): NewPublishBatchItem[] => {
+    if (kind === 'on_demand' && onDemandIneligibilityReason(post, now)) return [];
     const snapshot = buildBatchSnapshot(post, expectedAccountId);
     if (!snapshot?.publishAt) return [];
     const publishAt = new Date(snapshot.publishAt);
@@ -233,6 +246,9 @@ export function buildBatchCandidateAccounting(
 
     let reason: string;
     const lifecycleBlocker = blockerByPage.get(post.id);
+    const onDemandReason = kind === 'on_demand'
+      ? onDemandIneligibilityReason(post, now)
+      : null;
     if (post.status.trim().toLowerCase() === 'published') {
       reason =
         'Canonical Notion Status is Published. This record is already post-dispatch and is not authorized for another batch.';
@@ -255,6 +271,8 @@ export function buildBatchCandidateAccounting(
           'The frozen revision or evidence-bearing lifecycle owns this record; do not publish it again.'
         : `Publish lifecycle ${lifecycleBlocker.lifecycleId} is ` +
           `${lifecycleBlocker.lifecycleState}. Evidence for this record exists; do not publish it again.`;
+    } else if (onDemandReason) {
+      reason = onDemandReason;
     } else if (!publishAt) {
       reason = 'Needs publish time: set an exact ScheduledDate instant with timezone.';
     } else if (
@@ -447,6 +465,7 @@ export async function approvePublishBatch(
   expectedManifestHash: string,
   approvedBy: string,
   workspaceId: string,
+  now = new Date(),
 ) {
   const batch = (await listStoredPublishBatches(workspaceId, batchId))[0];
   if (!batch || batch.manifestHash !== expectedManifestHash) {
@@ -479,15 +498,22 @@ export async function approvePublishBatch(
   const decisions = await Promise.all(batch.items.map(async (item) => {
     try {
       const post = await getReadyXhsPost(item.notionPageId);
-      const current = buildBatchSnapshot(post, expectedAccountId);
+      const onDemandReason = batch.kind === 'on_demand'
+        ? onDemandIneligibilityReason(post, now)
+        : null;
+      const current = onDemandReason
+        ? null
+        : buildBatchSnapshot(post, expectedAccountId);
       const currentHash = current ? manifestHash(current) : '';
       return {
         itemId: item.id,
         approved: currentHash === item.itemHash &&
           isDeepStrictEqual(current, item.snapshot),
-        reason: currentHash === item.itemHash
-          ? undefined
-          : 'The Notion source revision or frozen publishing fields changed.',
+        reason: onDemandReason ?? (
+          currentHash === item.itemHash
+            ? undefined
+            : 'The Notion source revision or frozen publishing fields changed.'
+        ),
       };
     } catch (error) {
       if (!(error instanceof NotionPostsError) || error.status >= 500) throw error;

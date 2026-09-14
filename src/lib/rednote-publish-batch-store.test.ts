@@ -20,6 +20,7 @@ vi.mock('@/lib/db', () => ({
 
 import {
   approveStoredPublishBatch,
+  approveStoredPublishBatchTransaction,
   createStoredPublishBatch,
   listStoredPublishBatches,
   storedManifestHash,
@@ -284,6 +285,44 @@ describe('stored RedNote bootstrap replacement', () => {
     expect(statements).toContain('ROLLBACK');
     expect(statements.some((statement) =>
       statement.includes('INSERT INTO local_publish_jobs'))).toBe(false);
+  });
+
+  it('invalidates a rejected on-demand decision without inserting a job', async () => {
+    const batchId = '22222222-2222-4222-8222-222222222222';
+    const manifestHash = 'a'.repeat(64);
+    mocks.query.mockImplementation(async (statement: string) => {
+      if (statement.includes('FROM rednote_publish_batches')) {
+        return {
+          rows: [batchRow(batchId, 'pending_approval', manifestHash, 'on_demand')],
+        };
+      }
+      if (statement.includes('UPDATE rednote_publish_batches AS batch')) {
+        return {
+          rows: [batchRow(batchId, 'partially_approved', manifestHash, 'on_demand')],
+        };
+      }
+      return { rows: [], rowCount: 1 };
+    });
+
+    await approveStoredPublishBatchTransaction(
+      { query: mocks.query },
+      batchId,
+      manifestHash,
+      'operator@example.com',
+      [{
+        itemId: '44444444-4444-4444-8444-444444444444',
+        approved: false,
+        reason: 'ScheduledDate must be strictly in the future for on-demand publishing.',
+      }],
+      'workspace-1',
+    );
+
+    const statements = mocks.query.mock.calls.map(([statement]) => String(statement));
+    expect(statements.some((statement) =>
+      statement.includes("SET state = 'invalidated'"))).toBe(true);
+    expect(statements.some((statement) =>
+      statement.includes('INSERT INTO local_publish_jobs'))).toBe(false);
+    expect(statements).toContain('COMMIT');
   });
 
   it('serializes approval on the bootstrap lock and commits atomically', async () => {
