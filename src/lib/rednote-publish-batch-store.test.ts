@@ -32,6 +32,7 @@ import {
 } from '@/lib/rednote-publish-job-recovery-contract';
 import type {
   LocalPublishSnapshot,
+  PublishBatchKind,
   PublishBatchStatus,
 } from '@/types/local-publish-job';
 
@@ -53,10 +54,12 @@ function batchRow(
   id: string,
   status: PublishBatchStatus,
   manifestHash: string,
+  kind: PublishBatchKind = 'bootstrap',
 ): QueryResultRow {
   return {
     id,
-    kind: 'bootstrap',
+    workspace_id: 'workspace-1',
+    kind,
     status,
     manifest_hash: manifestHash,
     candidate_report: [],
@@ -190,6 +193,75 @@ describe('stored RedNote bootstrap replacement', () => {
       .toContain('ROLLBACK');
     expect(mocks.query.mock.calls.map(([statement]) => String(statement)))
       .not.toContain('COMMIT');
+  });
+
+  it('creates an unapproved on-demand item without superseding or queueing work', async () => {
+    const newId = '33333333-3333-4333-8333-333333333333';
+    const itemHash = 'b'.repeat(64);
+    mocks.query.mockImplementation(async (statement: string) => {
+      if (statement.includes('rednote_publish_revision_blockers')) return { rows: [] };
+      if (statement.includes('INSERT INTO rednote_publish_batches')) {
+        return {
+          rows: [batchRow(newId, 'pending_approval', itemHash, 'on_demand')],
+        };
+      }
+      if (statement.includes('INSERT INTO rednote_publish_batch_items')) {
+        return {
+          rows: [{
+            id: '44444444-4444-4444-8444-444444444444',
+            batch_id: newId,
+            notion_page_id: snapshot.notionPageId,
+            snapshot,
+            item_hash: itemHash,
+            state: 'needs_approval',
+            dispatch_mode: 'scheduled',
+            late_by_seconds: 0,
+            invalidation_reason: null,
+            local_publish_job_id: null,
+          }],
+        };
+      }
+      if (statement.includes('UPDATE rednote_publish_batches')) {
+        return {
+          rows: [batchRow(newId, 'pending_approval', itemHash, 'on_demand')],
+        };
+      }
+      return { rows: [], rowCount: 1 };
+    });
+
+    const result = await createStoredPublishBatch({
+      workspaceId: 'workspace-1',
+      kind: 'on_demand',
+      manifestHash: storedManifestHash([{
+        notionPageId: snapshot.notionPageId,
+        itemHash,
+        dispatchMode: 'scheduled',
+        lateBySeconds: 0,
+      }]),
+      items: [{
+        notionPageId: snapshot.notionPageId,
+        snapshot,
+        itemHash,
+        dispatchMode: 'scheduled',
+        lateBySeconds: 0,
+      }],
+      blockedCandidates: [],
+    });
+
+    expect(result).toMatchObject({
+      kind: 'on_demand',
+      status: 'pending_approval',
+      items: [{
+        state: 'needs_approval',
+      }],
+    });
+    expect(result?.items[0]).not.toHaveProperty('localPublishJobId');
+    const statements = mocks.query.mock.calls.map(([statement]) => String(statement));
+    expect(statements.some((statement) => statement.includes("SET status = 'superseded'")))
+      .toBe(false);
+    expect(statements.some((statement) => statement.includes('INSERT INTO local_publish_jobs')))
+      .toBe(false);
+    expect(statements).toContain('COMMIT');
   });
 
   it('rejects a superseded manifest before changing any item', async () => {

@@ -2,11 +2,18 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const stores = vi.hoisted(() => ({
   approve: vi.fn(),
+  create: vi.fn(),
   list: vi.fn(),
 }));
 const attempts = vi.hoisted(() => ({
   createBatchLinked: vi.fn(),
   getLinked: vi.fn(),
+}));
+const notion = vi.hoisted(() => ({
+  getReadyPost: vi.fn(),
+}));
+const lifecycle = vi.hoisted(() => ({
+  listBlockers: vi.fn(),
 }));
 
 vi.mock('@/lib/rednote-publish-batch-store', async (importOriginal) => {
@@ -14,7 +21,24 @@ vi.mock('@/lib/rednote-publish-batch-store', async (importOriginal) => {
   return {
     ...original,
     approveStoredPublishBatch: stores.approve,
+    createStoredPublishBatch: stores.create,
     listStoredPublishBatches: stores.list,
+  };
+});
+
+vi.mock('@/lib/notion-posts', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@/lib/notion-posts')>();
+  return {
+    ...original,
+    getReadyXhsPost: notion.getReadyPost,
+  };
+});
+
+vi.mock('@/lib/local-publish-job-store', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@/lib/local-publish-job-store')>();
+  return {
+    ...original,
+    listPublishLifecycleBlockers: lifecycle.listBlockers,
   };
 });
 
@@ -27,8 +51,14 @@ vi.mock('@/lib/rednote-publishing-attempt-store', async (importOriginal) => {
   };
 });
 
-import { approvePublishBatch } from '@/lib/rednote-publish-batches';
+import {
+  approvePublishBatch,
+  manifestHash,
+  preparePublishBatch,
+} from '@/lib/rednote-publish-batches';
+import type { NewPublishBatchItem } from '@/lib/rednote-publish-batch-store';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
+import { NotionPostsError } from '@/lib/notion-posts';
 import { rednoteMediaIdentity } from '@/lib/rednote-publish-authorization';
 
 const media = [{
@@ -91,6 +121,156 @@ const linkedBatchAttempt = {
     }],
   },
 };
+
+const readyPost = {
+  id: snapshot.notionPageId,
+  pageUrl: 'https://www.notion.so/post',
+  headline: snapshot.headline,
+  caption: snapshot.caption,
+  status: 'Ready',
+  candidateKind: 'packet_ready' as const,
+  publishPacketReady: true,
+  hasVideo: true,
+  needsMedia: false,
+  needsCaption: false,
+  mediaUrls: [snapshot.mediaUrl],
+  imageUrls: [],
+  videoUrls: [snapshot.mediaUrl],
+  compatibilityTrialVideoUrls: [],
+  thumbnailUrl: '',
+  tags: snapshot.tags,
+  scheduledDate: snapshot.publishAt,
+  publishAt: snapshot.publishAt,
+  lastEditedTime: snapshot.notionLastEditedTime,
+  automationBlockers: [],
+  manualWarnings: [],
+  publishBlockers: [],
+};
+
+describe('on-demand RedNote batch preparation', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubEnv('REDNOTE_EXPECTED_ACCOUNT_ID', snapshot.expectedAccountId);
+    notion.getReadyPost.mockResolvedValue(readyPost);
+    lifecycle.listBlockers.mockResolvedValue([]);
+  });
+
+  it('freezes one exact scheduled Post into an unapproved deterministic candidate', async () => {
+    stores.create.mockImplementation(async (input) => ({
+      id: batch.id,
+      workspaceId: input.workspaceId,
+      kind: input.kind,
+      status: 'pending_approval',
+      manifestHash: input.manifestHash,
+      createdAt: '2099-08-01T12:01:00.000Z',
+      items: input.items.map((item: NewPublishBatchItem, index: number) => ({
+        ...item,
+        id: `item-${index}`,
+        state: 'needs_approval',
+      })),
+      blockedCandidates: input.blockedCandidates,
+    }));
+
+    const prepared = await preparePublishBatch(
+      snapshot.notionPageId,
+      'workspace-1',
+      new Date('2099-08-01T12:00:00.000Z'),
+    );
+    const frozenSnapshot = {
+      ...snapshot,
+      title: snapshot.headline,
+    };
+
+    expect(notion.getReadyPost).toHaveBeenCalledWith(snapshot.notionPageId);
+    expect(stores.create).toHaveBeenCalledOnce();
+    expect(prepared).toMatchObject({
+      kind: 'on_demand',
+      status: 'pending_approval',
+      items: [{
+        notionPageId: snapshot.notionPageId,
+        state: 'needs_approval',
+        dispatchMode: 'scheduled',
+        lateBySeconds: 0,
+        snapshot: frozenSnapshot,
+      }],
+    });
+    expect(prepared.items[0]).not.toHaveProperty('localPublishJobId');
+    expect(prepared.items[0].itemHash).toBe(manifestHash(frozenSnapshot));
+    expect(prepared.manifestHash).toBe(manifestHash([{
+      notionPageId: snapshot.notionPageId,
+      itemHash: prepared.items[0].itemHash,
+      dispatchMode: 'scheduled',
+      lateBySeconds: 0,
+    }]));
+    expect(stores.approve).not.toHaveBeenCalled();
+    expect(attempts.createBatchLinked).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the selected revision already has lifecycle ownership', async () => {
+    lifecycle.listBlockers.mockResolvedValue([{
+      notionPageId: snapshot.notionPageId,
+      lifecycleId: 'existing-item',
+      lifecycleState: 'batch_item:needs_approval',
+    }]);
+
+    await expect(preparePublishBatch(
+      snapshot.notionPageId,
+      'workspace-1',
+    )).rejects.toMatchObject({
+      code: 'POST_REVISION_ALREADY_OWNED',
+      status: 409,
+    });
+    expect(stores.create).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the selected Post is not eligible for a frozen scheduled snapshot', async () => {
+    notion.getReadyPost.mockResolvedValue({
+      ...readyPost,
+      scheduledDate: '',
+      publishAt: undefined,
+      publishBlockers: ['Missing exact publication time'],
+    });
+
+    await expect(preparePublishBatch(
+      snapshot.notionPageId,
+      'workspace-1',
+    )).rejects.toMatchObject({
+      code: 'POST_NOT_ELIGIBLE',
+      status: 409,
+    });
+    expect(stores.create).not.toHaveBeenCalled();
+  });
+
+  it('propagates a missing canonical Post without creating a candidate', async () => {
+    notion.getReadyPost.mockRejectedValue(new NotionPostsError(
+      'The requested Notion post was not found.',
+      'NOTION_POST_NOT_FOUND',
+      404,
+    ));
+
+    await expect(preparePublishBatch(
+      snapshot.notionPageId,
+      'workspace-1',
+    )).rejects.toMatchObject({
+      code: 'NOTION_POST_NOT_FOUND',
+      status: 404,
+    });
+    expect(lifecycle.listBlockers).not.toHaveBeenCalled();
+    expect(stores.create).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when a concurrent preparation wins the store lock', async () => {
+    stores.create.mockResolvedValue(null);
+
+    await expect(preparePublishBatch(
+      snapshot.notionPageId,
+      'workspace-1',
+    )).rejects.toMatchObject({
+      code: 'POST_REVISION_CONFLICT',
+      status: 409,
+    });
+  });
+});
 
 describe('approved RedNote batch attempt materialization', () => {
   beforeEach(() => {
@@ -165,6 +345,56 @@ describe('approved RedNote batch attempt materialization', () => {
       'operator@example.com',
       'legacy-local-publish',
     )).rejects.toMatchObject({ code: 'ATTEMPT_PACKET_MISMATCH' });
+    expect(attempts.createBatchLinked).not.toHaveBeenCalled();
+  });
+
+  it('invalidates a changed on-demand source before creating a job or attempt', async () => {
+    const pendingBatch = {
+      ...batch,
+      kind: 'on_demand' as const,
+      status: 'pending_approval' as const,
+      items: [{
+        ...batch.items[0],
+        itemHash: manifestHash(snapshot),
+        state: 'needs_approval' as const,
+        localPublishJobId: undefined,
+      }],
+    };
+    const invalidatedBatch = {
+      ...pendingBatch,
+      status: 'partially_approved' as const,
+      items: [{
+        ...pendingBatch.items[0],
+        state: 'invalidated' as const,
+        invalidationReason: 'The Notion source revision or frozen publishing fields changed.',
+      }],
+    };
+    stores.list
+      .mockResolvedValueOnce([pendingBatch])
+      .mockResolvedValueOnce([invalidatedBatch]);
+    stores.approve.mockResolvedValue(invalidatedBatch);
+    notion.getReadyPost.mockResolvedValue({
+      ...readyPost,
+      caption: 'Changed after preparation',
+    });
+
+    await expect(approvePublishBatch(
+      pendingBatch.id,
+      pendingBatch.manifestHash,
+      'operator@example.com',
+      'workspace-1',
+    )).resolves.toEqual(invalidatedBatch);
+    expect(stores.approve).toHaveBeenCalledWith(
+      pendingBatch.id,
+      pendingBatch.manifestHash,
+      'operator@example.com',
+      [{
+        itemId: pendingBatch.items[0].id,
+        approved: false,
+        reason: 'The Notion source revision or frozen publishing fields changed.',
+      }],
+      'workspace-1',
+    );
     expect(attempts.createBatchLinked).not.toHaveBeenCalled();
   });
 });

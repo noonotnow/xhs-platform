@@ -4,7 +4,10 @@ import {
   approvePublishBatch,
   createPublishBatch,
   listPublishBatches,
+  preparePublishBatch,
+  PublishBatchPreparationError,
 } from '@/lib/rednote-publish-batches';
+import { NotionPostsError } from '@/lib/notion-posts';
 import { parseWorkspaceId } from '@/lib/workspace-id';
 import type { PublishBatchKind } from '@/types/local-publish-job';
 
@@ -39,6 +42,19 @@ export async function POST(request: NextRequest) {
     const operator = await validateCloudflareAccessRequest(request);
     const workspaceId = parseWorkspaceId(request.headers.get('x-workspace-id'));
     const body = await request.json() as Record<string, unknown>;
+    if (body.action === 'prepare') {
+      if (typeof body.notionPageId !== 'string' || !body.notionPageId.trim()) {
+        throw new Error('notionPageId must identify exactly one selected post');
+      }
+      const batch = await preparePublishBatch(
+        body.notionPageId.trim(),
+        workspaceId,
+      );
+      return NextResponse.json(
+        { batch },
+        { status: 201, headers: NO_STORE_HEADERS },
+      );
+    }
     if (body.action === 'create') {
       if (!['weekly', 'catch_up', 'bootstrap'].includes(String(body.kind))) {
         throw new Error('kind must be weekly, catch_up, or bootstrap');
@@ -73,8 +89,17 @@ export async function POST(request: NextRequest) {
         ),
       }, { headers: NO_STORE_HEADERS });
     }
-    throw new Error('A valid create or confirmed approve action is required');
+    throw new Error('A valid prepare, create, or confirmed approve action is required');
   } catch (error) {
+    if (
+      error instanceof PublishBatchPreparationError ||
+      error instanceof NotionPostsError
+    ) {
+      return NextResponse.json(
+        { error: error.message, code: error.code },
+        { status: error.status, headers: NO_STORE_HEADERS },
+      );
+    }
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Unable to update publish batch' },
       { status: 400, headers: NO_STORE_HEADERS },

@@ -51,6 +51,7 @@ const migrationFiles = [
   '034_recover_schedule_readback_mismatch.sql',
   '035_recover_browser_closed_pre_publish.sql',
   '036_allow_stable_browser_closed_pre_publish.sql',
+  '037_on_demand_publish_batches.sql',
 ] as const;
 
 function stable(value: unknown): string {
@@ -2394,6 +2395,22 @@ describe('canonical local publishing migration chain', () => {
     await expect(database.exec(migration)).resolves.toBeDefined();
   });
 
+  it('can reapply migration 037 while preserving on-demand batch support', async () => {
+    const migration = await readFile(
+      path.join(
+        process.cwd(),
+        'migrations',
+        '037_on_demand_publish_batches.sql',
+      ),
+      'utf8',
+    );
+    await expect(database.exec(migration)).resolves.toBeDefined();
+    expect((await readRednoteSchemaReadiness({
+      query: (statement: string, parameters?: unknown[]) =>
+        database.query(statement, parameters),
+    } as Parameters<typeof readRednoteSchemaReadiness>[0]))['037']).toBe(true);
+  });
+
   it('stores body-equivalent recovery functions from migrations 030 and 033', async () => {
     const migration030 = await readFile(
       path.join(
@@ -2541,6 +2558,8 @@ describe('canonical local publishing migration chain', () => {
             'rednote_publish_job_recoveries_prior_error_code_check',
           ) || statement.includes(
             'CREATE OR REPLACE FUNCTION rednote_publish_excluded_job_has_recovery_evidence',
+          ) || statement.includes(
+            'DROP CONSTRAINT IF EXISTS rednote_publish_batches_kind_check',
           )) {
             await previousSchema.exec(statement);
             return { rows: [], rowCount: 1 };
@@ -2553,7 +2572,7 @@ describe('canonical local publishing migration chain', () => {
       expect(before['030']).toBe(false);
       const applied = await applyExpectedRednoteSchemaMigrations(
         client,
-        ['030', '031', '032', '033', '034', '035', '036'],
+        ['030', '031', '032', '033', '034', '035', '036', '037'],
       );
       expect(applied.applied).toEqual([
         '030',
@@ -2563,6 +2582,7 @@ describe('canonical local publishing migration chain', () => {
         '034',
         '035',
         '036',
+        '037',
       ]);
       expect(applied.after['030']).toBe(true);
       expect(applied.after['031']).toBe(true);
@@ -2571,6 +2591,7 @@ describe('canonical local publishing migration chain', () => {
       expect(applied.after['034']).toBe(true);
       expect(applied.after['035']).toBe(true);
       expect(applied.after['036']).toBe(true);
+      expect(applied.after['037']).toBe(true);
 
       await previousSchema.exec(`
         DROP FUNCTION rednote_publish_revision_blockers(TEXT, TEXT, TEXT);

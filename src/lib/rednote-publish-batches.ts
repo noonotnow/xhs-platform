@@ -32,6 +32,16 @@ import type { ReadyXhsPost } from '@/types/ready-post';
 export const REDNOTE_TIME_ZONE = 'America/New_York';
 export const MAX_LATE_SECONDS = 24 * 60 * 60;
 
+export class PublishBatchPreparationError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
 function stableValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stableValue);
   if (value && typeof value === 'object') {
@@ -274,6 +284,79 @@ export function buildBatchCandidateAccounting(
     }];
   });
   return { items, blockedCandidates };
+}
+
+export async function preparePublishBatch(
+  notionPageId: string,
+  workspaceId: string,
+  now = new Date(),
+) {
+  const expectedAccountId = process.env.REDNOTE_EXPECTED_ACCOUNT_ID?.trim();
+  if (!expectedAccountId) {
+    throw new PublishBatchPreparationError(
+      'REDNOTE_EXPECTED_ACCOUNT_ID is required before preparing a publish batch.',
+      'EXPECTED_ACCOUNT_REQUIRED',
+      503,
+    );
+  }
+  const post = await getReadyXhsPost(notionPageId);
+  const lifecycleBlockers = await listPublishLifecycleBlockers([{
+    notionPageId: post.id,
+    notionLastEditedTime: post.lastEditedTime,
+  }], workspaceId);
+  const { items, blockedCandidates } = buildBatchCandidateAccounting(
+    [post],
+    'on_demand',
+    now,
+    lifecycleBlockers,
+    expectedAccountId,
+  );
+  if (items.length !== 1) {
+    throw new PublishBatchPreparationError(
+      blockedCandidates[0]?.reason ??
+        'The selected post is not eligible for on-demand batch preparation.',
+      lifecycleBlockers.length > 0
+        ? 'POST_REVISION_ALREADY_OWNED'
+        : 'POST_NOT_ELIGIBLE',
+      409,
+    );
+  }
+  try {
+    const batch = await createStoredPublishBatch({
+      workspaceId,
+      kind: 'on_demand',
+      manifestHash: manifestHash(items.map((item) => ({
+        notionPageId: item.notionPageId,
+        itemHash: item.itemHash,
+        dispatchMode: item.dispatchMode,
+        lateBySeconds: item.lateBySeconds,
+      }))),
+      items,
+      blockedCandidates,
+    });
+    if (!batch) {
+      throw new PublishBatchPreparationError(
+        'The selected source revision was claimed concurrently; refresh before preparing again.',
+        'POST_REVISION_CONFLICT',
+        409,
+      );
+    }
+    return batch;
+  } catch (error) {
+    if (
+      error instanceof PublishBatchPreparationError ||
+      !(error instanceof Error) ||
+      !('code' in error) ||
+      error.code !== '23505'
+    ) {
+      throw error;
+    }
+    throw new PublishBatchPreparationError(
+      'The selected source revision was prepared concurrently; refresh to review the existing candidate.',
+      'POST_REVISION_CONFLICT',
+      409,
+    );
+  }
 }
 
 export async function createPublishBatch(

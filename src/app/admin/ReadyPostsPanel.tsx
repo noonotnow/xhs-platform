@@ -440,10 +440,22 @@ export default function ReadyPostsPanel({
       ).state !== 'published'),
     [jobs, manualReconciliations, posts],
   );
-  const pendingBatch = batches.find((batch) =>
+  const pendingPreparedBatch = batches.find((batch) =>
+    batch.kind === 'on_demand'
+    && batch.status === 'pending_approval'
+    && batch.items.some((item) => item.notionPageId === selected?.id));
+  const pendingBootstrapBatch = batches.find((batch) =>
     batch.kind === 'bootstrap' && batch.status === 'pending_approval');
+  const pendingBatch = pendingPreparedBatch ?? pendingBootstrapBatch;
   const approvedBatch = batches.find((batch) =>
-    batch.kind === 'bootstrap' && batch.status === 'approved');
+    batch.status === 'approved'
+    && (
+      batch.kind === 'bootstrap'
+      || (
+        batch.kind === 'on_demand'
+        && batch.items.some((item) => item.notionPageId === selected?.id)
+      )
+    ));
   const supersededBatches = batches
     .filter((batch) => batch.kind === 'bootstrap' && batch.status === 'superseded')
     .slice(0, 3);
@@ -771,7 +783,7 @@ export default function ReadyPostsPanel({
     }
   }
 
-  async function updateBatch(action: 'create' | 'approve') {
+  async function updateBatch(action: 'prepare' | 'create' | 'approve') {
       setBatchBusy(true);
       setError('');
       try {
@@ -779,13 +791,18 @@ export default function ReadyPostsPanel({
         const response = await adminApiFetch(workspaceId, path, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(action === 'create'
+          body: JSON.stringify(action === 'prepare'
             ? {
+                action,
+                notionPageId: selected?.id,
+              }
+            : action === 'create'
+              ? {
                 action,
                 kind: 'bootstrap',
                 notionPageIds: selected ? [selected.id] : [],
               }
-            : {
+              : {
                 action,
                 batchId: pendingBatch?.id,
                 manifestHash: pendingBatch?.manifestHash,
@@ -1352,24 +1369,47 @@ export default function ReadyPostsPanel({
             <h3 id="batch-approval-heading">Bounded batch approval</h3>
             <p>
               One approval authorizes only the exact frozen items and manifest hash shown here.
-              Changed items are invalidated individually.
+              Preparing the selected Post only creates a review candidate; it cannot queue,
+              claim, publish, or bypass approval.
             </p>
           </div>
-          <button
-            className={styles.secondaryButton}
-            type="button"
-            disabled={batchBusy}
-            onClick={() => void updateBatch('create')}
-          >
-            {batchBusy
-              ? 'Working…'
-              : pendingBatch
-                ? 'Rebuild and supersede preview'
-                : 'Build bootstrap batch'}
-          </button>
+          <div className={styles.actionRow}>
+            <button
+              className={styles.queueButton}
+              type="button"
+              disabled={batchBusy || !selected}
+              onClick={() => void updateBatch('prepare')}
+            >
+              {batchBusy ? 'Working…' : 'Prepare selected review candidate'}
+            </button>
+            <button
+              className={styles.secondaryButton}
+              type="button"
+              disabled={batchBusy || !selected}
+              onClick={() => void updateBatch('create')}
+            >
+              {batchBusy
+                ? 'Working…'
+                : pendingBootstrapBatch
+                  ? 'Rebuild bootstrap preview'
+                  : 'Build bootstrap batch'}
+            </button>
+          </div>
         </div>
+        <p className={styles.muted}>
+          Bootstrap is a separate recovery/setup workflow and may supersede an earlier
+          bootstrap preview. Normal preparation freezes only the explicitly selected
+          canonical Post and never supersedes another candidate.
+        </p>
         {pendingBatch ? (
           <>
+            <p>
+              <strong>
+                {pendingBatch.kind === 'on_demand'
+                  ? 'Selected Post review candidate'
+                  : 'Bootstrap preview'}
+              </strong>
+            </p>
             <p className={styles.manifestHash}>
               Manifest <code>{pendingBatch.manifestHash}</code>
             </p>
@@ -1433,7 +1473,8 @@ export default function ReadyPostsPanel({
           </>
         ) : (
           <p className={styles.muted}>
-            No batch is awaiting approval. Posts without exact times stay visible but are excluded.
+            No review candidate for this selection is awaiting approval. Posts without exact
+            times stay visible but cannot be prepared.
           </p>
         )}
         {supersededBatches.map((batch) => (

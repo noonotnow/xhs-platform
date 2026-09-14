@@ -150,7 +150,7 @@ interface ClaimedLocalPublishJobBase
   dispatchAuthorizedAt?: string;
 }
 
-export type PublishBatchKind = 'weekly' | 'catch_up' | 'bootstrap';
+export type PublishBatchKind = 'weekly' | 'catch_up' | 'bootstrap' | 'on_demand';
 export type PublishBatchStatus =
   | 'pending_approval'
   | 'approved'
