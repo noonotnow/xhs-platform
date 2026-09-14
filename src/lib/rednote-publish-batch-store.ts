@@ -9,6 +9,7 @@ import {
 } from '@/lib/rednote-publish-job-recovery';
 import {
   BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
+  LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
 } from '@/lib/rednote-publish-job-recovery-contract';
 import type {
   LocalPublishSnapshot,
@@ -142,6 +143,18 @@ export function storedManifestHash(
 }
 
 function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
+  const exactBrowserClosedCode = (
+    errorCode: string | null | undefined,
+    errorMessage: string | null | undefined,
+  ):
+    | typeof LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE
+    | typeof BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE
+    | null => {
+    if (!isExactBrowserClosedPrePublishFailure(errorCode, errorMessage)) return null;
+    if (errorCode === LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE) return errorCode;
+    if (errorCode === BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE) return errorCode;
+    return null;
+  };
   const firstRecovery = !row.recovery_audit_id;
   const matchingAuditEvidence = Boolean(
     row.recovery_audit_id &&
@@ -175,11 +188,10 @@ function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
     row.recovery_job_error_code,
     row.recovery_job_error_message,
   );
-  const browserClosedPrePublishFailure =
-    isExactBrowserClosedPrePublishFailure(
-      row.recovery_job_error_code,
-      row.recovery_job_error_message,
-    );
+  const browserClosedPrePublishFailure = exactBrowserClosedCode(
+    row.recovery_job_error_code,
+    row.recovery_job_error_message,
+  );
   const recoveryKind = browserClosedPrePublishFailure
     ? 'browser_closed_pre_publish' as const
     : exactRecoverableError
@@ -193,7 +205,7 @@ function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
     )
   ) ? (
       browserClosedPrePublishFailure
-        ? BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE
+        ? browserClosedPrePublishFailure
         : exactRecoverableError
     ) : null;
   const failedRecoveryEligible = Boolean(
@@ -229,12 +241,11 @@ function mapItem(row: ItemRow, batch?: BatchRow): PublishBatchItem {
           row.recovery_audit_error_code,
           row.recovery_audit_error_message,
         ) ||
-        (isExactBrowserClosedPrePublishFailure(
+        (exactBrowserClosedCode(
           row.recovery_audit_error_code,
           row.recovery_audit_error_message,
         )
-          ? BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE
-          : null)
+          ?? null)
       )
     : null;
   const queuedRepairEligible = Boolean(

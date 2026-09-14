@@ -100,6 +100,29 @@ describe('generation-aware recovery migration', () => {
     expect(migration).not.toContain('prevent_rednote_publish_job_recovery_mutation');
   });
 
+  it('adds only BROWSER_CLOSED_PRE_PUBLISH to the browser-closed recovery audit allowlist', () => {
+    const migration = readFileSync(
+      join(process.cwd(), 'migrations/036_allow_stable_browser_closed_pre_publish.sql'),
+      'utf8',
+    );
+    const previousMigration = readFileSync(
+      join(process.cwd(), 'migrations/035_recover_browser_closed_pre_publish.sql'),
+      'utf8',
+    );
+    const codes = (sql: string) => [
+      ...sql.matchAll(/'([A-Z][A-Z_]+)'/g),
+    ].map((match) => match[1]);
+    expect(migration).toContain(
+      'DROP CONSTRAINT IF EXISTS rednote_publish_job_recoveries_prior_error_code_check',
+    );
+    expect(codes(migration)).toEqual([
+      ...codes(previousMigration),
+      'BROWSER_CLOSED_PRE_PUBLISH',
+    ]);
+    expect(migration).not.toMatch(/\bUPDATE\b|\bDELETE FROM\b|\bINSERT INTO\b/i);
+    expect(migration).not.toContain('prevent_rednote_publish_job_recovery_mutation');
+  });
+
   it('treats only a coherent rejected v2 result as non-publication evidence', () => {
     const migration = readFileSync(
       join(

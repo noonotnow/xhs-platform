@@ -19,7 +19,8 @@ import {
   recoverStoredBrowserClosedPrePublishJob,
 } from '@/lib/rednote-publish-job-recovery-store';
 import {
-  BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
+  LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
+  LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
 } from '@/lib/rednote-publish-job-recovery-contract';
 import type { RednotePublishJobRecoveryInput } from '@/lib/rednote-publish-job-recovery';
 
@@ -151,8 +152,8 @@ describe('stored approved publish job recovery', () => {
   it('keeps browser-closed recovery behind the dedicated store operation', async () => {
     const browserClosedRow = {
       ...row(),
-      job_error_code: 'INTERNAL_ERROR',
-      job_error_message: BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
+      job_error_code: LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
+      job_error_message: LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
     };
     const mockRecoveryQueries = () => {
       mocks.query.mockImplementation(async (statement: string) => {
@@ -215,8 +216,8 @@ describe('stored approved publish job recovery', () => {
     const auditCall = mocks.query.mock.calls.find(([statement]) =>
       String(statement).includes('INSERT INTO rednote_publish_job_recoveries'));
     expect(auditCall?.[1]?.slice(6, 8)).toEqual([
-      'INTERNAL_ERROR',
-      BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
+      LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
+      LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
     ]);
   });
 

@@ -8,8 +8,11 @@ import {
   type RednotePublishJobRecoveryInput,
 } from '@/lib/rednote-publish-job-recovery';
 import {
+  BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
   BROWSER_CLOSED_PRE_PUBLISH_CONFIRMATION,
   BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
+  LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
+  LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
 } from '@/lib/rednote-publish-job-recovery-contract';
 import type { LocalPublishSnapshot } from '@/types/local-publish-job';
 
@@ -90,7 +93,11 @@ describe('bounded publish job recovery validation', () => {
     jobErrorMessage: 'RedNote creator login is required in the persistent browser profile',
   };
   const browserClosedFailure = {
-    jobErrorCode: 'INTERNAL_ERROR',
+    jobErrorCode: LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
+    jobErrorMessage: LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
+  };
+  const stableBrowserClosedFailure = {
+    jobErrorCode: BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
     jobErrorMessage: BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
   };
 
@@ -106,6 +113,16 @@ describe('bounded publish job recovery validation', () => {
     )).toThrow(/exact recoverable terminal pre-dispatch/i);
     expect(validateRecoveryCandidate(
       candidate(browserClosedFailure),
+      input,
+      actor,
+      'browser_closed_pre_publish',
+    )).toBe('recover');
+    expect(isExactBrowserClosedPrePublishFailure(
+      stableBrowserClosedFailure.jobErrorCode,
+      stableBrowserClosedFailure.jobErrorMessage,
+    )).toBe(true);
+    expect(validateRecoveryCandidate(
+      candidate(stableBrowserClosedFailure),
       input,
       actor,
       'browser_closed_pre_publish',
@@ -144,9 +161,9 @@ describe('bounded publish job recovery validation', () => {
     )).toBe('repair_missing_attempt_lineage');
 
     for (const jobErrorMessage of [
-      ` ${BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE}`,
-      `${BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE} `,
-      `${BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE}: retry`,
+      ` ${LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE}`,
+      `${LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE} `,
+      `${LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE}: retry`,
       'page.waitForTimeout: Target page, context or browser has been closed.',
       'page.waitForTimeout: target page, context or browser has been closed',
       'page.goto: Target page, context or browser has been closed',
@@ -158,6 +175,25 @@ describe('bounded publish job recovery validation', () => {
       )).toBe(false);
       expect(() => validateRecoveryCandidate(
         candidate({ ...browserClosedFailure, jobErrorMessage }),
+        input,
+        actor,
+        'browser_closed_pre_publish',
+      )).toThrow(/exact recoverable terminal pre-dispatch/i);
+    }
+    for (const [jobErrorCode, jobErrorMessage] of [
+      [
+        BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
+        LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
+      ],
+      [
+        LEGACY_BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE,
+        BROWSER_CLOSED_PRE_PUBLISH_ERROR_MESSAGE,
+      ],
+      [BROWSER_CLOSED_PRE_PUBLISH_ERROR_CODE, 'Creator browser closed before publish activation'],
+    ] as const) {
+      expect(isExactBrowserClosedPrePublishFailure(jobErrorCode, jobErrorMessage)).toBe(false);
+      expect(() => validateRecoveryCandidate(
+        candidate({ jobErrorCode, jobErrorMessage }),
         input,
         actor,
         'browser_closed_pre_publish',

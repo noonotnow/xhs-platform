@@ -244,7 +244,8 @@ export interface RednotePublishJobRecoveryEvidence {
     | 'AMBIGUOUS_CREATOR_UI'
     | 'NOT_LOGGED_IN'
     | 'SCHEDULE_READBACK_MISMATCH'
-    | 'INTERNAL_ERROR';
+    | 'INTERNAL_ERROR'
+    | 'BROWSER_CLOSED_PRE_PUBLISH';
   claimAttempts: number;
   latestAuditedClaimAttempts?: number;
 }

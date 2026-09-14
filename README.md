@@ -561,6 +561,11 @@ A database already through migration 033 needs only migration 034.
 browser-closed pre-Publish path. It does not mutate lifecycle or audit rows.
 Apply migration 035 before deploying platform code that exposes this action. A
 database already through migration 034 needs only migration 035.
+`migrations/036_allow_stable_browser_closed_pre_publish.sql` additively permits
+`BROWSER_CLOSED_PRE_PUBLISH` in the immutable recovery audit while preserving
+the exact legacy `INTERNAL_ERROR` path for already recorded failures. Apply
+migration 036 before deploying platform code that accepts the stable worker
+error pair. A database already through migration 035 needs only migration 036.
 
 This is the only supported recovery for a bounded job that terminal-failed
 before staging or dispatch with either existing exact error
@@ -574,12 +579,17 @@ replace an item, rebuild or approve a manifest, change the frozen snapshot or
 publish time, or change the original batch approval.
 
 The browser-closed pre-Publish action is a separate fail-closed path. It accepts
-only code `INTERNAL_ERROR` and the exact anchored message
-`page.waitForTimeout: Target page, context or browser has been closed`; prefixes,
-suffixes, whitespace changes, other browser errors, and generic
-`INTERNAL_ERROR` failures are ineligible. It preserves every immutable,
-approval, ownership, generation, and no-publication check above. It does not
-broaden the existing stale-browser-frame recovery matcher.
+only one of two exact code/message pairs:
+
+- `INTERNAL_ERROR` with
+  `page.waitForTimeout: Target page, context or browser has been closed`; or
+- `BROWSER_CLOSED_PRE_PUBLISH` with
+  `Creator browser closed before any publish activation`.
+
+Prefixes, suffixes, whitespace changes, near-miss codes/messages, other browser
+errors, and generic `INTERNAL_ERROR` failures are ineligible. It preserves
+every immutable, approval, ownership, generation, and no-publication check
+above. It does not broaden the existing stale-browser-frame recovery matcher.
 
 Use this deployment and operator sequence exactly:
 
@@ -604,12 +614,19 @@ Use this deployment and operator sequence exactly:
      -f migrations/034_recover_schedule_readback_mismatch.sql
    psql "$XHS_DATABASE_POSTGRES_URL_NON_POOLING" -v ON_ERROR_STOP=1 \
      -f migrations/035_recover_browser_closed_pre_publish.sql
+   psql "$XHS_DATABASE_POSTGRES_URL_NON_POOLING" -v ON_ERROR_STOP=1 \
+     -f migrations/036_allow_stable_browser_closed_pre_publish.sql
    ```
 
 3. Deploy the platform release containing the recovery API and UI only after
-   all required migrations, including 035, succeed. Do not rebuild, supersede,
+   all required migrations, including 036, succeed. Do not rebuild, supersede,
    or approve a batch and do not create a replacement job.
-4. In `/admin`, refresh **Bounded batch approval**. **Eligible pre-dispatch
+4. Deploy the paired worker release that emits
+   `BROWSER_CLOSED_PRE_PUBLISH` plus
+   `Creator browser closed before any publish activation`.
+5. Validate with synthetic or unit fixtures only; do not create or publish a
+   live post as a deployment test.
+6. In `/admin`, refresh **Bounded batch approval**. **Eligible pre-dispatch
    recovery** appears only when the approved batch, two-way item/job linkage,
    immutable snapshots, manifest/item hashes, source revision, exact error,
    pre-dispatch null evidence, and absence of alternate ownership still match.
@@ -622,7 +639,7 @@ Use this deployment and operator sequence exactly:
    operator and identifies the operation as `repair_missing_attempt_lineage`.
    Mismatched, actor-less, or ambiguous history fails closed, and the action
    disappears once lineage exists.
-5. Compare every displayed job, batch, item, manifest hash, item hash, source
+7. Compare every displayed job, batch, item, manifest hash, item hash, source
    revision, and original publish time with the approved change record. Select
    **Repair missing attempt lineage** for an already queued audited recovery, or
    **Confirm exact-job recovery** once for a proven later failure generation, and
@@ -630,7 +647,7 @@ Use this deployment and operator sequence exactly:
    created. A later failed-generation recovery remains bound to the original
    recovery actor; only the missing-lineage repair permits a different authorized
    Admin.
-6. A first recovery writes one immutable audit row. An exact queue-only repair
+8. A first recovery writes one immutable audit row. An exact queue-only repair
    reuses its existing audit instead of writing another. Both create one fresh
    approved worker attempt generation for that claim generation, supersede the
    terminal attempt without erasing it, and leave the same job and item
@@ -641,7 +658,7 @@ Use this deployment and operator sequence exactly:
    allowed only after a distinct greater claim attempt has later exact claimed and
    completed timestamps and independently satisfies every original precondition.
    Unchanged generations, changed evidence, or a job claimed by a worker fail closed.
-7. Confirm the exact recovered row is queued and keep the worker unloaded. For
+9. Confirm the exact recovered row is queued and keep the worker unloaded. For
    `NOT_LOGGED_IN`, independently confirm the persistent Creator profile identity
    succeeds. Start the worker for one controlled real claim and verify the fresh
    active attempt is claimed once. For `BOUNDED_BATCH_BYPASS_DISABLED`, enable
