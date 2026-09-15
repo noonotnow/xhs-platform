@@ -10,6 +10,7 @@ import {
 import {
   authorizeStoredLocalPublishJob,
   claimNextStoredLocalPublishJob,
+  claimExactActivatedStoredLocalPublishJob,
   completeStoredLocalPublishReconciliation,
   consumeStoredDispatchAuthorization,
   deferStoredLocalPublishVerification,
@@ -31,6 +32,11 @@ import {
   type StoredLocalPublishJob,
   heartbeatStoredLocalPublishJob,
 } from '@/lib/local-publish-job-store';
+import { dispatchActivationNonceDigest } from '@/lib/local-publish-dispatch-activation';
+import {
+  type ExactJobActivationSelectors,
+  validateExactJobActivationSelectors,
+} from '@/lib/exact-job-activation-contract';
 import {
   isRednoteNoteId,
   normalizeRednoteShareUrl,
@@ -694,6 +700,7 @@ export function validateExpectedVerificationJobId(
       400,
     );
   }
+
   if (lane !== 'verification') {
     throw new LocalPublishJobError(
       'expectedJobId requires lane=verification',
@@ -701,6 +708,42 @@ export function validateExpectedVerificationJobId(
       400,
     );
   }
+}
+
+export function validateExactDispatchActivationInput(input: {
+  lane: LocalPublishWorkLane;
+  contractRevision?: string;
+  expectedJobId?: string;
+  activationId?: string;
+  expectedBatchId?: string;
+  expectedItemId?: string;
+  expectedManifestHash?: string;
+  expectedItemHash?: string;
+  expectedSourceRevision?: string;
+  expectedReleaseId?: string;
+  expectedWorkerAttestationId?: string;
+  nonce?: string;
+}): asserts input is ExactJobActivationSelectors {
+  validateExactJobActivationSelectors(input);
+}
+
+export async function claimActivatedLocalPublishJob(
+  input: Omit<Partial<ExactJobActivationSelectors>, 'lane'> & {
+    lane: LocalPublishWorkLane;
+  },
+  workspaceId: string,
+  claimToken: string,
+  workerId: string,
+) {
+  validateExactDispatchActivationInput(input);
+  return claimExactActivatedStoredLocalPublishJob(
+    leaseSeconds(),
+    workspaceId,
+    input,
+    dispatchActivationNonceDigest(input.nonce!),
+    claimToken,
+    workerId,
+  );
 }
 
 export async function claimNextLocalPublishJob(

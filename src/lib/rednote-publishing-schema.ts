@@ -23,6 +23,7 @@ export const REDNOTE_SCHEMA_MIGRATIONS = [
   '035',
   '036',
   '037',
+  '038',
 ] as const;
 export type RednoteSchemaMigration = (typeof REDNOTE_SCHEMA_MIGRATIONS)[number];
 export type RednoteSchemaReadiness = Record<RednoteSchemaMigration, boolean>;
@@ -92,6 +93,7 @@ const migrationFiles: Record<RednoteSchemaMigration, readonly string[]> = {
   '035': ['035_recover_browser_closed_pre_publish.sql'],
   '036': ['036_allow_stable_browser_closed_pre_publish.sql'],
   '037': ['037_on_demand_publish_batches.sql'],
+  '038': ['038_exact_job_dispatch_activations.sql'],
 };
 
 const READINESS_SQL = `
@@ -240,7 +242,46 @@ const READINESS_SQL = `
         'constraint_value',
         'rednote_publish_batches',
         'on_demand'
-      )
+      ),
+      ('038', 'table', NULL, 'local_publish_dispatch_activations'),
+      ('038', 'table', NULL, 'local_publish_dispatch_activation_events'),
+      ('038', 'column', 'local_publish_dispatch_activations', 'nonce_digest'),
+      ('038', 'column', 'local_publish_dispatch_activations', 'generation'),
+      ('038', 'column', 'local_publish_dispatch_activations', 'state'),
+      ('038', 'column', 'local_publish_dispatch_activations', 'cancelled_at'),
+      ('038', 'column', 'local_publish_dispatch_activations',
+        'expected_worker_release_id'),
+      ('038', 'column', 'local_publish_dispatch_activations',
+        'expected_worker_attestation_id'),
+      ('038', 'index_definition', 'local_publish_dispatch_activations',
+        'local_publish_dispatch_activation_identity_idx'),
+      ('038', 'index_definition', 'local_publish_dispatch_activations',
+        'local_publish_dispatch_activation_exclusive_hold_idx'),
+      ('038', 'routine', NULL, 'exact_job_dispatch_activation_revision'),
+      ('038', 'routine', NULL, 'active_local_publish_dispatch_activation'),
+      ('038', 'routine', NULL, 'guard_dispatch_eligibility_during_activation'),
+      ('038', 'trigger', 'local_publish_dispatch_activations',
+        'local_publish_dispatch_activation_mutation_guard'),
+      ('038', 'trigger', 'local_publish_dispatch_activations',
+        'local_publish_dispatch_activation_delete_guard'),
+      ('038', 'trigger', 'local_publish_dispatch_activations',
+        'local_publish_dispatch_activation_truncate_guard'),
+      ('038', 'trigger', 'local_publish_dispatch_activation_events',
+        'local_publish_dispatch_activation_events_append_only'),
+      ('038', 'trigger', 'local_publish_dispatch_activation_events',
+        'local_publish_dispatch_activation_events_truncate_guard'),
+      ('038', 'trigger', 'rednote_publish_batches',
+        'rednote_publish_batch_insert_activation_hold'),
+      ('038', 'trigger', 'rednote_publish_batches',
+        'rednote_publish_batch_status_activation_hold'),
+      ('038', 'trigger', 'local_publish_jobs',
+        'local_publish_job_insert_activation_hold'),
+      ('038', 'trigger', 'local_publish_jobs',
+        'local_publish_job_status_activation_hold'),
+      ('038', 'trigger', 'rednote_publish_attempts',
+        'rednote_publish_attempt_insert_activation_hold'),
+      ('038', 'trigger', 'rednote_publish_attempts',
+        'rednote_publish_attempt_status_activation_hold')
   )
   SELECT
     migration,
@@ -325,11 +366,39 @@ const READINESS_SQL = `
             )
         )
         WHEN 'trigger' THEN EXISTS (
-          SELECT 1 FROM information_schema.triggers
-          WHERE trigger_schema = 'public'
-            AND event_object_schema = 'public'
-            AND event_object_table = required_objects.table_name
-            AND trigger_name = object_name
+          SELECT 1
+          FROM pg_trigger
+          JOIN pg_class ON pg_class.oid = pg_trigger.tgrelid
+          JOIN pg_namespace ON pg_namespace.oid = pg_class.relnamespace
+          WHERE pg_namespace.nspname = 'public'
+            AND pg_class.relname = required_objects.table_name
+            AND pg_trigger.tgname = object_name
+            AND NOT pg_trigger.tgisinternal
+        )
+        WHEN 'index_definition' THEN EXISTS (
+          SELECT 1
+          FROM pg_indexes
+          WHERE schemaname = 'public'
+            AND tablename = required_objects.table_name
+            AND indexname = object_name
+            AND indexdef LIKE 'CREATE UNIQUE INDEX%'
+            AND (
+              (
+                object_name =
+                  'local_publish_dispatch_activation_identity_idx'
+                AND indexdef LIKE
+                  '%(local_publish_job_id, generation)%'
+                AND indexdef LIKE '%state <>%'
+                AND indexdef LIKE '%''cancelled''%'
+              )
+              OR (
+                object_name =
+                  'local_publish_dispatch_activation_exclusive_hold_idx'
+                AND indexdef LIKE '%((true))%'
+                AND indexdef LIKE '%''active''%'
+                AND indexdef LIKE '%''consumed''%'
+              )
+            )
         )
         WHEN 'constraint_value' THEN EXISTS (
           SELECT 1
@@ -589,10 +658,12 @@ export async function applyExpectedRednoteSchemaMigrations(
           await client.query(sql);
         }
       }
-
       const after = await readRednoteSchemaReadiness(client);
-      if (missingRednoteSchemaMigrations(after).length > 0) {
-        throw new Error('Schema verification failed after migrations were applied');
+      const missingAfterApply = missingRednoteSchemaMigrations(after);
+      if (missingAfterApply.length > 0) {
+        throw new Error(
+          `Schema verification failed after migrations were applied: ${missingAfterApply.join(', ')}`,
+        );
       }
       await client.query('COMMIT');
       return { before, after, applied: expectedMissing };

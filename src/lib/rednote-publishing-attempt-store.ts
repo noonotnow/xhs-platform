@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from 'util';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { getPool } from '@/lib/db';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
+import { assertNoDispatchActivationHold } from '@/lib/local-publish-dispatch-activation';
 import {
   rednotePublishMedia,
   snapshotPublishMedia,
@@ -694,6 +695,7 @@ export async function getLinkedRednotePublishAttempt(workspaceId: string, localJ
 }
 
 export async function approveRednotePublishAttempt(workspaceId: string, id: string) {
+  await assertNoDispatchActivationHold();
   const result = await getPool().query<AttemptRow>(
     `UPDATE rednote_publish_attempts SET approved_at=COALESCE(approved_at,CURRENT_TIMESTAMP),active=true
      WHERE workspace_id=$1 AND id=$2::uuid AND executor_type='worker'
@@ -710,6 +712,10 @@ export async function claimRednotePublishAttempt(workspaceId: string, leaseSecon
        SELECT id FROM rednote_publish_attempts
        WHERE workspace_id=$1 AND active AND approved_at IS NOT NULL
          AND terminal_outcome IS NULL AND dispatch_authorized_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM local_publish_dispatch_activations
+           WHERE state IN ('active', 'consumed')
+         )
          AND (claim_expires_at IS NULL OR claim_expires_at<=CURRENT_TIMESTAMP)
        ORDER BY requested_at FOR UPDATE SKIP LOCKED LIMIT 1
      )

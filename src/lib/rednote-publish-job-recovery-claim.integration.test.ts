@@ -49,6 +49,14 @@ vi.mock('@/lib/db', () => ({
   },
 }));
 
+vi.mock('@/lib/local-publish-dispatch-activation', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@/lib/local-publish-dispatch-activation')>();
+  return {
+    ...original,
+    assertExactActiveDispatchRecovery: vi.fn(),
+  };
+});
+
 import {
   submitLocalPublishJobResult,
 } from '@/lib/local-publish-jobs';
@@ -112,6 +120,7 @@ const MIGRATIONS = [
   '035_recover_browser_closed_pre_publish.sql',
   '036_allow_stable_browser_closed_pre_publish.sql',
   '037_on_demand_publish_batches.sql',
+  '038_exact_job_dispatch_activations.sql',
 ] as const;
 
 const EXACT_JOB_ID = 'c6203283-be7d-46ce-a38b-9a7f90eef75d';

@@ -2,6 +2,7 @@ import type { PoolClient, QueryResultRow } from 'pg';
 import { createHash } from 'crypto';
 import { isDeepStrictEqual } from 'util';
 import { getPool, sql } from '@/lib/db';
+import { assertNoDispatchActivationHold } from '@/lib/local-publish-dispatch-activation';
 import {
   exactRecoverablePublishJobError,
   isExactBrowserClosedPrePublishFailure,
@@ -366,6 +367,7 @@ export async function createStoredPublishBatch(input: {
       await client.query(
         "SELECT pg_advisory_xact_lock(hashtextextended('rednote-bootstrap-batch', 0))",
       );
+      await assertNoDispatchActivationHold(client);
     }
     const pageIds = Array.from(
       new Set(input.items.map((item) => item.notionPageId)),

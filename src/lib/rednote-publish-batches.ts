@@ -10,6 +10,7 @@ import {
   NotionPostsError,
 } from '@/lib/notion-posts';
 import { listPublishLifecycleBlockers } from '@/lib/local-publish-job-store';
+import { assertNoDispatchActivationHold } from '@/lib/local-publish-dispatch-activation';
 import {
   approveStoredPublishBatch,
   createStoredPublishBatch,
@@ -425,6 +426,7 @@ async function materializeApprovedBatchAttempts(
   batch: Awaited<ReturnType<typeof listStoredPublishBatches>>[number],
   workspaceId: string,
 ) {
+  await assertNoDispatchActivationHold();
   await Promise.all(batch.items.map(async (item) => {
     if (!item.localPublishJobId || item.state !== 'queued') return;
     try {

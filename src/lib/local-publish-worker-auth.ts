@@ -35,6 +35,18 @@ export function requireLocalPublishWorker(authorization: string | null) {
   }
 }
 
+export function parseLocalPublishWorkerId(value: string | null) {
+  const workerId = value?.trim() ?? '';
+  if (!workerId || workerId.length > 200) {
+    throw new LocalPublishJobError(
+      'A valid X-Local-Publish-Worker-Id header is required',
+      'INVALID_WORKER_ID',
+      400,
+    );
+  }
+  return workerId;
+}
+
 export function parseClaimToken(value: string | null) {
   if (!value || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
     throw new LocalPublishJobError(

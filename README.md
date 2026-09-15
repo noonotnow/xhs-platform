@@ -665,6 +665,85 @@ Use this deployment and operator sequence exactly:
    the bounded-batch bypass only through its separately controlled change before
    starting the worker.
 
+#### Exact-job one-shot dispatch activation
+
+Migration `038_exact_job_dispatch_activations.sql` must be applied after migration
+037 and before deploying platform code that exposes dispatch activation controls.
+It adds an audited global singleton hold; an `active` or `consumed` hold prevents
+batch approval, approved-attempt materialization, new local jobs, competing job
+eligibility, and ordinary dispatch claims. It does not alter bootstrap selection
+or approval semantics while no hold exists. Expiry fails closed and does not
+release the hold.
+
+The authenticated Admin control is
+`/admin/api/local-publish-jobs/dispatch-activation`:
+
+1. `POST` action `prepare` binds one existing approved batch job to its batch,
+   item, manifest hash, item hash, source revision, recovery generation, and live
+   worker ID/contract/compatibility revisions, reviewed worker release ID, and
+   worker attestation ID. It requires the exact confirmation
+   `PREPARE EXACT DISPATCH <jobId>` and returns a nonce once; only its SHA-256
+   digest is stored.
+2. `POST` action `activate` revalidates the live worker binding and requires
+   `ACTIVATE EXACT DISPATCH <activationId>`. Activation also requires zero
+   pre-existing competing claimed or staged jobs. Only then does the global hold
+   begin. An unused prepared activation, or an unconsumed active activation
+   after the expected worker is offline, can be retired with action `cancel`,
+   `CANCEL EXACT DISPATCH <activationId>`, and a non-empty reason; cancellation
+   permits a fresh reviewed preparation of the same unconsumed generation.
+3. If recovery is required, recover only the held job's reviewed next generation
+   while the activation is active. Recovery remains a separate audited action.
+4. The worker makes exactly one request:
+   `GET /api/local-publish-jobs/next` with query fields `lane=dispatch`,
+   `contractRevision=exact-job-activation/v1`, `expectedJobId`, `activationId`,
+   `expectedBatchId`, `expectedItemId`,
+   `expectedManifestHash`, `expectedItemHash`, `expectedSourceRevision`,
+   `expectedReleaseId`, and `expectedWorkerAttestationId`. It sends the secret
+   nonce only in `X-Local-Publish-Activation-Nonce`, plus its bearer token,
+   `X-Workspace-Id`, `X-Local-Publish-Worker-Id`, and
+   `X-Local-Publish-Claim-Token`. A `nonce` query parameter is rejected. The
+   worker ID must match the active activation, and the entire immutable selector
+   tuple is required together. Identity, hashes, source revision, release and
+   attestation IDs, generation, pre-dispatch attempt state, and worker lease are
+   revalidated transactionally before any state mutation. A mismatch returns a
+   stable conflict and never falls back to generic selection. A successful
+   response preserves the normal claim body and adds the versioned envelope:
+
+   ```json
+   {
+     "exactActivation": {
+       "contractRevision": "exact-job-activation/v1",
+       "activationId": "uuid",
+       "batchId": "uuid",
+       "itemId": "uuid",
+       "jobId": "uuid",
+       "manifestHash": "64-character lowercase SHA-256",
+       "itemHash": "64-character lowercase SHA-256",
+       "sourceRevision": "canonical UTC timestamp",
+       "releaseId": "reviewed worker release ID",
+       "workerAttestationId": "reviewed worker attestation ID"
+     }
+   }
+   ```
+
+   `src/contracts/exact-job-activation-v1.json` is the canonical
+   cross-repository transport fixture and must be mirrored by the worker.
+5. Consumption is one-shot. Reusing the activation cannot claim again, generic
+   polling cannot expose another item, and terminal worker results do not release
+   the hold.
+6. After the worker is stopped and the exact result and inventory are verified,
+   `POST` action `release` requires
+   `RELEASE EXACT DISPATCH <activationId>` plus a non-empty audit reason. `GET`
+   returns safe activation metadata and aggregate inventory only; it never
+   returns the nonce, media payload, or credentials. Only a consumed activation
+   can be released; release is rejected while the expected worker lease is live
+   or the exact job remains claimed/staged.
+
+Rollout is migration 038, platform release, then the separately reviewed worker
+release that sends the exact activation tuple. Keep bounded-batch bypass disabled
+until its independent operational approval. Do not use platform deployment as a
+reason to recover or retry a live failed canary.
+
 The authenticated action is
 `POST /admin/api/publish-job-recoveries` with exactly:
 
@@ -792,6 +871,9 @@ combined lifecycle transition per wake:
 
 - `GET /api/local-publish-jobs/next?lane=dispatch` atomically claims one
   `queued`, expired `claimed`, or expired `staged` job.
+- While an exact dispatch activation is active or consumed, ordinary dispatch
+  polling returns no claim. Exact activation selectors are never accepted as a
+  generic `expectedJobId` filter.
 - `GET /api/local-publish-jobs/next?lane=verification` atomically claims one
   due `submitted`, `scheduled`, `operator_attested`, or `verification_pending`
   job, or one reclaimable `verified` reconciliation. Dispatch work cannot
