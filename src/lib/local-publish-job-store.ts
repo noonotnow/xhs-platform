@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'crypto';
-import type { QueryResultRow } from 'pg';
+import type { PoolClient, QueryResultRow } from 'pg';
 import { isDeepStrictEqual } from 'util';
 import { getPool, sql } from '@/lib/db';
 import {
@@ -695,10 +695,10 @@ export async function claimExactActivatedStoredLocalPublishJob(
     expectedWorkerAttestationId,
   } = selectors;
   const client = await getPool().connect();
-  let claimed: LocalPublishJobRow | undefined;
+  let claimedResponseCache:
+    | (ClaimedLocalPublishJob & { exactActivation: ExactJobActivationEnvelope })
+    | undefined;
   let generation = 0;
-  let consumedAt: Date | string | undefined;
-  let exactActivation: ExactJobActivationEnvelope | undefined;
   try {
     await client.query('BEGIN');
     await client.query(
@@ -797,7 +797,7 @@ export async function claimExactActivatedStoredLocalPublishJob(
       );
     }
     generation = target.rows[0].generation;
-    exactActivation = {
+    const exactActivation: ExactJobActivationEnvelope = {
       contractRevision: EXACT_JOB_ACTIVATION_CONTRACT_REVISION,
       activationId: target.rows[0].activation_id,
       batchId: target.rows[0].batch_id,
@@ -870,7 +870,7 @@ export async function claimExactActivatedStoredLocalPublishJob(
        RETURNING *`,
       [expectedJobId, workspaceId, claimToken, leaseSeconds],
     );
-    claimed = jobs.rows[0];
+    const claimed = jobs.rows[0];
     if (!claimed?.claim_expires_at) {
       throw new LocalPublishJobError(
         'The exact dispatch job changed before it could be claimed',
@@ -907,7 +907,7 @@ export async function claimExactActivatedStoredLocalPublishJob(
        RETURNING consumed_at`,
       [activationId, authenticatedWorkerId],
     );
-    consumedAt = consumed.rows[0]?.consumed_at;
+    const consumedAt = consumed.rows[0]?.consumed_at;
     if (!consumedAt) {
       throw new LocalPublishJobError(
         'The dispatch activation was already consumed',
@@ -931,6 +931,13 @@ export async function claimExactActivatedStoredLocalPublishJob(
        ) VALUES($1::uuid, 'worker_claimed', CURRENT_TIMESTAMP, 'worker', $2)`,
       [attempt.rows[0].id, authenticatedWorkerId],
     );
+    const projectedResponse = {
+      ...(await claimedResponse(claimed, client)),
+      exactActivation,
+    };
+    claimedResponseCache = JSON.parse(
+      JSON.stringify(projectedResponse),
+    ) as typeof projectedResponse;
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK');
@@ -938,17 +945,14 @@ export async function claimExactActivatedStoredLocalPublishJob(
   } finally {
     client.release();
   }
-  if (!claimed || !consumedAt || !exactActivation) {
+  if (!claimedResponseCache) {
     throw new LocalPublishJobError(
       'The exact dispatch activation did not produce a claim',
       'DISPATCH_ACTIVATION_NOT_CLAIMABLE',
       409,
     );
   }
-  return {
-    ...(await claimedResponse(claimed)),
-    exactActivation,
-  };
+  return claimedResponseCache;
 }
 
 export async function releaseExpiredStoredLocalPublishClaims() {
@@ -1135,7 +1139,10 @@ export async function releaseExpiredStoredLocalPublishClaims() {
   return result.rows.map((row) => row.id);
 }
 
-async function claimedResponse(row: LocalPublishJobRow): Promise<ClaimedLocalPublishJob> {
+async function claimedResponse(
+  row: LocalPublishJobRow,
+  transactionClient?: Pick<PoolClient, 'query'>,
+): Promise<ClaimedLocalPublishJob> {
   if (!row.claim_token || !row.claim_expires_at) {
     throw new LocalPublishJobError(
       'The local publish job does not have a current claim',
@@ -1145,37 +1152,64 @@ async function claimedResponse(row: LocalPublishJobRow): Promise<ClaimedLocalPub
   }
   const job = mapRow(row);
   if (row.batch_item_id) {
-    const authorization = await sql<{
+    type BatchAuthorizationRow = {
       batch_id: string;
       batch_item_id: string;
       manifest_hash: string;
       item_hash: string;
       approved_at: Date | string;
       dispatch_mode: 'scheduled' | 'post_now';
-    }>`
-      SELECT
-        batch.id AS batch_id,
-        item.id AS batch_item_id,
-        batch.manifest_hash,
-        item.item_hash,
-        batch.approved_at,
-        item.dispatch_mode
-      FROM rednote_publish_batch_items AS item
-      JOIN rednote_publish_batches AS batch ON batch.id = item.batch_id
-      WHERE item.id = ${row.batch_item_id}::uuid
-        AND (
-          (${job.status} = 'operator_attested' AND item.state = 'operator_attested')
-          OR (
-            ${job.status} <> 'operator_attested'
-            AND item.state IN (
-              'queued', 'claimed', 'staged', 'submitted', 'scheduled',
-              'verification_pending', 'verified'
-            )
-          )
+    } & QueryResultRow;
+    const authorization = transactionClient
+      ? await transactionClient.query<BatchAuthorizationRow>(
+          `SELECT
+             batch.id AS batch_id,
+             item.id AS batch_item_id,
+             batch.manifest_hash,
+             item.item_hash,
+             batch.approved_at,
+             item.dispatch_mode
+           FROM rednote_publish_batch_items AS item
+           JOIN rednote_publish_batches AS batch ON batch.id = item.batch_id
+           WHERE item.id = $1::uuid
+             AND (
+               ($2 = 'operator_attested' AND item.state = 'operator_attested')
+               OR (
+                 $2 <> 'operator_attested'
+                 AND item.state IN (
+                   'queued', 'claimed', 'staged', 'submitted', 'scheduled',
+                   'verification_pending', 'verified'
+                 )
+               )
+             )
+             AND batch.approved_at IS NOT NULL
+           LIMIT 1`,
+          [row.batch_item_id, job.status],
         )
-        AND batch.approved_at IS NOT NULL
-      LIMIT 1
-    `;
+      : await sql<BatchAuthorizationRow>`
+          SELECT
+            batch.id AS batch_id,
+            item.id AS batch_item_id,
+            batch.manifest_hash,
+            item.item_hash,
+            batch.approved_at,
+            item.dispatch_mode
+          FROM rednote_publish_batch_items AS item
+          JOIN rednote_publish_batches AS batch ON batch.id = item.batch_id
+          WHERE item.id = ${row.batch_item_id}::uuid
+            AND (
+              (${job.status} = 'operator_attested' AND item.state = 'operator_attested')
+              OR (
+                ${job.status} <> 'operator_attested'
+                AND item.state IN (
+                  'queued', 'claimed', 'staged', 'submitted', 'scheduled',
+                  'verification_pending', 'verified'
+                )
+              )
+            )
+            AND batch.approved_at IS NOT NULL
+          LIMIT 1
+        `;
     const approved = authorization.rows[0];
     if (!approved) {
       throw new LocalPublishJobError(

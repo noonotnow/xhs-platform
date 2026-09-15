@@ -217,6 +217,7 @@ async function state(jobId: string, activationId: string) {
     attempt_claim_token: string | null;
     attempt_dispatch_authorized_at: string | null;
     activation_event_count: number;
+    attempt_event_count: number;
     receipt_count: number;
   }>(
     `SELECT activation.state AS activation_state, job.claim_attempts,
@@ -227,6 +228,11 @@ async function state(jobId: string, activationId: string) {
          FROM local_publish_dispatch_activation_events event
          WHERE event.activation_id = activation.id
        ) AS activation_event_count,
+       (
+         SELECT COUNT(*)::integer
+         FROM rednote_publish_attempt_events event
+         WHERE event.attempt_id = attempt.id
+       ) AS attempt_event_count,
        (
          SELECT COUNT(*)::integer
          FROM rednote_publish_attempt_receipts receipt
@@ -453,6 +459,7 @@ describe('exact job dispatch activation', () => {
       attempt_claim_token: null,
       attempt_dispatch_authorized_at: null,
       activation_event_count: 2,
+      attempt_event_count: 0,
       receipt_count: 0,
     });
     await database.query(
@@ -499,6 +506,7 @@ describe('exact job dispatch activation', () => {
         attempt_claim_token: null,
         attempt_dispatch_authorized_at: null,
         activation_event_count: 2,
+        attempt_event_count: 0,
         receipt_count: 0,
       });
     }
@@ -523,6 +531,58 @@ describe('exact job dispatch activation', () => {
       randomUUID(),
       'unexpected-worker',
     )).rejects.toMatchObject({ code: 'DISPATCH_ACTIVATION_NOT_CLAIMABLE' });
+    await database.exec(`
+      CREATE FUNCTION invalidate_exact_item_after_claim()
+      RETURNS TRIGGER AS $$
+      BEGIN
+        UPDATE rednote_publish_batch_items
+        SET state = 'invalidated'
+        WHERE id = NEW.batch_item_id;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+
+      CREATE TRIGGER invalidate_exact_item_after_claim
+      AFTER UPDATE OF status ON local_publish_jobs
+      FOR EACH ROW
+      WHEN (OLD.status = 'queued' AND NEW.status = 'claimed')
+      EXECUTE FUNCTION invalidate_exact_item_after_claim();
+    `);
+    await expect(claimExactActivatedStoredLocalPublishJob(
+      60,
+      workspaceId,
+      {
+        lane: 'dispatch',
+        contractRevision: 'exact-job-activation/v1',
+        expectedJobId: exact.jobId,
+        activationId: prepared.activation.id,
+        expectedBatchId: exact.batchId,
+        expectedItemId: exact.itemId,
+        expectedManifestHash: exact.manifestHash,
+        expectedItemHash: exact.itemHash,
+        expectedSourceRevision: exact.sourceRevision,
+        expectedReleaseId: workerReleaseId,
+        expectedWorkerAttestationId: workerAttestationId,
+        nonce: prepared.nonce,
+      },
+      dispatchActivationNonceDigest(prepared.nonce),
+      randomUUID(),
+      workerId,
+    )).rejects.toMatchObject({ code: 'INVALID_BATCH_AUTHORIZATION' });
+    expect(await state(exact.jobId, prepared.activation.id)).toEqual({
+      activation_state: 'active',
+      claim_attempts: 0,
+      claim_token: null,
+      attempt_claim_token: null,
+      attempt_dispatch_authorized_at: null,
+      activation_event_count: 2,
+      attempt_event_count: 0,
+      receipt_count: 0,
+    });
+    await database.exec(`
+      DROP TRIGGER invalidate_exact_item_after_claim ON local_publish_jobs;
+      DROP FUNCTION invalidate_exact_item_after_claim();
+    `);
     const claim = await claimExactActivatedStoredLocalPublishJob(
       60,
       workspaceId,
