@@ -96,6 +96,8 @@ const workerId = 'worker-release-1';
 const contractRevision = 'publishing-v1';
 const compatibilityRevision = 'ready-x3/v1';
 const actorId = 'operator@example.com';
+const workerReleaseId = 'playwright-mcp-server@release-2026-09-14';
+const workerAttestationId = '55555555-5555-4555-8555-555555555555';
 
 function stable(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
@@ -213,9 +215,23 @@ async function state(jobId: string, activationId: string) {
     claim_attempts: number;
     claim_token: string | null;
     attempt_claim_token: string | null;
+    attempt_dispatch_authorized_at: string | null;
+    activation_event_count: number;
+    receipt_count: number;
   }>(
     `SELECT activation.state AS activation_state, job.claim_attempts,
-       job.claim_token, attempt.claim_token AS attempt_claim_token
+       job.claim_token, attempt.claim_token AS attempt_claim_token,
+       attempt.dispatch_authorized_at AS attempt_dispatch_authorized_at,
+       (
+         SELECT COUNT(*)::integer
+         FROM local_publish_dispatch_activation_events event
+         WHERE event.activation_id = activation.id
+       ) AS activation_event_count,
+       (
+         SELECT COUNT(*)::integer
+         FROM rednote_publish_attempt_receipts receipt
+         WHERE receipt.attempt_id = attempt.id
+       ) AS receipt_count
      FROM local_publish_dispatch_activations activation
      JOIN local_publish_jobs job ON job.id = activation.local_publish_job_id
      JOIN rednote_publish_attempts attempt
@@ -268,6 +284,8 @@ describe('exact job dispatch activation', () => {
       expectedWorkerId: workerId,
       expectedWorkerContractRevision: contractRevision,
       expectedWorkerCompatibilityRevision: compatibilityRevision,
+      expectedWorkerReleaseId: workerReleaseId,
+      expectedWorkerAttestationId: workerAttestationId,
     }, actorId)).rejects.toMatchObject({
       code: 'DISPATCH_ACTIVATION_TARGET_MISMATCH',
     });
@@ -284,6 +302,8 @@ describe('exact job dispatch activation', () => {
       expectedWorkerId: workerId,
       expectedWorkerContractRevision: contractRevision,
       expectedWorkerCompatibilityRevision: compatibilityRevision,
+      expectedWorkerReleaseId: workerReleaseId,
+      expectedWorkerAttestationId: workerAttestationId,
     }, actorId);
     await expect(cancelDispatchActivation(
       cancelledPreparation.activation.id,
@@ -303,6 +323,8 @@ describe('exact job dispatch activation', () => {
       expectedWorkerId: workerId,
       expectedWorkerContractRevision: contractRevision,
       expectedWorkerCompatibilityRevision: compatibilityRevision,
+      expectedWorkerReleaseId: workerReleaseId,
+      expectedWorkerAttestationId: workerAttestationId,
     }, actorId);
     await database.query(
       `UPDATE local_publish_jobs
@@ -358,6 +380,8 @@ describe('exact job dispatch activation', () => {
       expectedWorkerId: workerId,
       expectedWorkerContractRevision: contractRevision,
       expectedWorkerCompatibilityRevision: compatibilityRevision,
+      expectedWorkerReleaseId: workerReleaseId,
+      expectedWorkerAttestationId: workerAttestationId,
     }, actorId);
     await activateDispatchActivation(prepared.activation.id, prepared.nonce, actorId);
 
@@ -404,8 +428,20 @@ describe('exact job dispatch activation', () => {
     await expect(claimExactActivatedStoredLocalPublishJob(
       60,
       workspaceId,
-      exact.jobId,
-      prepared.activation.id,
+      {
+        lane: 'dispatch',
+        contractRevision: 'exact-job-activation/v1',
+        expectedJobId: exact.jobId,
+        activationId: prepared.activation.id,
+        expectedBatchId: exact.batchId,
+        expectedItemId: exact.itemId,
+        expectedManifestHash: exact.manifestHash,
+        expectedItemHash: exact.itemHash,
+        expectedSourceRevision: exact.sourceRevision,
+        expectedReleaseId: workerReleaseId,
+        expectedWorkerAttestationId: workerAttestationId,
+        nonce: prepared.nonce,
+      },
       dispatchActivationNonceDigest(prepared.nonce),
       randomUUID(),
       workerId,
@@ -415,6 +451,9 @@ describe('exact job dispatch activation', () => {
       claim_attempts: 0,
       claim_token: null,
       attempt_claim_token: null,
+      attempt_dispatch_authorized_at: null,
+      activation_event_count: 2,
+      receipt_count: 0,
     });
     await database.query(
       `UPDATE local_publish_jobs SET snapshot = $2::jsonb WHERE id = $1`,
@@ -422,11 +461,64 @@ describe('exact job dispatch activation', () => {
     );
 
     const claimToken = randomUUID();
+    for (const mismatch of [
+      { expectedBatchId: randomUUID() },
+      { expectedItemId: randomUUID() },
+      { expectedManifestHash: 'c'.repeat(64) },
+      { expectedItemHash: 'd'.repeat(64) },
+      { expectedSourceRevision: '2026-09-08T16:38:00.000Z' },
+      { expectedReleaseId: 'unexpected-release' },
+      { expectedWorkerAttestationId: 'unexpected-attestation' },
+    ]) {
+      await expect(claimExactActivatedStoredLocalPublishJob(
+        60,
+        workspaceId,
+        {
+          lane: 'dispatch',
+          contractRevision: 'exact-job-activation/v1',
+          expectedJobId: exact.jobId,
+          activationId: prepared.activation.id,
+          expectedBatchId: exact.batchId,
+          expectedItemId: exact.itemId,
+          expectedManifestHash: exact.manifestHash,
+          expectedItemHash: exact.itemHash,
+          expectedSourceRevision: exact.sourceRevision,
+          expectedReleaseId: workerReleaseId,
+          expectedWorkerAttestationId: workerAttestationId,
+          nonce: prepared.nonce,
+          ...mismatch,
+        },
+        dispatchActivationNonceDigest(prepared.nonce),
+        randomUUID(),
+        workerId,
+      )).rejects.toMatchObject({ code: 'DISPATCH_ACTIVATION_NOT_CLAIMABLE' });
+      expect(await state(exact.jobId, prepared.activation.id)).toEqual({
+        activation_state: 'active',
+        claim_attempts: 0,
+        claim_token: null,
+        attempt_claim_token: null,
+        attempt_dispatch_authorized_at: null,
+        activation_event_count: 2,
+        receipt_count: 0,
+      });
+    }
     await expect(claimExactActivatedStoredLocalPublishJob(
       60,
       workspaceId,
-      exact.jobId,
-      prepared.activation.id,
+      {
+        lane: 'dispatch',
+        contractRevision: 'exact-job-activation/v1',
+        expectedJobId: exact.jobId,
+        activationId: prepared.activation.id,
+        expectedBatchId: exact.batchId,
+        expectedItemId: exact.itemId,
+        expectedManifestHash: exact.manifestHash,
+        expectedItemHash: exact.itemHash,
+        expectedSourceRevision: exact.sourceRevision,
+        expectedReleaseId: workerReleaseId,
+        expectedWorkerAttestationId: workerAttestationId,
+        nonce: prepared.nonce,
+      },
       dispatchActivationNonceDigest(prepared.nonce),
       randomUUID(),
       'unexpected-worker',
@@ -434,8 +526,20 @@ describe('exact job dispatch activation', () => {
     const claim = await claimExactActivatedStoredLocalPublishJob(
       60,
       workspaceId,
-      exact.jobId,
-      prepared.activation.id,
+      {
+        lane: 'dispatch',
+        contractRevision: 'exact-job-activation/v1',
+        expectedJobId: exact.jobId,
+        activationId: prepared.activation.id,
+        expectedBatchId: exact.batchId,
+        expectedItemId: exact.itemId,
+        expectedManifestHash: exact.manifestHash,
+        expectedItemHash: exact.itemHash,
+        expectedSourceRevision: exact.sourceRevision,
+        expectedReleaseId: workerReleaseId,
+        expectedWorkerAttestationId: workerAttestationId,
+        nonce: prepared.nonce,
+      },
       dispatchActivationNonceDigest(prepared.nonce),
       claimToken,
       workerId,
@@ -443,17 +547,36 @@ describe('exact job dispatch activation', () => {
     expect(claim).toMatchObject({
       id: exact.jobId,
       claimToken,
-      dispatchActivation: {
-        id: prepared.activation.id,
-        generation: 0,
-        releaseRequired: true,
+      exactActivation: {
+        contractRevision: 'exact-job-activation/v1',
+        activationId: prepared.activation.id,
+        batchId: exact.batchId,
+        itemId: exact.itemId,
+        jobId: exact.jobId,
+        manifestHash: exact.manifestHash,
+        itemHash: exact.itemHash,
+        sourceRevision: exact.sourceRevision,
+        releaseId: workerReleaseId,
+        workerAttestationId,
       },
     });
     await expect(claimExactActivatedStoredLocalPublishJob(
       60,
       workspaceId,
-      exact.jobId,
-      prepared.activation.id,
+      {
+        lane: 'dispatch',
+        contractRevision: 'exact-job-activation/v1',
+        expectedJobId: exact.jobId,
+        activationId: prepared.activation.id,
+        expectedBatchId: exact.batchId,
+        expectedItemId: exact.itemId,
+        expectedManifestHash: exact.manifestHash,
+        expectedItemHash: exact.itemHash,
+        expectedSourceRevision: exact.sourceRevision,
+        expectedReleaseId: workerReleaseId,
+        expectedWorkerAttestationId: workerAttestationId,
+        nonce: prepared.nonce,
+      },
       dispatchActivationNonceDigest(prepared.nonce),
       randomUUID(),
       workerId,

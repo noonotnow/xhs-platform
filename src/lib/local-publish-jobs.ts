@@ -34,6 +34,10 @@ import {
 } from '@/lib/local-publish-job-store';
 import { dispatchActivationNonceDigest } from '@/lib/local-publish-dispatch-activation';
 import {
+  type ExactJobActivationSelectors,
+  validateExactJobActivationSelectors,
+} from '@/lib/exact-job-activation-contract';
+import {
   isRednoteNoteId,
   normalizeRednoteShareUrl,
 } from '@/lib/rednote-publication';
@@ -708,34 +712,24 @@ export function validateExpectedVerificationJobId(
 
 export function validateExactDispatchActivationInput(input: {
   lane: LocalPublishWorkLane;
+  contractRevision?: string;
   expectedJobId?: string;
   activationId?: string;
+  expectedBatchId?: string;
+  expectedItemId?: string;
+  expectedManifestHash?: string;
+  expectedItemHash?: string;
+  expectedSourceRevision?: string;
+  expectedReleaseId?: string;
+  expectedWorkerAttestationId?: string;
   nonce?: string;
-}) {
-  if (
-    input.lane !== 'dispatch'
-    || !input.expectedJobId
-    || !UUID_PATTERN.test(input.expectedJobId)
-    || !input.activationId
-    || !UUID_PATTERN.test(input.activationId)
-    || !input.nonce
-    || input.nonce.length < 32
-    || input.nonce.length > 200
-  ) {
-    throw new LocalPublishJobError(
-      'Exact dispatch requires lane=dispatch, expectedJobId, activationId, and nonce',
-      'VALIDATION_ERROR',
-      400,
-    );
-  }
+}): asserts input is ExactJobActivationSelectors {
+  validateExactJobActivationSelectors(input);
 }
 
 export async function claimActivatedLocalPublishJob(
-  input: {
+  input: Omit<Partial<ExactJobActivationSelectors>, 'lane'> & {
     lane: LocalPublishWorkLane;
-    expectedJobId?: string;
-    activationId?: string;
-    nonce?: string;
   },
   workspaceId: string,
   claimToken: string,
@@ -745,8 +739,7 @@ export async function claimActivatedLocalPublishJob(
   return claimExactActivatedStoredLocalPublishJob(
     leaseSeconds(),
     workspaceId,
-    input.expectedJobId!,
-    input.activationId!,
+    input,
     dispatchActivationNonceDigest(input.nonce!),
     claimToken,
     workerId,

@@ -15,6 +15,11 @@ import {
   ATTESTATION_RELEASE_CONSUMED_CODE,
   ATTESTATION_RELEASE_CONSUMED_MESSAGE,
 } from '@/lib/operator-success-attestation-contract';
+import {
+  EXACT_JOB_ACTIVATION_CONTRACT_REVISION,
+  type ExactJobActivationEnvelope,
+  type ExactJobActivationSelectors,
+} from '@/lib/exact-job-activation-contract';
 import type {
   ClaimedLocalPublishJob,
   LocalPublishJobStatus,
@@ -671,23 +676,29 @@ export async function claimNextStoredLocalPublishJob(
 export async function claimExactActivatedStoredLocalPublishJob(
   leaseSeconds: number,
   workspaceId: string,
-  expectedJobId: string,
-  activationId: string,
+  selectors: ExactJobActivationSelectors,
   nonceDigest: string,
   claimToken: string,
   authenticatedWorkerId: string,
 ): Promise<ClaimedLocalPublishJob & {
-  dispatchActivation: {
-    id: string;
-    generation: number;
-    consumedAt: string;
-    releaseRequired: true;
-  };
+  exactActivation: ExactJobActivationEnvelope;
 }> {
+  const {
+    activationId,
+    expectedBatchId,
+    expectedItemId,
+    expectedJobId,
+    expectedManifestHash,
+    expectedItemHash,
+    expectedSourceRevision,
+    expectedReleaseId,
+    expectedWorkerAttestationId,
+  } = selectors;
   const client = await getPool().connect();
   let claimed: LocalPublishJobRow | undefined;
   let generation = 0;
   let consumedAt: Date | string | undefined;
+  let exactActivation: ExactJobActivationEnvelope | undefined;
   try {
     await client.query('BEGIN');
     await client.query(
@@ -696,8 +707,27 @@ export async function claimExactActivatedStoredLocalPublishJob(
     const target = await client.query<{
       generation: number;
       worker_id: string;
+      activation_id: string;
+      batch_id: string;
+      item_id: string;
+      job_id: string;
+      manifest_hash: string;
+      item_hash: string;
+      source_revision: string;
+      release_id: string;
+      worker_attestation_id: string;
     } & QueryResultRow>(
-      `SELECT activation.generation, activation.expected_worker_id AS worker_id
+      `SELECT activation.generation,
+         activation.expected_worker_id AS worker_id,
+         activation.id::text AS activation_id,
+         activation.batch_id::text AS batch_id,
+         activation.batch_item_id::text AS item_id,
+         activation.local_publish_job_id::text AS job_id,
+         activation.manifest_hash,
+         activation.item_hash,
+         activation.source_revision,
+         activation.expected_worker_release_id AS release_id,
+         activation.expected_worker_attestation_id AS worker_attestation_id
        FROM local_publish_dispatch_activations activation
        JOIN local_publish_jobs job
          ON job.id = activation.local_publish_job_id
@@ -730,6 +760,13 @@ export async function claimExactActivatedStoredLocalPublishJob(
          AND activation.workspace_id = $3
          AND activation.nonce_digest = $4
          AND activation.expected_worker_id = $5
+         AND activation.batch_id = $6::uuid
+         AND activation.batch_item_id = $7::uuid
+         AND activation.manifest_hash = $8
+         AND activation.item_hash = $9
+         AND activation.source_revision = $10
+         AND activation.expected_worker_release_id = $11
+         AND activation.expected_worker_attestation_id = $12
          AND activation.state = 'active'
          AND activation.expires_at > CURRENT_TIMESTAMP
          AND job.status = 'queued'
@@ -743,6 +780,13 @@ export async function claimExactActivatedStoredLocalPublishJob(
         workspaceId,
         nonceDigest,
         authenticatedWorkerId,
+        expectedBatchId,
+        expectedItemId,
+        expectedManifestHash,
+        expectedItemHash,
+        expectedSourceRevision,
+        expectedReleaseId,
+        expectedWorkerAttestationId,
       ],
     );
     if (!target.rows[0]) {
@@ -753,6 +797,18 @@ export async function claimExactActivatedStoredLocalPublishJob(
       );
     }
     generation = target.rows[0].generation;
+    exactActivation = {
+      contractRevision: EXACT_JOB_ACTIVATION_CONTRACT_REVISION,
+      activationId: target.rows[0].activation_id,
+      batchId: target.rows[0].batch_id,
+      itemId: target.rows[0].item_id,
+      jobId: target.rows[0].job_id,
+      manifestHash: target.rows[0].manifest_hash,
+      itemHash: target.rows[0].item_hash,
+      sourceRevision: target.rows[0].source_revision,
+      releaseId: target.rows[0].release_id,
+      workerAttestationId: target.rows[0].worker_attestation_id,
+    };
     const attempt = await client.query<{
       id: string;
       recovery_generations: string;
@@ -882,7 +938,7 @@ export async function claimExactActivatedStoredLocalPublishJob(
   } finally {
     client.release();
   }
-  if (!claimed || !consumedAt) {
+  if (!claimed || !consumedAt || !exactActivation) {
     throw new LocalPublishJobError(
       'The exact dispatch activation did not produce a claim',
       'DISPATCH_ACTIVATION_NOT_CLAIMABLE',
@@ -891,12 +947,7 @@ export async function claimExactActivatedStoredLocalPublishJob(
   }
   return {
     ...(await claimedResponse(claimed)),
-    dispatchActivation: {
-      id: activationId,
-      generation,
-      consumedAt: timestamp(consumedAt),
-      releaseRequired: true,
-    },
+    exactActivation,
   };
 }
 

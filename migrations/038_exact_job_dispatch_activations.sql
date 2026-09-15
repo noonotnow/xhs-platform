@@ -12,6 +12,17 @@ CREATE TABLE IF NOT EXISTS local_publish_dispatch_activations (
     CHECK (char_length(expected_worker_contract_revision) BETWEEN 1 AND 100),
   expected_worker_compatibility_revision TEXT NOT NULL
     CHECK (char_length(expected_worker_compatibility_revision) BETWEEN 1 AND 100),
+  expected_worker_release_id TEXT NOT NULL
+    CHECK (
+      char_length(expected_worker_release_id) BETWEEN 1 AND 200
+      AND expected_worker_release_id = btrim(expected_worker_release_id)
+    ),
+  expected_worker_attestation_id TEXT NOT NULL
+    CHECK (
+      char_length(expected_worker_attestation_id) BETWEEN 1 AND 200
+      AND expected_worker_attestation_id =
+        btrim(expected_worker_attestation_id)
+    ),
   generation INTEGER NOT NULL CHECK (generation >= 0),
   nonce_digest TEXT NOT NULL CHECK (nonce_digest ~ '^[a-f0-9]{64}$'),
   state TEXT NOT NULL DEFAULT 'prepared'
@@ -115,6 +126,8 @@ BEGIN
     OR NEW.expected_worker_id <> OLD.expected_worker_id
     OR NEW.expected_worker_contract_revision <> OLD.expected_worker_contract_revision
     OR NEW.expected_worker_compatibility_revision <> OLD.expected_worker_compatibility_revision
+    OR NEW.expected_worker_release_id <> OLD.expected_worker_release_id
+    OR NEW.expected_worker_attestation_id <> OLD.expected_worker_attestation_id
     OR NEW.generation <> OLD.generation
     OR NEW.nonce_digest <> OLD.nonce_digest
     OR NEW.created_at <> OLD.created_at

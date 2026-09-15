@@ -103,6 +103,8 @@ describe('dispatch activation admin API', () => {
       expectedWorkerId: 'worker-release-1',
       expectedWorkerContractRevision: 'publishing-v1',
       expectedWorkerCompatibilityRevision: 'ready-x3/v1',
+      expectedWorkerReleaseId: 'playwright-mcp-server@release-2026-09-14',
+      expectedWorkerAttestationId: 'worker-attestation-1',
     };
 
     const rejected = await POST(request('POST', {

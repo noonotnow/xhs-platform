@@ -21,6 +21,8 @@ interface ActivationRow extends QueryResultRow {
   expected_worker_id: string;
   expected_worker_contract_revision: string;
   expected_worker_compatibility_revision: string;
+  expected_worker_release_id: string;
+  expected_worker_attestation_id: string;
   generation: number;
   state: 'prepared' | 'active' | 'consumed' | 'released' | 'cancelled';
   created_at: Date | string;
@@ -50,6 +52,8 @@ export interface PrepareDispatchActivationInput {
   expectedWorkerId: string;
   expectedWorkerContractRevision: string;
   expectedWorkerCompatibilityRevision: string;
+  expectedWorkerReleaseId: string;
+  expectedWorkerAttestationId: string;
   ttlMinutes?: number;
 }
 
@@ -72,6 +76,8 @@ function activation(row: ActivationRow) {
       id: row.expected_worker_id,
       contractRevision: row.expected_worker_contract_revision,
       compatibilityRevision: row.expected_worker_compatibility_revision,
+      releaseId: row.expected_worker_release_id,
+      attestationId: row.expected_worker_attestation_id,
     },
     state: row.state,
     createdAt: iso(row.created_at),
@@ -187,6 +193,13 @@ export async function prepareDispatchActivation(
     || input.expectedWorkerContractRevision.length > 100
     || !input.expectedWorkerCompatibilityRevision
     || input.expectedWorkerCompatibilityRevision.length > 100
+    || !input.expectedWorkerReleaseId
+    || input.expectedWorkerReleaseId.length > 200
+    || input.expectedWorkerReleaseId !== input.expectedWorkerReleaseId.trim()
+    || !input.expectedWorkerAttestationId
+    || input.expectedWorkerAttestationId.length > 200
+    || input.expectedWorkerAttestationId
+      !== input.expectedWorkerAttestationId.trim()
   ) {
     throw new LocalPublishJobError(
       'Prepare requires exact UUIDs, SHA-256 hashes, source revision, and worker identity',
@@ -332,11 +345,13 @@ export async function prepareDispatchActivation(
          workspace_id, local_publish_job_id, batch_id, batch_item_id,
          manifest_hash, item_hash, source_revision,
          expected_worker_id, expected_worker_contract_revision,
-         expected_worker_compatibility_revision, generation, nonce_digest,
-         created_by, expires_at
+         expected_worker_compatibility_revision, expected_worker_release_id,
+         expected_worker_attestation_id, generation, nonce_digest, created_by,
+         expires_at
        ) VALUES (
          $1, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8, $9, $10,
-         $11, $12, $13, CURRENT_TIMESTAMP + ($14 * INTERVAL '1 minute')
+         $11, $12, $13, $14, $15,
+         CURRENT_TIMESTAMP + ($16 * INTERVAL '1 minute')
        ) RETURNING *`,
       [
         input.workspaceId,
@@ -349,6 +364,8 @@ export async function prepareDispatchActivation(
         input.expectedWorkerId,
         input.expectedWorkerContractRevision,
         input.expectedWorkerCompatibilityRevision,
+        input.expectedWorkerReleaseId,
+        input.expectedWorkerAttestationId,
         input.generation,
         digestNonce(nonce),
         actorId,

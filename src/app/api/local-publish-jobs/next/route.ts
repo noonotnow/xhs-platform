@@ -12,6 +12,7 @@ import {
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
 import type { LocalPublishWorkLane } from '@/types/local-publish-job';
 import { parseWorkspaceId } from '@/lib/workspace-id';
+import type { ExactJobActivationSelectors } from '@/lib/exact-job-activation-contract';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -36,22 +37,53 @@ export async function GET(request: NextRequest) {
         400,
       );
     }
-    const expectedJobIds = request.nextUrl.searchParams.getAll('expectedJobId');
-    const activationIds = request.nextUrl.searchParams.getAll('activationId');
-    const nonces = request.nextUrl.searchParams.getAll('nonce');
-    const expectedJobId = expectedJobIds[0];
-    if (
-      expectedJobIds.length > 1
-      || activationIds.length > 1
-      || nonces.length > 1
-    ) {
+    const lane = rawLane as LocalPublishWorkLane;
+    if (request.nextUrl.searchParams.has('nonce')) {
       throw new LocalPublishJobError(
-        'Activation selectors must each occur exactly once',
-        'VALIDATION_ERROR',
+        'Activation nonce must be supplied only in X-Local-Publish-Activation-Nonce',
+        'ACTIVATION_NONCE_QUERY_FORBIDDEN',
         400,
       );
     }
-    const lane = rawLane as LocalPublishWorkLane;
+    const selectorNames = [
+      'contractRevision',
+      'expectedJobId',
+      'activationId',
+      'expectedBatchId',
+      'expectedItemId',
+      'expectedManifestHash',
+      'expectedItemHash',
+      'expectedSourceRevision',
+      'expectedReleaseId',
+      'expectedWorkerAttestationId',
+    ] as const;
+    const selectors = Object.fromEntries(selectorNames.map((name) => {
+      const values = request.nextUrl.searchParams.getAll(name);
+      if (values.length > 1) {
+        throw new LocalPublishJobError(
+          'Activation selectors must each occur exactly once',
+          'VALIDATION_ERROR',
+          400,
+        );
+      }
+      return [name, values[0]];
+    })) as Record<(typeof selectorNames)[number], string | undefined>;
+    const expectedJobId = selectors.expectedJobId;
+    const nonce = request.headers.get('x-local-publish-activation-nonce')
+      ?? undefined;
+    const hasActivationSelector = nonce !== undefined || selectorNames.some(
+      (name) => name !== 'expectedJobId' && selectors[name] !== undefined,
+    );
+    if (expectedJobId !== undefined && !hasActivationSelector) {
+      validateExpectedVerificationJobId(lane, expectedJobId);
+    }
+    if (hasActivationSelector && expectedJobId === undefined) {
+      throw new LocalPublishJobError(
+        'Exact dispatch requires the complete exact-job activation v1 selector tuple',
+        'EXACT_JOB_ACTIVATION_SELECTOR_MISMATCH',
+        400,
+      );
+    }
     const claimToken = request.headers.get('x-local-publish-claim-token');
     if (!claimToken || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(claimToken)) {
       throw new LocalPublishJobError(
@@ -60,22 +92,15 @@ export async function GET(request: NextRequest) {
         400,
       );
     }
-    const activationId = activationIds[0];
-    const nonce = nonces[0];
-    const hasActivationSelector = activationId !== undefined || nonce !== undefined;
-    if (expectedJobId !== undefined && !hasActivationSelector) {
-      validateExpectedVerificationJobId(lane, expectedJobId);
-    }
-    if (hasActivationSelector && expectedJobId === undefined) {
-      throw new LocalPublishJobError(
-        'Activation dispatch requires expectedJobId',
-        'VALIDATION_ERROR',
-        400,
-      );
-    }
     const job = hasActivationSelector
       ? await claimActivatedLocalPublishJob(
-        { lane, expectedJobId, activationId, nonce },
+        {
+          lane,
+          ...selectors,
+          nonce,
+        } as Omit<Partial<ExactJobActivationSelectors>, 'lane'> & {
+          lane: LocalPublishWorkLane;
+        },
         workspaceId,
         claimToken,
         parseLocalPublishWorkerId(

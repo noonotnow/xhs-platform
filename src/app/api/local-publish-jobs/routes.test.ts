@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest, NextResponse } from 'next/server';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
+import exactActivationFixture from '@/contracts/exact-job-activation-v1.json';
 
 const mocks = vi.hoisted(() => ({
   requireOperator: vi.fn(),
@@ -58,6 +59,26 @@ const workerToken = 'worker-token-that-is-at-least-32-characters';
 const jobId = '11111111-1111-4111-8111-111111111111';
 const claimToken = '22222222-2222-4222-8222-222222222222';
 const idempotencyKey = '33333333-3333-4333-8333-333333333333';
+
+function exactActivationRequest() {
+  return {
+    query: {
+      ...exactActivationFixture.request,
+      contractRevision: exactActivationFixture.contractRevision,
+      expectedJobId: jobId,
+      activationId: '44444444-4444-4444-8444-444444444444',
+      expectedBatchId: '55555555-5555-4555-8555-555555555555',
+      expectedItemId: '66666666-6666-4666-8666-666666666666',
+      expectedWorkerAttestationId: '77777777-7777-4777-8777-777777777777',
+    },
+    headers: {
+      workspaceId: 'workspace-one',
+      claimToken,
+      workerId: exactActivationFixture.workerId,
+      nonce: 'fixture-activation-nonce-with-at-least-32-bytes',
+    },
+  };
+}
 
 function request(path: string, init?: ConstructorParameters<typeof NextRequest>[1]) {
   return new NextRequest(`https://xhs.justlikekatie.com${path}`, init);
@@ -355,54 +376,66 @@ describe('local publish job routes', () => {
   });
 
   it('forwards only the complete exact dispatch activation tuple', async () => {
-      const activationId = '44444444-4444-4444-8444-444444444444';
-      const nonce = 'n'.repeat(43);
+      const { query, headers } = exactActivationRequest();
+      const exactActivation = {
+        contractRevision: exactActivationFixture.contractRevision,
+        activationId: query.activationId,
+        batchId: query.expectedBatchId,
+        itemId: query.expectedItemId,
+        jobId: query.expectedJobId,
+        manifestHash: query.expectedManifestHash,
+        itemHash: query.expectedItemHash,
+        sourceRevision: query.expectedSourceRevision,
+        releaseId: query.expectedReleaseId,
+        workerAttestationId: query.expectedWorkerAttestationId,
+      };
       mocks.claimActivated.mockResolvedValue({
-        id: jobId,
+        id: query.expectedJobId,
         status: 'claimed',
-        claimToken,
-        dispatchActivation: {
-          id: activationId,
-          generation: 1,
-          releaseRequired: true,
-        },
+        claimToken: headers.claimToken,
+        exactActivation,
       });
+      const search = new URLSearchParams(query);
 
       const response = await claimJob(request(
-        `/api/local-publish-jobs/next?lane=dispatch&expectedJobId=${jobId}` +
-          `&activationId=${activationId}&nonce=${nonce}`,
+        `/api/local-publish-jobs/next?${search}`,
         { headers: {
           Authorization: 'Bearer ' + workerToken,
-          'X-Local-Publish-Claim-Token': claimToken,
-          'X-Workspace-Id': 'workspace-one',
-          'X-Local-Publish-Worker-Id': 'worker-one',
+          'X-Local-Publish-Claim-Token': headers.claimToken,
+          'X-Workspace-Id': headers.workspaceId,
+          [exactActivationFixture.workerIdHeader]: headers.workerId,
+          [exactActivationFixture.activationNonceHeader]: headers.nonce,
         } },
       ));
 
       expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        id: query.expectedJobId,
+        status: 'claimed',
+        claimToken: headers.claimToken,
+        exactActivation,
+      });
       expect(mocks.claimActivated).toHaveBeenCalledWith(
         {
-          lane: 'dispatch',
-          expectedJobId: jobId,
-          activationId,
-          nonce,
+          ...query,
+          nonce: headers.nonce,
         },
-        'workspace-one',
-        claimToken,
-        'worker-one',
+        headers.workspaceId,
+        headers.claimToken,
+        headers.workerId,
       );
       expect(mocks.claim).not.toHaveBeenCalled();
     });
 
     it('never falls back to generic dispatch for partial or rejected activations', async () => {
-      const activationId = '44444444-4444-4444-8444-444444444444';
+      const { query, headers } = exactActivationRequest();
       mocks.claimActivated.mockRejectedValue(new LocalPublishJobError(
         'The exact dispatch activation is not claimable',
         'DISPATCH_ACTIVATION_NOT_CLAIMABLE',
         409,
       ));
       const partial = await claimJob(request(
-        `/api/local-publish-jobs/next?lane=dispatch&activationId=${activationId}`,
+        `/api/local-publish-jobs/next?lane=dispatch&activationId=${query.activationId}`,
         { headers: {
           Authorization: 'Bearer ' + workerToken,
           'X-Workspace-Id': 'workspace-one',
@@ -410,20 +443,54 @@ describe('local publish job routes', () => {
           'X-Local-Publish-Worker-Id': 'worker-one',
         } },
       ));
+      const search = new URLSearchParams(query);
       const rejected = await claimJob(request(
-        `/api/local-publish-jobs/next?lane=dispatch&expectedJobId=${jobId}` +
-          `&activationId=${activationId}&nonce=${'n'.repeat(43)}`,
+        `/api/local-publish-jobs/next?${search}`,
         { headers: {
           Authorization: 'Bearer ' + workerToken,
-          'X-Workspace-Id': 'workspace-one',
-          'X-Local-Publish-Claim-Token': claimToken,
-          'X-Local-Publish-Worker-Id': 'worker-one',
+          'X-Workspace-Id': headers.workspaceId,
+          'X-Local-Publish-Claim-Token': headers.claimToken,
+          [exactActivationFixture.workerIdHeader]: headers.workerId,
+          [exactActivationFixture.activationNonceHeader]: headers.nonce,
         } },
       ));
 
       expect(partial.status).toBe(400);
       expect(rejected.status).toBe(409);
       expect(mocks.claim).not.toHaveBeenCalled();
+  });
+
+  it('rejects query nonce and missing worker identity without claiming', async () => {
+    const { query, headers } = exactActivationRequest();
+    const search = new URLSearchParams(query);
+    search.set('nonce', headers.nonce);
+    const queryNonce = await claimJob(request(
+      `/api/local-publish-jobs/next?${search}`,
+      { headers: {
+        Authorization: 'Bearer ' + workerToken,
+        'X-Workspace-Id': headers.workspaceId,
+        'X-Local-Publish-Claim-Token': headers.claimToken,
+        [exactActivationFixture.workerIdHeader]: headers.workerId,
+      } },
+    ));
+    search.delete('nonce');
+    const missingWorker = await claimJob(request(
+      `/api/local-publish-jobs/next?${search}`,
+      { headers: {
+        Authorization: 'Bearer ' + workerToken,
+        'X-Workspace-Id': headers.workspaceId,
+        'X-Local-Publish-Claim-Token': headers.claimToken,
+        [exactActivationFixture.activationNonceHeader]: headers.nonce,
+      } },
+    ));
+
+    expect(queryNonce.status).toBe(400);
+    await expect(queryNonce.json()).resolves.toMatchObject({
+      code: 'ACTIVATION_NONCE_QUERY_FORBIDDEN',
+    });
+    expect(missingWorker.status).toBe(400);
+    expect(mocks.claimActivated).not.toHaveBeenCalled();
+    expect(mocks.claim).not.toHaveBeenCalled();
   });
 
   it('rejects malformed, repeated, or non-verification exact selectors before claiming', async () => {

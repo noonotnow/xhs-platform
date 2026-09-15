@@ -680,9 +680,10 @@ The authenticated Admin control is
 
 1. `POST` action `prepare` binds one existing approved batch job to its batch,
    item, manifest hash, item hash, source revision, recovery generation, and live
-   worker ID/contract/compatibility revisions. It requires the exact confirmation
-   `PREPARE EXACT DISPATCH <jobId>` and returns a nonce once; only its digest is
-   stored.
+   worker ID/contract/compatibility revisions, reviewed worker release ID, and
+   worker attestation ID. It requires the exact confirmation
+   `PREPARE EXACT DISPATCH <jobId>` and returns a nonce once; only its SHA-256
+   digest is stored.
 2. `POST` action `activate` revalidates the live worker binding and requires
    `ACTIVATE EXACT DISPATCH <activationId>`. Activation also requires zero
    pre-existing competing claimed or staged jobs. Only then does the global hold
@@ -693,15 +694,40 @@ The authenticated Admin control is
 3. If recovery is required, recover only the held job's reviewed next generation
    while the activation is active. Recovery remains a separate audited action.
 4. The worker makes exactly one request:
-   `GET /api/local-publish-jobs/next?lane=dispatch&expectedJobId=<jobId>&activationId=<activationId>&nonce=<nonce>`
-   with its bearer token, `X-Workspace-Id`, `X-Local-Publish-Worker-Id`, and
-   `X-Local-Publish-Claim-Token`. The worker ID must match the active
-   activation. All four query selectors are required together.
-   Identity, hashes, source revision, generation, pre-dispatch attempt state, and
-   worker lease are revalidated transactionally. A mismatch returns a stable
-   conflict and never falls back to generic selection. A successful response
-   preserves the normal claim body and adds
-   `dispatchActivation: {id,generation,consumedAt,releaseRequired:true}`.
+   `GET /api/local-publish-jobs/next` with query fields `lane=dispatch`,
+   `contractRevision=exact-job-activation/v1`, `expectedJobId`, `activationId`,
+   `expectedBatchId`, `expectedItemId`,
+   `expectedManifestHash`, `expectedItemHash`, `expectedSourceRevision`,
+   `expectedReleaseId`, and `expectedWorkerAttestationId`. It sends the secret
+   nonce only in `X-Local-Publish-Activation-Nonce`, plus its bearer token,
+   `X-Workspace-Id`, `X-Local-Publish-Worker-Id`, and
+   `X-Local-Publish-Claim-Token`. A `nonce` query parameter is rejected. The
+   worker ID must match the active activation, and the entire immutable selector
+   tuple is required together. Identity, hashes, source revision, release and
+   attestation IDs, generation, pre-dispatch attempt state, and worker lease are
+   revalidated transactionally before any state mutation. A mismatch returns a
+   stable conflict and never falls back to generic selection. A successful
+   response preserves the normal claim body and adds the versioned envelope:
+
+   ```json
+   {
+     "exactActivation": {
+       "contractRevision": "exact-job-activation/v1",
+       "activationId": "uuid",
+       "batchId": "uuid",
+       "itemId": "uuid",
+       "jobId": "uuid",
+       "manifestHash": "64-character lowercase SHA-256",
+       "itemHash": "64-character lowercase SHA-256",
+       "sourceRevision": "canonical UTC timestamp",
+       "releaseId": "reviewed worker release ID",
+       "workerAttestationId": "reviewed worker attestation ID"
+     }
+   }
+   ```
+
+   `src/contracts/exact-job-activation-v1.json` is the canonical
+   cross-repository transport fixture and must be mirrored by the worker.
 5. Consumption is one-shot. Reusing the activation cannot claim again, generic
    polling cannot expose another item, and terminal worker results do not release
    the hold.

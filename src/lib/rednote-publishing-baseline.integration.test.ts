@@ -501,11 +501,13 @@ describe('canonical local publishing migration chain', () => {
          workspace_id, local_publish_job_id, batch_id, batch_item_id,
          manifest_hash, item_hash, source_revision, expected_worker_id,
          expected_worker_contract_revision,
-         expected_worker_compatibility_revision, generation, nonce_digest,
+         expected_worker_compatibility_revision, expected_worker_release_id,
+         expected_worker_attestation_id, generation, nonce_digest,
          state, created_by, authorized_at, authorized_by, expires_at
        ) VALUES (
          $1, $2, $3, $4, $5, $6, $7, 'worker-recovery',
-         'publishing-v1', 'ready-x3/v1', 1, $8, 'active', $9,
+         'publishing-v1', 'ready-x3/v1', 'worker-release-1',
+         'worker-attestation-1', 1, $8, 'active', $9,
          CURRENT_TIMESTAMP, $9, CURRENT_TIMESTAMP + INTERVAL '1 hour'
        )`,
       [

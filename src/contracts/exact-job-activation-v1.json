@@ -1,0 +1,70 @@
+{
+  "contractRevision": "exact-job-activation/v1",
+  "workerId": "mac-studio-01",
+  "activationNonceHeader": "x-local-publish-activation-nonce",
+  "workerIdHeader": "x-local-publish-worker-id",
+  "request": {
+    "lane": "dispatch",
+    "expectedJobId": "job-123",
+    "activationId": "activation-123",
+    "expectedBatchId": "batch-123",
+    "expectedItemId": "item-123",
+    "expectedManifestHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expectedItemHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "expectedSourceRevision": "2026-08-02T11:54:00.000Z",
+    "expectedReleaseId": "release-123",
+    "expectedWorkerAttestationId": "worker-attestation-123"
+  },
+  "response": {
+    "id": "job-123",
+    "notionPageId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    "headline": "A static post",
+    "title": "Exact RedNote title",
+    "caption": "A safe caption",
+    "tags": ["design", "automation"],
+    "platform": "RedNote",
+    "mediaType": "image",
+    "mediaUrl": "https://cdn.example.com/post.jpg",
+    "media": [
+      {
+        "identity": "bed160318666d3802f1d0b6c1520187bd45abe79aa554e21061c0638a90892d0",
+        "url": "https://cdn.example.com/post.jpg",
+        "type": "image"
+      }
+    ],
+    "expectedAccountId": "account-123",
+    "publishAt": "2026-08-02T17:30:00.000Z",
+    "status": "claimed",
+    "claimToken": "claim-token-1234567890",
+    "claimExpiresAt": "2099-01-01T00:00:00.000Z",
+    "batchAuthorization": {
+      "batchId": "batch-123",
+      "manifestHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "itemHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "snapshotRevision": "2026-08-02T11:54:00.000Z",
+      "approvedState": "approved",
+      "approvedAt": "2026-08-02T11:55:00.000Z",
+      "media": [
+        {
+          "identity": "bed160318666d3802f1d0b6c1520187bd45abe79aa554e21061c0638a90892d0",
+          "url": "https://cdn.example.com/post.jpg",
+          "type": "image"
+        }
+      ],
+      "publishAt": "2026-08-02T17:30:00.000Z",
+      "lateAction": "schedule"
+    },
+    "exactActivation": {
+      "contractRevision": "exact-job-activation/v1",
+      "activationId": "activation-123",
+      "batchId": "batch-123",
+      "itemId": "item-123",
+      "jobId": "job-123",
+      "manifestHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "itemHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "sourceRevision": "2026-08-02T11:54:00.000Z",
+      "releaseId": "release-123",
+      "workerAttestationId": "worker-attestation-123"
+    }
+  }
+}

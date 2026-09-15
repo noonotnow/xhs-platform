@@ -86,6 +86,10 @@ export async function POST(request: NextRequest) {
           String(body.expectedWorkerContractRevision ?? ''),
         expectedWorkerCompatibilityRevision:
           String(body.expectedWorkerCompatibilityRevision ?? ''),
+        expectedWorkerReleaseId:
+          String(body.expectedWorkerReleaseId ?? ''),
+        expectedWorkerAttestationId:
+          String(body.expectedWorkerAttestationId ?? ''),
         ...(body.ttlMinutes === undefined
           ? {}
           : { ttlMinutes: Number(body.ttlMinutes) }),
