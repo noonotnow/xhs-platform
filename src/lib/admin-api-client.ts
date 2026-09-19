@@ -17,6 +17,31 @@ export function adminApiFetch(
 export interface AdminLocalJobsResponse {
   jobs: LocalPublishJobSummary[];
   successAttestationCandidates: OperatorSuccessAttestationEvidence[];
+  attempts: AdminRednoteAttemptSummary[];
+}
+
+export interface AdminRednoteAttemptSummary {
+  id: string;
+  sourceLocalPublishJobId: string | null;
+  payloadDigest: string | null;
+  payloadRevision: string | null;
+  active: boolean | null;
+  approvedAt: string | null;
+  supersededByAttemptId: string | null;
+  terminalOutcome: string | null;
+}
+
+export function isEligibleAdminRednoteAttempt(
+  attempt: AdminRednoteAttemptSummary,
+  sourceLocalPublishJobId: string,
+) {
+  return attempt.sourceLocalPublishJobId === sourceLocalPublishJobId
+    && attempt.active === true
+    && Boolean(attempt.approvedAt)
+    && !attempt.supersededByAttemptId
+    && !attempt.terminalOutcome
+    && Boolean(attempt.payloadDigest)
+    && Boolean(attempt.payloadRevision);
 }
 
 const LOCAL_PUBLISH_JOB_STATUSES = new Set<LocalPublishJobStatus>([
@@ -65,6 +90,22 @@ function isOperatorSuccessAttestationEvidence(
     && typeof value.expectedOutcome.text === 'string';
 }
 
+function isAdminRednoteAttemptSummary(
+  value: unknown,
+): value is AdminRednoteAttemptSummary {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && (typeof value.sourceLocalPublishJobId === 'string'
+      || value.sourceLocalPublishJobId === null)
+    && (typeof value.payloadDigest === 'string' || value.payloadDigest === null)
+    && (typeof value.payloadRevision === 'string' || value.payloadRevision === null)
+    && (typeof value.active === 'boolean' || value.active === null)
+    && (typeof value.approvedAt === 'string' || value.approvedAt === null)
+    && (typeof value.supersededByAttemptId === 'string'
+      || value.supersededByAttemptId === null)
+    && (typeof value.terminalOutcome === 'string' || value.terminalOutcome === null);
+}
+
 function requireArrayField<T>(
   value: Record<string, unknown>,
   field: string,
@@ -94,5 +135,8 @@ export function parseAdminLocalJobsResponse(value: unknown): AdminLocalJobsRespo
       'successAttestationCandidates',
       isOperatorSuccessAttestationEvidence,
     ),
+    attempts: value.attempts === undefined
+      ? []
+      : requireArrayField(value, 'attempts', isAdminRednoteAttemptSummary),
   };
 }

@@ -1,7 +1,14 @@
 'use client';
 
 import Image from 'next/image';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from 'react';
 import type {
   ExternalReconciliationSummary,
   LocalPublishJobSummary,
@@ -26,11 +33,15 @@ import {
 } from '@/lib/editorial-schedule';
 import { normalizeRednotePublicIdentity } from '@/lib/rednote-publication';
 import {
+  canSharePreparedPacket,
   copyHandoffText,
   formatTags,
-  getCanonicalVideoUrl,
+  formatRednoteHandoffText,
   getMissingTags,
-  getVideoDownloadName,
+  isManualHandoffEligible,
+  isPreparedHandoffFresh,
+  PREPARED_HANDOFF_FRESHNESS_MS,
+  prepareOrderedMediaFiles,
   REDNOTE_CREATOR_PUBLISH_URL,
   SAFE_EXTERNAL_LINK_PROPS,
   shouldOfferTitleCopy,
@@ -56,7 +67,9 @@ import {
 } from '@/lib/ready-posts-panel-features';
 import {
   adminApiFetch,
+  isEligibleAdminRednoteAttempt,
   parseAdminLocalJobsResponse,
+  type AdminRednoteAttemptSummary,
 } from '@/lib/admin-api-client';
 
 interface ApiError {
@@ -107,6 +120,45 @@ type CopyStatus = {
   ok: boolean;
   message: string;
 };
+
+type MobileHandoffStatus = {
+  tone: 'success' | 'warning' | 'error';
+  message: string;
+};
+
+type MobileHandoffIdentity = {
+  workspaceId: string;
+  postId: string;
+  sourceRevision: string;
+  localPublishJobId: string;
+  durableAttemptId: string;
+  payloadDigest: string;
+  payloadRevision: string;
+  batchId: string;
+  manifestHash: string;
+  itemHash: string;
+  mediaIdentities: string[];
+  title: string;
+  caption: string;
+  tags: string[];
+  text: string;
+  validatedAt: number;
+  preparation: 'prepared';
+  shareable: boolean;
+  clipboard: 'not_attempted' | 'succeeded' | 'failed';
+  share: 'not_attempted' | 'completed' | 'unsupported' | 'failed';
+  creator: 'not_attempted' | 'opening_attempted';
+};
+
+type PreparedMobileHandoff = {
+  identity: MobileHandoffIdentity;
+  files: File[];
+  downloadUrls: string[];
+};
+
+function mobileHandoffStorageKey(workspaceId: string, postId: string) {
+  return `xhs-mobile-handoff:${workspaceId}:${postId}`;
+}
 
 function shanghaiTime(publishAt: string): string {
   try {
@@ -378,6 +430,7 @@ export default function ReadyPostsPanel({
 }) {
   const [posts, setPosts] = useState<ReadyXhsPost[]>([]);
   const [jobs, setJobs] = useState<LocalPublishJobSummary[]>([]);
+  const [attempts, setAttempts] = useState<AdminRednoteAttemptSummary[]>([]);
   const [successAttestationCandidates, setSuccessAttestationCandidates] = useState<
     OperatorSuccessAttestationEvidence[]
   >([]);
@@ -409,6 +462,15 @@ export default function ReadyPostsPanel({
   const [error, setError] = useState('');
   const [warnings, setWarnings] = useState<string[]>([]);
   const [copyStatus, setCopyStatus] = useState<CopyStatus | null>(null);
+  const [mobileHandoffStatus, setMobileHandoffStatus] =
+    useState<MobileHandoffStatus | null>(null);
+  const [mobileShareStatus, setMobileShareStatus] =
+    useState<MobileHandoffStatus | null>(null);
+  const [mobileHandoffBusy, setMobileHandoffBusy] = useState(false);
+  const [preparedMobileHandoff, setPreparedMobileHandoff] =
+    useState<PreparedMobileHandoff | null>(null);
+  const [mobileHandoffClock, setMobileHandoffClock] = useState(() => Date.now());
+  const [creatorOpenStatus, setCreatorOpenStatus] = useState<MobileHandoffStatus | null>(null);
   const [finalTitle, setFinalTitle] = useState('');
   const [finalCaption, setFinalCaption] = useState('');
   const [finalTags, setFinalTags] = useState('');
@@ -421,6 +483,14 @@ export default function ReadyPostsPanel({
   const manualSchedulingKeysRef = useRef<Record<string, string>>({});
   const receiptKeysRef = useRef<Record<string, string>>({});
   const manualHandlingKeysRef = useRef<Record<string, string>>({});
+  const preparedDownloadUrlsRef = useRef<string[]>([]);
+  const releasePreparedDownloadUrls = useCallback(() => {
+    for (const url of preparedDownloadUrlsRef.current) {
+      URL.revokeObjectURL(url);
+    }
+    preparedDownloadUrlsRef.current = [];
+  }, []);
+  useEffect(() => releasePreparedDownloadUrls, [releasePreparedDownloadUrls]);
 
   const selected = useMemo(
     () => posts.find((post) => post.id === selectedId) ?? posts[0],
@@ -498,17 +568,257 @@ export default function ReadyPostsPanel({
       };
     }
     return readyPostMediaPreview(selected);
-  }, [selected]);
+  }, [preparedMobileHandoff, selected]);
   const mediaChoices = mediaPreview.choices;
   const selectedMedia = mediaChoices.find(
     (choice) => `${choice.compatibilityTrial ?? choice.type}:${choice.index}` === mediaKey,
   ) ?? mediaChoices[0];
   const isMovCompatibilityTrial = selectedMedia?.compatibilityTrial === 'unverified_mov';
   const movTrialIsEligible = selected ? isMovCompatibilityTrialEligible(selected) : false;
-  const canonicalVideoUrl = selected ? getCanonicalVideoUrl(selected.videoUrls) : undefined;
   const currentJob = selected
     ? displayedLocalPublishJob(jobs, selected.id)
     : undefined;
+  const handoffAttempt = useMemo(() => {
+    if (!selected || !currentJob) return undefined;
+    const durableAttempt = attempts.find((attempt) =>
+      isEligibleAdminRednoteAttempt(attempt, currentJob.id));
+    if (!durableAttempt) return undefined;
+    for (const batch of batches) {
+      if (!['approved', 'partially_approved'].includes(batch.status)) continue;
+      const item = batch.items.find((candidate) =>
+        candidate.notionPageId === selected.id
+        && candidate.localPublishJobId === currentJob.id
+        && !['failed', 'invalidated', 'reconciled'].includes(candidate.state));
+      if (item) {
+        return {
+          durableAttempt,
+          batchId: batch.id,
+          manifestHash: batch.manifestHash,
+          item,
+        };
+      }
+    }
+    return undefined;
+  }, [attempts, batches, currentJob, selected]);
+  const handoffSnapshot = handoffAttempt?.item.snapshot;
+  const handoffMedia = handoffSnapshot?.media?.length
+    ? handoffSnapshot.media
+    : handoffSnapshot
+      ? [{
+          identity: `${handoffSnapshot.mediaType}:${handoffSnapshot.mediaIndex}`,
+          type: handoffSnapshot.mediaType,
+          url: handoffSnapshot.mediaUrl,
+        }]
+      : [];
+  const handoffTitle = handoffSnapshot?.title ?? '';
+  const handoffCaption = handoffSnapshot?.caption ?? '';
+  const handoffTags = handoffSnapshot?.tags ?? [];
+  const handoffMissingTags = getMissingTags(handoffTags, handoffCaption);
+  const preparedMissingTags = preparedMobileHandoff
+    ? getMissingTags(
+      preparedMobileHandoff.identity.tags,
+      preparedMobileHandoff.identity.caption,
+    )
+    : handoffMissingTags;
+  const showHandoffTitleCopy = shouldOfferTitleCopy(handoffTitle, handoffCaption);
+  const handoffVideoIndex = handoffMedia.findIndex((media) => media.type === 'video');
+  useEffect(() => {
+    if (!selected) return;
+    const key = mobileHandoffStorageKey(workspaceId, selected.id);
+    try {
+      const raw = window.sessionStorage.getItem(key);
+      if (!raw) {
+        setPreparedMobileHandoff(null);
+        setMobileHandoffStatus(null);
+        setMobileShareStatus(null);
+        setCreatorOpenStatus(null);
+        setCopyStatus(null);
+        return;
+      }
+      const identity = JSON.parse(raw) as MobileHandoffIdentity;
+      if (
+        identity.workspaceId !== workspaceId
+        || identity.postId !== selected.id
+        || identity.preparation !== 'prepared'
+      ) {
+        setPreparedMobileHandoff(null);
+        setMobileHandoffStatus(null);
+        setMobileShareStatus(null);
+        setCreatorOpenStatus(null);
+        setCopyStatus(null);
+        return;
+      }
+      setPreparedMobileHandoff({ identity, files: [], downloadUrls: [] });
+      setMobileHandoffStatus({
+        tone: 'warning',
+        message:
+          `Restored the exact attempt ${identity.durableAttemptId} at source revision ` +
+          `${identity.sourceRevision}. Re-prepare the files before sharing on this page.`,
+      });
+      if (identity.share !== 'not_attempted') {
+        setMobileShareStatus({
+          tone: identity.share === 'completed' ? 'success' : 'warning',
+          message: identity.share === 'completed'
+            ? 'The browser share request previously completed for this exact attempt. Verify every numbered asset and the text in Rednote; publication still requires manual Creator action and receipt reconciliation.'
+            : 'File sharing was previously unavailable or failed for this exact attempt. Re-prepare files before trying again.',
+        });
+      } else {
+        setMobileShareStatus(null);
+      }
+      if (identity.creator === 'opening_attempted') {
+        setCreatorOpenStatus({
+          tone: 'warning',
+          message: 'Opening RedNote Creator was previously attempted. App opening cannot be confirmed and did not publish.',
+        });
+      } else {
+        setCreatorOpenStatus(null);
+      }
+      if (identity.clipboard !== 'not_attempted') {
+        setCopyStatus({
+          ok: identity.clipboard === 'succeeded',
+          message: identity.clipboard === 'succeeded'
+            ? 'Clipboard copy was previously completed for this exact attempt.'
+            : 'Clipboard copy previously failed; select the frozen text and copy manually.',
+        });
+      } else {
+        setCopyStatus(null);
+      }
+    } catch {
+      setPreparedMobileHandoff(null);
+      setMobileHandoffStatus(null);
+      setMobileShareStatus(null);
+      setCreatorOpenStatus(null);
+      setCopyStatus(null);
+    }
+  }, [selected?.id, workspaceId]);
+  const manualHandoffEligible = Boolean(
+    selected
+    && currentJob
+    && handoffAttempt
+    && handoffSnapshot
+    && isManualHandoffEligible({
+      destination: handoffSnapshot.platform,
+      studioStatus: selected.status,
+      publishPacketReady: selected.publishPacketReady,
+      readinessBlockers: selected.automationBlockers,
+      workspace: {
+        requestedId: workspaceId,
+        packetId: batches.find((batch) =>
+          batch.id === handoffAttempt.batchId)?.workspaceId ?? '',
+      },
+      postId: selected.id,
+      sourceRevision: selected.lastEditedTime,
+      packet: {
+        identity: handoffAttempt.item.itemHash,
+        postId: handoffSnapshot.notionPageId,
+        sourceRevision: handoffSnapshot.notionLastEditedTime,
+        mediaIdentities: handoffMedia.map((media) => media.identity),
+        expectedMediaIdentities: handoffMedia.map((media) => media.identity),
+      },
+      attempt: {
+        identity: handoffAttempt.durableAttempt.id,
+        sourceLocalPublishJobId:
+          handoffAttempt.durableAttempt.sourceLocalPublishJobId ?? '',
+        payloadDigest: handoffAttempt.durableAttempt.payloadDigest ?? '',
+        payloadRevision: handoffAttempt.durableAttempt.payloadRevision ?? '',
+        eligible: isEligibleAdminRednoteAttempt(
+          handoffAttempt.durableAttempt,
+          currentJob.id,
+        ),
+      },
+      localPublishJobId: currentJob.id,
+    }),
+  );
+  const preparedIdentityCurrent = Boolean(
+    preparedMobileHandoff
+    && selected
+    && currentJob
+    && handoffAttempt
+    && handoffSnapshot
+    && preparedMobileHandoff.identity.workspaceId === workspaceId
+    && preparedMobileHandoff.identity.postId === selected.id
+    && preparedMobileHandoff.identity.sourceRevision === selected.lastEditedTime
+    && preparedMobileHandoff.identity.localPublishJobId === currentJob.id
+    && preparedMobileHandoff.identity.durableAttemptId === handoffAttempt.durableAttempt.id
+    && preparedMobileHandoff.identity.payloadDigest === handoffAttempt.durableAttempt.payloadDigest
+    && preparedMobileHandoff.identity.payloadRevision === handoffAttempt.durableAttempt.payloadRevision
+    && preparedMobileHandoff.identity.batchId === handoffAttempt.batchId
+    && preparedMobileHandoff.identity.manifestHash === handoffAttempt.manifestHash
+    && preparedMobileHandoff.identity.itemHash === handoffAttempt.item.itemHash
+    && preparedMobileHandoff.identity.title === handoffSnapshot.title
+    && preparedMobileHandoff.identity.caption === handoffSnapshot.caption
+    && preparedMobileHandoff.identity.tags.length === handoffSnapshot.tags.length
+    && preparedMobileHandoff.identity.tags.every(
+      (tag, index) => tag === handoffSnapshot.tags[index],
+    )
+    && preparedMobileHandoff.identity.text === formatRednoteHandoffText(
+      handoffSnapshot.caption,
+      handoffSnapshot.tags,
+    )
+    && preparedMobileHandoff.identity.mediaIdentities.length === handoffMedia.length
+    && preparedMobileHandoff.identity.mediaIdentities.every(
+      (identity, index) => identity === handoffMedia[index]?.identity,
+    )
+    && preparedMobileHandoff.files.length === handoffMedia.length
+    && manualHandoffEligible,
+  );
+  const preparedAuthorityFresh = Boolean(
+    preparedMobileHandoff
+    && isPreparedHandoffFresh(
+      preparedMobileHandoff.identity.validatedAt,
+      mobileHandoffClock,
+    ),
+  );
+  const preparedActionsAvailable = Boolean(
+    preparedIdentityCurrent
+    && preparedAuthorityFresh,
+  );
+  const preparedValidatedAt = preparedMobileHandoff?.identity.validatedAt;
+  const preparedFileCount = preparedMobileHandoff?.files.length ?? 0;
+  useEffect(() => {
+    if (!preparedMobileHandoff || preparedMobileHandoff.files.length === 0) return;
+    const expiresAt =
+      preparedMobileHandoff.identity.validatedAt + PREPARED_HANDOFF_FRESHNESS_MS;
+    const remaining = expiresAt - Date.now();
+    if (remaining <= 0) {
+      setMobileHandoffClock(Date.now());
+      return;
+    }
+    const timer = window.setTimeout(
+      () => setMobileHandoffClock(Date.now()),
+      remaining,
+    );
+    return () => window.clearTimeout(timer);
+  }, [preparedFileCount, preparedMobileHandoff, preparedValidatedAt]);
+  useEffect(() => {
+    if (!preparedMobileHandoff || preparedMobileHandoff.files.length === 0) return;
+    if (preparedIdentityCurrent && preparedAuthorityFresh) return;
+    const expired = !preparedAuthorityFresh;
+    releasePreparedDownloadUrls();
+    setPreparedMobileHandoff(null);
+    try {
+      window.sessionStorage.removeItem(
+        mobileHandoffStorageKey(workspaceId, preparedMobileHandoff.identity.postId),
+      );
+    } catch {
+      // Session storage is an enhancement.
+    }
+    setMobileHandoffStatus({
+      tone: 'error',
+      message: expired
+        ? 'The two-minute preparation window expired. Prepare and revalidate the exact current attempt again.'
+        : 'The prepared packet changed while this page was open. Prepare the exact current attempt again.',
+    });
+    setMobileShareStatus(null);
+    setCreatorOpenStatus(null);
+    setCopyStatus(null);
+  }, [
+    preparedAuthorityFresh,
+    preparedIdentityCurrent,
+    preparedMobileHandoff,
+    releasePreparedDownloadUrls,
+    workspaceId,
+  ]);
   const currentJobStatus = jobStatusCopy(currentJob, selected);
   const manualSchedulingCandidate = useMemo<ManualSchedulingAttestationEvidence | undefined>(
     () => directManualSchedulingCandidate(selected, batches, jobs),
@@ -540,8 +850,6 @@ export default function ReadyPostsPanel({
       && (!currentJob || currentJob.status === 'failed' || currentJob.status === 'queued'),
     );
   const reviewedTags = tagsFromInput(finalTags);
-  const missingTags = getMissingTags(reviewedTags, finalCaption);
-  const showTitleCopy = shouldOfferTitleCopy(finalTitle, finalCaption);
   const timing = selected ? publishTiming(selected) : null;
   const selectedSchedule = selected
     ? getEditorialScheduleDisplay(selected.scheduledDate)
@@ -591,6 +899,7 @@ export default function ReadyPostsPanel({
       if (!response.ok) throw new Error(data.error || 'Failed to load local publish jobs');
       const parsed = parseAdminLocalJobsResponse(data);
       setJobs(parsed.jobs);
+      setAttempts(parsed.attempts);
       setSuccessAttestationCandidates(parsed.successAttestationCandidates);
     } catch (loadError) {
       if (showError) {
@@ -657,13 +966,20 @@ export default function ReadyPostsPanel({
 
   useEffect(() => {
     const timer = window.setInterval(() => {
+      void loadPosts();
       void loadJobs();
       void loadReconciliations();
       void loadManualReconciliations();
       void loadBatches();
     }, 10_000);
     return () => window.clearInterval(timer);
-  }, [loadBatches, loadJobs, loadManualReconciliations, loadReconciliations]);
+  }, [
+    loadBatches,
+    loadJobs,
+    loadManualReconciliations,
+    loadPosts,
+    loadReconciliations,
+  ]);
 
   useEffect(() => {
     setFinalTitle(selected?.headline ?? '');
@@ -677,7 +993,17 @@ export default function ReadyPostsPanel({
           ? 'image:0'
           : '';
     setMediaKey(firstChoice);
-    setCopyStatus(null);
+    const preserveHandoffOutcomes = Boolean(
+      selected
+      && preparedMobileHandoff?.identity.postId === selected.id,
+    );
+    if (!preserveHandoffOutcomes) {
+      setCopyStatus(null);
+      setMobileHandoffStatus(null);
+      setMobileShareStatus(null);
+      setCreatorOpenStatus(null);
+    }
+    setMobileHandoffBusy(false);
     setShowManualReconciliation(false);
     setManualPublicPost('');
     setManualConfirmed(false);
@@ -685,7 +1011,12 @@ export default function ReadyPostsPanel({
   }, [selected]);
 
   async function markSelectedHandledManually() {
-    if (!selected || currentManualHandling || selectedIsPublished) return;
+    if (
+      !selected
+      || !manualHandoffEligible
+      || currentManualHandling
+      || selectedIsPublished
+    ) return;
     const idempotencyKey =
       manualHandlingKeysRef.current[selected.id] ?? crypto.randomUUID();
     manualHandlingKeysRef.current[selected.id] = idempotencyKey;
@@ -727,6 +1058,450 @@ export default function ReadyPostsPanel({
     } finally {
       setManualHandlingSubmitting(false);
     }
+  }
+
+  async function prepareMobileHandoff() {
+    if (
+      !selected
+      || !currentJob
+      || !handoffAttempt
+      || !handoffSnapshot
+      || handoffMedia.length === 0
+      || mobileHandoffBusy
+      || selectedIsPublished
+      || hasLiveManualOwnership
+      || !manualHandoffEligible
+    ) return;
+
+    const selectedPostId = selected.id;
+    const attemptId = currentJob.id;
+    const durableAttemptId = handoffAttempt.durableAttempt.id;
+    const payloadDigest = handoffAttempt.durableAttempt.payloadDigest!;
+    const payloadRevision = handoffAttempt.durableAttempt.payloadRevision!;
+    const batchId = handoffAttempt.batchId;
+    const manifestHash = handoffAttempt.manifestHash;
+    const itemHash = handoffAttempt.item.itemHash;
+    const frozenSnapshot = handoffSnapshot;
+    const orderedMedia = handoffMedia.map((media) => ({ ...media }));
+    const text = formatRednoteHandoffText(
+      frozenSnapshot.caption,
+      frozenSnapshot.tags,
+    );
+    releasePreparedDownloadUrls();
+    setPreparedMobileHandoff(null);
+    try {
+      window.sessionStorage.removeItem(
+        mobileHandoffStorageKey(workspaceId, selectedPostId),
+      );
+    } catch {
+      // Session storage is an enhancement.
+    }
+    setCopyStatus(null);
+    setMobileShareStatus(null);
+    setCreatorOpenStatus(null);
+    setMobileHandoffBusy(true);
+    setMobileHandoffStatus({
+      tone: 'warning',
+      message: 'Revalidating the exact source revision and ordered media…',
+    });
+
+    try {
+      const [postsResponse, jobsResponse, batchesResponse] = await Promise.all([
+        adminApiFetch(workspaceId, '/admin/api/ready-posts', { cache: 'no-store' }),
+        adminApiFetch(workspaceId, '/admin/api/local-publish-jobs', { cache: 'no-store' }),
+        adminApiFetch(workspaceId, '/admin/api/publish-batches', { cache: 'no-store' }),
+      ]);
+      const [postsData, jobsData, batchesData] = await Promise.all([
+        responseJson<ReadyXhsPostsResponse & ApiError>(
+          postsResponse,
+          'GET /admin/api/ready-posts',
+        ),
+        responseJson<LocalJobsResponse>(
+          jobsResponse,
+          'GET /admin/api/local-publish-jobs',
+        ),
+        responseJson<PublishBatchesResponse>(
+          batchesResponse,
+          'GET /admin/api/publish-batches',
+        ),
+      ]);
+      if (!postsResponse.ok) {
+        throw new Error(postsData.error || 'Could not revalidate this packet');
+      }
+      if (!jobsResponse.ok) {
+        throw new Error(jobsData.error || 'Could not revalidate this attempt');
+      }
+      if (!batchesResponse.ok) {
+        throw new Error(batchesData.error || 'Could not revalidate this packet manifest');
+      }
+      const current = postsData.posts.find((post) => post.id === selectedPostId);
+      if (!current) {
+        throw new Error('This exact Post is no longer available. Refresh before preparing it.');
+      }
+      const currentJobs = parseAdminLocalJobsResponse(jobsData).jobs;
+      const currentAttempts = parseAdminLocalJobsResponse(jobsData).attempts;
+      const currentAttempt = currentJobs.find((job) => job.id === attemptId);
+      const currentDurableAttempt = currentAttempts.find((attempt) =>
+        attempt.id === durableAttemptId
+        && isEligibleAdminRednoteAttempt(attempt, attemptId)
+        && attempt.payloadDigest === payloadDigest
+        && attempt.payloadRevision === payloadRevision);
+      const currentBatch = batchesData.batches.find((batch) =>
+        batch.id === batchId
+        && batch.manifestHash === manifestHash
+        && ['approved', 'partially_approved'].includes(batch.status));
+      const currentItem = currentBatch?.items.find((item) =>
+        item.itemHash === itemHash
+        && item.localPublishJobId === attemptId
+        && item.notionPageId === selectedPostId
+        && !['failed', 'invalidated', 'reconciled'].includes(item.state));
+      const currentHandoffEligible = Boolean(
+        currentDurableAttempt
+        && currentItem
+        && isManualHandoffEligible({
+          destination: currentItem.snapshot.platform,
+          studioStatus: current.status,
+          publishPacketReady: current.publishPacketReady,
+          readinessBlockers: current.automationBlockers,
+          workspace: {
+            requestedId: workspaceId,
+            packetId: currentBatch?.workspaceId ?? '',
+          },
+          postId: current.id,
+          sourceRevision: current.lastEditedTime,
+          packet: {
+            identity: currentItem.itemHash,
+            postId: currentItem.snapshot.notionPageId,
+            sourceRevision: currentItem.snapshot.notionLastEditedTime,
+            mediaIdentities: (
+              currentItem.snapshot.media?.map((media) => media.identity)
+              ?? [`${currentItem.snapshot.mediaType}:${currentItem.snapshot.mediaIndex}`]
+            ),
+            expectedMediaIdentities: orderedMedia.map((media) => media.identity),
+          },
+          attempt: {
+            identity: currentDurableAttempt.id,
+            sourceLocalPublishJobId:
+              currentDurableAttempt.sourceLocalPublishJobId ?? '',
+            payloadDigest: currentDurableAttempt.payloadDigest ?? '',
+            payloadRevision: currentDurableAttempt.payloadRevision ?? '',
+            eligible: isEligibleAdminRednoteAttempt(
+              currentDurableAttempt,
+              attemptId,
+            ),
+          },
+          localPublishJobId: attemptId,
+        }),
+      );
+      if (
+        !currentAttempt
+        || !currentDurableAttempt
+        || !currentItem
+        || !currentHandoffEligible
+        || hasLiveUnsafeAutomationOwnership(currentAttempt)
+        || current.status.trim().toLowerCase() === 'published'
+        || current.candidateKind !== 'packet_ready'
+        || current.lastEditedTime !== frozenSnapshot.notionLastEditedTime
+      ) {
+        throw new Error(
+          'This attempt, frozen packet, source revision, or ownership state changed. Refresh and review the exact attempt again.',
+        );
+      }
+
+      const files = await prepareOrderedMediaFiles(frozenSnapshot.title, orderedMedia);
+      const [finalPostsResponse, finalJobsResponse, finalBatchesResponse] =
+        await Promise.all([
+          adminApiFetch(workspaceId, '/admin/api/ready-posts', { cache: 'no-store' }),
+          adminApiFetch(
+            workspaceId,
+            '/admin/api/local-publish-jobs',
+            { cache: 'no-store' },
+          ),
+          adminApiFetch(workspaceId, '/admin/api/publish-batches', { cache: 'no-store' }),
+        ]);
+      const [finalPostsData, finalJobsData, finalBatchesData] = await Promise.all([
+        responseJson<ReadyXhsPostsResponse & ApiError>(
+          finalPostsResponse,
+          'GET /admin/api/ready-posts',
+        ),
+        responseJson<LocalJobsResponse>(
+          finalJobsResponse,
+          'GET /admin/api/local-publish-jobs',
+        ),
+        responseJson<PublishBatchesResponse>(
+          finalBatchesResponse,
+          'GET /admin/api/publish-batches',
+        ),
+      ]);
+      if (!finalPostsResponse.ok || !finalJobsResponse.ok || !finalBatchesResponse.ok) {
+        throw new Error(
+          'Final authority validation failed after media preparation. Prepare the exact packet again.',
+        );
+      }
+      const finalPost = finalPostsData.posts.find((post) => post.id === selectedPostId);
+      const finalParsedJobs = parseAdminLocalJobsResponse(finalJobsData);
+      const finalJob = finalParsedJobs.jobs.find((job) => job.id === attemptId);
+      const finalDurableAttempt = finalParsedJobs.attempts.find((attempt) =>
+        attempt.id === durableAttemptId
+        && isEligibleAdminRednoteAttempt(attempt, attemptId)
+        && attempt.payloadDigest === payloadDigest
+        && attempt.payloadRevision === payloadRevision);
+      const finalBatch = finalBatchesData.batches.find((batch) =>
+        batch.id === batchId
+        && batch.manifestHash === manifestHash
+        && ['approved', 'partially_approved'].includes(batch.status));
+      const finalItem = finalBatch?.items.find((item) =>
+        item.itemHash === itemHash
+        && item.localPublishJobId === attemptId
+        && item.notionPageId === selectedPostId
+        && !['failed', 'invalidated', 'reconciled'].includes(item.state));
+      const finalMediaIdentities = finalItem?.snapshot.media?.map(
+        (media) => media.identity,
+      ) ?? (
+        finalItem
+          ? [`${finalItem.snapshot.mediaType}:${finalItem.snapshot.mediaIndex}`]
+          : []
+      );
+      const finalAuthorityEligible = Boolean(
+        finalPost
+        && finalJob
+        && finalDurableAttempt
+        && finalItem
+        && finalPost.lastEditedTime === frozenSnapshot.notionLastEditedTime
+        && finalPost.status.trim().toLowerCase() !== 'published'
+        && finalPost.candidateKind === 'packet_ready'
+        && !hasLiveUnsafeAutomationOwnership(finalJob)
+        && isManualHandoffEligible({
+          destination: finalItem.snapshot.platform,
+          studioStatus: finalPost.status,
+          publishPacketReady: finalPost.publishPacketReady,
+          readinessBlockers: finalPost.automationBlockers,
+          workspace: {
+            requestedId: workspaceId,
+            packetId: finalBatch?.workspaceId ?? '',
+          },
+          postId: finalPost.id,
+          sourceRevision: finalPost.lastEditedTime,
+          packet: {
+            identity: finalItem.itemHash,
+            postId: finalItem.snapshot.notionPageId,
+            sourceRevision: finalItem.snapshot.notionLastEditedTime,
+            mediaIdentities: finalMediaIdentities,
+            expectedMediaIdentities: orderedMedia.map((media) => media.identity),
+          },
+          attempt: {
+            identity: finalDurableAttempt.id,
+            sourceLocalPublishJobId:
+              finalDurableAttempt.sourceLocalPublishJobId ?? '',
+            payloadDigest: finalDurableAttempt.payloadDigest ?? '',
+            payloadRevision: finalDurableAttempt.payloadRevision ?? '',
+            eligible: isEligibleAdminRednoteAttempt(
+              finalDurableAttempt,
+              attemptId,
+            ),
+          },
+          localPublishJobId: attemptId,
+        })
+      );
+      if (!finalAuthorityEligible) {
+        throw new Error(
+          'Authority changed while media was being prepared. The prior packet remains disabled; review and prepare the exact current attempt again.',
+        );
+      }
+      const shareData: ShareData = {
+        title: frozenSnapshot.title,
+        text,
+        files,
+      };
+      let shareable = false;
+      try {
+        shareable = canSharePreparedPacket(navigator, shareData);
+      } catch {
+        shareable = false;
+      }
+      const validatedAt = Date.now();
+      const downloadUrls: string[] = [];
+      try {
+        for (const file of files) {
+          downloadUrls.push(URL.createObjectURL(file));
+        }
+      } catch (error) {
+        for (const url of downloadUrls) URL.revokeObjectURL(url);
+        throw error;
+      }
+      const identity: MobileHandoffIdentity = {
+        workspaceId,
+        postId: selectedPostId,
+        sourceRevision: frozenSnapshot.notionLastEditedTime,
+        localPublishJobId: attemptId,
+        durableAttemptId,
+        payloadDigest,
+        payloadRevision,
+        batchId,
+        manifestHash,
+        itemHash,
+        mediaIdentities: orderedMedia.map((media) => media.identity),
+        title: frozenSnapshot.title,
+        caption: frozenSnapshot.caption,
+        tags: [...frozenSnapshot.tags],
+        text,
+        validatedAt,
+        preparation: 'prepared',
+        shareable,
+        clipboard: 'not_attempted',
+        share: shareable ? 'not_attempted' : 'unsupported',
+        creator: 'not_attempted',
+      };
+      releasePreparedDownloadUrls();
+      preparedDownloadUrlsRef.current = downloadUrls;
+      setMobileHandoffClock(validatedAt);
+      setPreparedMobileHandoff({ identity, files, downloadUrls });
+      try {
+        window.sessionStorage.setItem(
+          mobileHandoffStorageKey(workspaceId, selectedPostId),
+          JSON.stringify(identity),
+        );
+      } catch {
+        // Session storage is an enhancement; the in-memory identity remains authoritative.
+      }
+      setMobileHandoffStatus({
+        tone: shareable ? 'success' : 'warning',
+        message: shareable
+          ? `${files.length} ordered assets prepared and revalidated for two minutes. Tap “Share prepared packet” as a separate gesture. Nothing was copied or published.`
+          : `${files.length} ordered assets prepared and revalidated for two minutes. This browser cannot share the complete packet through its share sheet; use the prepared numbered downloads, separate copy controls, and then open Creator.`,
+      });
+    } catch (handoffError) {
+      setMobileHandoffStatus({
+        tone: 'error',
+        message: handoffError instanceof Error
+          ? handoffError.message
+          : 'The packet could not be prepared. Refresh and review it again.',
+      });
+    } finally {
+      setMobileHandoffBusy(false);
+    }
+  }
+
+  function persistMobileHandoffIdentity(
+    patch: Partial<Pick<MobileHandoffIdentity, 'clipboard' | 'share' | 'creator'>>,
+  ) {
+    setPreparedMobileHandoff((current) => {
+      if (!current) return current;
+      const updated = {
+        ...current,
+        identity: { ...current.identity, ...patch },
+      };
+      try {
+        window.sessionStorage.setItem(
+          mobileHandoffStorageKey(updated.identity.workspaceId, updated.identity.postId),
+          JSON.stringify(updated.identity),
+        );
+      } catch {
+        // Session storage is an enhancement.
+      }
+      return updated;
+    });
+  }
+
+  function sharePreparedMobileHandoff() {
+    const prepared = preparedMobileHandoff;
+    if (
+      !prepared
+      || prepared.files.length === 0
+      || !preparedIdentityCurrent
+      || !isPreparedHandoffFresh(prepared.identity.validatedAt)
+    ) {
+      setMobileHandoffClock(Date.now());
+      persistMobileHandoffIdentity({ share: 'failed' });
+      setMobileShareStatus({
+        tone: 'error',
+        message: 'The prepared authority is unavailable or expired. Prepare and revalidate the complete packet again before sharing.',
+      });
+      return;
+    }
+    if (!navigator.share || !navigator.canShare) {
+      persistMobileHandoffIdentity({ share: 'unsupported' });
+      setMobileShareStatus({
+        tone: 'warning',
+        message: 'File sharing is unavailable in this browser. Use the numbered downloads and copy controls.',
+      });
+      return;
+    }
+    const shareData: ShareData = {
+      title: prepared.identity.title,
+      text: prepared.identity.text,
+      files: prepared.files,
+    };
+    let shareable = false;
+    try {
+      shareable = canSharePreparedPacket(navigator, shareData);
+    } catch {
+      shareable = false;
+    }
+    if (!shareable) {
+      persistMobileHandoffIdentity({ share: 'unsupported' });
+      setMobileShareStatus({
+        tone: 'warning',
+        message: 'This browser cannot share the complete prepared file set. No files were omitted; use the numbered downloads.',
+      });
+      return;
+    }
+    setMobileShareStatus({
+      tone: 'warning',
+      message: 'Opening the share sheet for the complete ordered packet. Opening it does not publish.',
+    });
+    void navigator.share(shareData).then(() => {
+      persistMobileHandoffIdentity({ share: 'completed' });
+      setMobileShareStatus({
+        tone: 'success',
+        message: `The browser share request completed with the prepared packet of ${prepared.files.length} numbered assets. Verify the text and every numbered asset in Rednote before publishing.`,
+      });
+    }).catch((error: unknown) => {
+      const aborted = error instanceof DOMException && error.name === 'AbortError';
+      persistMobileHandoffIdentity({ share: 'failed' });
+      setMobileShareStatus({
+        tone: 'warning',
+        message: aborted
+          ? 'The share sheet was closed. Nothing was published; use the numbered downloads or try again.'
+          : 'The share sheet could not open. No files were omitted or published; use the numbered downloads.',
+      });
+    });
+  }
+
+  function recordCreatorOpening(event: ReactMouseEvent<HTMLAnchorElement>) {
+    if (
+      !preparedActionsAvailable
+      || !preparedMobileHandoff
+      || !isPreparedHandoffFresh(preparedMobileHandoff.identity.validatedAt)
+    ) {
+      event.preventDefault();
+      setMobileHandoffClock(Date.now());
+      setCreatorOpenStatus({
+        tone: 'error',
+        message: 'Prepare and revalidate the exact current packet before opening Creator.',
+      });
+      return;
+    }
+    setCreatorOpenStatus({
+      tone: 'warning',
+      message: 'Opening RedNote Creator was attempted. The browser cannot confirm app opening, and this did not publish.',
+    });
+    setPreparedMobileHandoff((current) => {
+      if (!current) return current;
+      const updated = {
+        ...current,
+        identity: { ...current.identity, creator: 'opening_attempted' as const },
+      };
+      try {
+        window.sessionStorage.setItem(
+          mobileHandoffStorageKey(updated.identity.workspaceId, updated.identity.postId),
+          JSON.stringify(updated.identity),
+        );
+      } catch {
+        // Session storage is an enhancement.
+      }
+      return updated;
+    });
   }
 
   async function queueSelected() {
@@ -1022,6 +1797,15 @@ export default function ReadyPostsPanel({
     setReceiptBusyJobId(job.id);
     setReceiptErrors((current) => ({ ...current, [job.id]: '' }));
     try {
+      const evidence = job.successAttestation;
+      await revalidatePreparedHandoffForReceipt({
+        postId: job.notionPageId,
+        jobId: job.id,
+        sourceRevision: evidence?.snapshotRevision,
+        batchId: evidence?.batchId,
+        manifestHash: evidence?.manifestHash,
+        itemHash: evidence?.itemHash,
+      });
       const path = '/admin/api/local-publish-job-dispositions';
       const response = await adminApiFetch(workspaceId, path, {
         method: 'POST',
@@ -1054,6 +1838,110 @@ export default function ReadyPostsPanel({
     }
   }
 
+  async function revalidatePreparedHandoffForReceipt(
+    override?: {
+      postId: string;
+      jobId: string;
+      sourceRevision?: string;
+      batchId?: string;
+      manifestHash?: string;
+      itemHash?: string;
+    },
+  ) {
+    const prepared = override ? undefined : preparedMobileHandoff?.identity;
+    const selectedPostId = override?.postId ?? prepared?.postId ?? selected?.id;
+    const expectedJobId = override?.jobId ?? prepared?.localPublishJobId ?? currentJob?.id;
+    if (!selectedPostId || !expectedJobId) {
+      throw new Error('No exact current Post and local attempt are available for receipt validation.');
+    }
+    const [postsResponse, jobsResponse, batchesResponse] = await Promise.all([
+      adminApiFetch(workspaceId, '/admin/api/ready-posts', { cache: 'no-store' }),
+      adminApiFetch(workspaceId, '/admin/api/local-publish-jobs', { cache: 'no-store' }),
+      adminApiFetch(workspaceId, '/admin/api/publish-batches', { cache: 'no-store' }),
+    ]);
+    const [postsData, jobsData, batchesData] = await Promise.all([
+      responseJson<ReadyXhsPostsResponse & ApiError>(
+        postsResponse,
+        'GET /admin/api/ready-posts',
+      ),
+      responseJson<LocalJobsResponse>(jobsResponse, 'GET /admin/api/local-publish-jobs'),
+      responseJson<PublishBatchesResponse>(
+        batchesResponse,
+        'GET /admin/api/publish-batches',
+      ),
+    ]);
+    if (!postsResponse.ok || !jobsResponse.ok || !batchesResponse.ok) {
+      throw new Error('The exact handoff could not be revalidated before receipt submission.');
+    }
+    const post = postsData.posts.find((candidate) => candidate.id === selectedPostId);
+    const parsedJobs = parseAdminLocalJobsResponse(jobsData);
+    const job = parsedJobs.jobs.find((candidate) => candidate.id === expectedJobId);
+    const eligibleAttempts = parsedJobs.attempts.filter((candidate) =>
+      (!prepared || candidate.id === prepared.durableAttemptId)
+      && isEligibleAdminRednoteAttempt(candidate, expectedJobId)
+      && (!prepared || candidate.payloadDigest === prepared.payloadDigest)
+      && (!prepared || candidate.payloadRevision === prepared.payloadRevision));
+    const attempt = eligibleAttempts.length === 1 ? eligibleAttempts[0] : undefined;
+    const batch = batchesData.batches.find((candidate) =>
+      (!prepared || candidate.id === prepared.batchId)
+      && (!override?.batchId || candidate.id === override.batchId)
+      && candidate.workspaceId === (prepared?.workspaceId ?? workspaceId)
+      && (!prepared || candidate.manifestHash === prepared.manifestHash)
+      && (!override?.manifestHash || candidate.manifestHash === override.manifestHash)
+      && ['approved', 'partially_approved'].includes(candidate.status));
+    const item = batch?.items.find((candidate) =>
+      (!prepared || candidate.itemHash === prepared.itemHash)
+      && (!override?.itemHash || candidate.itemHash === override.itemHash)
+      && candidate.localPublishJobId === expectedJobId
+      && candidate.notionPageId === selectedPostId
+      && !['failed', 'invalidated', 'reconciled'].includes(candidate.state));
+    const mediaIdentities = item?.snapshot.media?.map((media) => media.identity)
+      ?? (item ? [`${item.snapshot.mediaType}:${item.snapshot.mediaIndex}`] : []);
+    const expectedMediaIdentities = prepared?.mediaIdentities ?? mediaIdentities;
+    const expectedSourceRevision =
+      override?.sourceRevision ?? prepared?.sourceRevision ?? post?.lastEditedTime;
+    const eligible = Boolean(
+      post
+      && job
+      && attempt
+      && item
+      && isManualHandoffEligible({
+        destination: item.snapshot.platform,
+        studioStatus: post.status,
+        publishPacketReady: post.publishPacketReady,
+        readinessBlockers: post.automationBlockers,
+        workspace: { requestedId: workspaceId, packetId: batch?.workspaceId ?? '' },
+        postId: post.id,
+        sourceRevision: post.lastEditedTime,
+        packet: {
+          identity: item.itemHash,
+          postId: item.snapshot.notionPageId,
+          sourceRevision: item.snapshot.notionLastEditedTime,
+          mediaIdentities,
+          expectedMediaIdentities,
+        },
+        attempt: {
+          identity: attempt.id,
+          sourceLocalPublishJobId: attempt.sourceLocalPublishJobId ?? '',
+          payloadDigest: attempt.payloadDigest ?? '',
+          payloadRevision: attempt.payloadRevision ?? '',
+            eligible: isEligibleAdminRednoteAttempt(attempt, expectedJobId),
+        },
+          localPublishJobId: expectedJobId,
+      }),
+    );
+    if (
+      !eligible
+      || !expectedSourceRevision
+      || post!.lastEditedTime !== expectedSourceRevision
+      || item!.snapshot.notionLastEditedTime !== expectedSourceRevision
+    ) {
+      throw new Error(
+        'The prepared handoff is stale or mismatched. Receipt evidence was not submitted.',
+      );
+    }
+  }
+
   async function reconcileSelected() {
       if (!selected || !manualConfirmed || !manualPublicPost.trim()) return;
       const idempotencyKey =
@@ -1062,6 +1950,7 @@ export default function ReadyPostsPanel({
       setManualSubmitting(true);
       setManualReconciliationError('');
       try {
+        await revalidatePreparedHandoffForReceipt();
         const path = '/admin/api/manual-reconciliations';
         const response = await adminApiFetch(workspaceId, path, {
           method: 'POST',
@@ -1140,11 +2029,70 @@ export default function ReadyPostsPanel({
     const postId = selected?.id;
     const result = await copyHandoffText(navigator.clipboard, value, label);
     if (
+      postId
+      &&
       copyRequestRef.current === requestId &&
       selectedPostIdRef.current === postId
     ) {
       setCopyStatus(result);
+      setPreparedMobileHandoff((current) => {
+        if (!current || current.identity.postId !== postId) return current;
+        const updated = {
+          ...current,
+          identity: {
+            ...current.identity,
+            clipboard: result.ok ? 'succeeded' as const : 'failed' as const,
+          },
+        };
+        try {
+          window.sessionStorage.setItem(
+            mobileHandoffStorageKey(updated.identity.workspaceId, updated.identity.postId),
+            JSON.stringify(updated.identity),
+          );
+        } catch {
+          // Session storage is an enhancement.
+        }
+        return updated;
+      });
     }
+  }
+
+  function copyPreparedField(
+    field: 'title' | 'caption' | 'tags' | 'text',
+    label: string,
+  ) {
+    if (
+      !preparedActionsAvailable
+      || !preparedMobileHandoff
+      || !isPreparedHandoffFresh(preparedMobileHandoff.identity.validatedAt)
+    ) {
+      setMobileHandoffClock(Date.now());
+      setCopyStatus({
+        ok: false,
+        message: 'Prepare and revalidate the exact current packet before copying.',
+      });
+      return;
+    }
+    const value = field === 'tags'
+      ? formatTags(preparedMobileHandoff.identity.tags)
+      : preparedMobileHandoff.identity[field];
+    void copyField(value, label);
+  }
+
+  function guardPreparedDownload(event: ReactMouseEvent<HTMLAnchorElement>) {
+    if (
+      preparedActionsAvailable
+      && preparedMobileHandoff
+      && isPreparedHandoffFresh(preparedMobileHandoff.identity.validatedAt)
+    ) {
+      return;
+    }
+    event.preventDefault();
+    setMobileHandoffClock(Date.now());
+    setMobileHandoffStatus({
+      tone: 'error',
+      message: 'Prepare and revalidate the exact current packet before downloading assets.',
+    });
   }
 
   function postButton(post: ReadyXhsPost) {
@@ -1972,6 +2920,86 @@ export default function ReadyPostsPanel({
                   not prevent recording what the operator actually did.
                 </p>
 
+                <div className={styles.mobileBootstrap}>
+                  <div>
+                    <span className={styles.fieldLabel}>Frozen handoff identity</span>
+                    <strong>{handoffSnapshot?.title ?? selected.headline}</strong>
+                    <p>
+                      Post {selected.id}
+                      {handoffSnapshot
+                        ? ` · source revision ${handoffSnapshot.notionLastEditedTime}`
+                        : ''}
+                      {currentJob ? ` · attempt ${currentJob.id}` : ' · no active attempt'}
+                      {handoffAttempt
+                        ? ` · durable attempt ${handoffAttempt.durableAttempt.id}`
+                        : ''}
+                      {handoffAttempt ? ` · manifest ${handoffAttempt.manifestHash}` : ''}
+                    </p>
+                  </div>
+                  <button
+                    className={styles.sendButton}
+                    type="button"
+                    onClick={prepareMobileHandoff}
+                    disabled={
+                      mobileHandoffBusy
+                      || !handoffAttempt
+                      || !handoffSnapshot
+                      || handoffMedia.length === 0
+                      || !manualHandoffEligible
+                      || selectedIsPublished
+                      || hasLiveManualOwnership
+                    }
+                  >
+                    {mobileHandoffBusy ? 'Preparing exact packet…' : 'Prepare exact packet'}
+                  </button>
+                  {preparedActionsAvailable
+                    && preparedMobileHandoff?.identity.shareable && (
+                    <button
+                      className={styles.sendButton}
+                      type="button"
+                      onClick={sharePreparedMobileHandoff}
+                    >
+                      Share prepared packet
+                    </button>
+                  )}
+                  <p>
+                    Preparation revalidates and fetches every numbered asset but does not copy,
+                    share, or open Creator. Clipboard, share-sheet, and Creator actions are
+                    separate explicit gestures available for two minutes. None marks the Post
+                    Published.
+                  </p>
+                  {mobileHandoffStatus && (
+                    <p
+                      className={
+                        mobileHandoffStatus.tone === 'success'
+                          ? styles.bootstrapSuccess
+                          : mobileHandoffStatus.tone === 'warning'
+                            ? styles.bootstrapWarning
+                            : styles.bootstrapError
+                      }
+                      role="status"
+                      aria-live="polite"
+                    >
+                      {mobileHandoffStatus.message}
+                    </p>
+                  )}
+                  {mobileShareStatus && (
+                    <p
+                      className={
+                        mobileShareStatus.tone === 'success'
+                          ? styles.bootstrapSuccess
+                          : mobileShareStatus.tone === 'warning'
+                            ? styles.bootstrapWarning
+                            : styles.bootstrapError
+                      }
+                      role="status"
+                      aria-live="polite"
+                    >
+                      {mobileShareStatus.message}
+                    </p>
+                  )}
+                </div>
+
                 {currentManualHandling ? (
                   <div
                     className={`${styles.jobStatus} ${
@@ -2021,7 +3049,7 @@ export default function ReadyPostsPanel({
                       disabled={
                         manualHandlingSubmitting
                         || hasLiveManualOwnership
-                        || selected.status.trim().toLowerCase() !== 'approved'
+                        || !manualHandoffEligible
                       }
                     >
                       {manualHandlingSubmitting ? 'Recording…' : 'Mark handled manually'}
@@ -2140,36 +3168,83 @@ export default function ReadyPostsPanel({
                   </p>
                 )}
 
+                <div className={styles.orderedAssets}>
+                  <div className={styles.orderedAssetsHeading}>
+                    <div>
+                      <strong>Ordered packet media</strong>
+                      <p>
+                        Save every asset in numbered order if the share sheet cannot carry them all.
+                      </p>
+                    </div>
+                    <span>{handoffMedia.length} asset{handoffMedia.length === 1 ? '' : 's'}</span>
+                  </div>
+                  <ol>
+                    {handoffMedia.map((media, index) => {
+                      const preparedUrl = preparedMobileHandoff?.downloadUrls[index];
+                      const preparedFile = preparedMobileHandoff?.files[index];
+                      return (
+                        <li key={media.identity}>
+                          <span>
+                            {String(index + 1).padStart(2, '0')} · {media.type}
+                          </span>
+                          {preparedActionsAvailable && preparedUrl && preparedFile ? (
+                            <a
+                              className={styles.secondaryButton}
+                              href={preparedUrl}
+                              download={preparedFile.name}
+                              onClick={guardPreparedDownload}
+                            >
+                              Save asset {index + 1}
+                            </a>
+                          ) : (
+                            <span className={styles.missingAsset}>
+                              Prepare exact packet to save
+                            </span>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ol>
+                </div>
+
                 <div className={styles.assetAction}>
                   <div>
                     <strong>Prepare the canonical video</strong>
                     <p>Download the MP4, then select that file in Creator.</p>
                   </div>
-                  {canonicalVideoUrl ? (
+                  {preparedActionsAvailable
+                    && handoffVideoIndex >= 0
+                    && preparedMobileHandoff?.downloadUrls[handoffVideoIndex]
+                    && preparedMobileHandoff.files[handoffVideoIndex] ? (
                     <a
                       className={styles.secondaryButton}
-                      href={canonicalVideoUrl}
-                      download={getVideoDownloadName(finalTitle, canonicalVideoUrl)}
-                      {...SAFE_EXTERNAL_LINK_PROPS}
+                      href={preparedMobileHandoff.downloadUrls[handoffVideoIndex]}
+                      download={preparedMobileHandoff.files[handoffVideoIndex].name}
+                      onClick={guardPreparedDownload}
                     >
                       Download video
                     </a>
                   ) : (
-                    <span className={styles.missingAsset}>Canonical MEDIA video unavailable</span>
+                    <span className={styles.missingAsset}>
+                      {handoffVideoIndex >= 0
+                        ? 'Prepare exact packet to download the canonical video'
+                        : 'Canonical MEDIA video unavailable'}
+                    </span>
                   )}
                 </div>
 
                 <div className={styles.copyFields}>
-                  {showTitleCopy && (
+                  {showHandoffTitleCopy && (
                     <div className={styles.copyField}>
                       <div>
                         <span className={styles.fieldLabel}>Title</span>
-                        <p>{finalTitle}</p>
+                        <p>{handoffTitle}</p>
                       </div>
                       <button
                         className={styles.copyButton}
                         type="button"
-                        onClick={() => copyField(finalTitle, 'Title')}
+                        onClick={() => copyPreparedField('title', 'Title')}
+                        disabled={!preparedActionsAvailable}
                       >
                         Copy title
                       </button>
@@ -2179,32 +3254,48 @@ export default function ReadyPostsPanel({
                     <div>
                       <span className={styles.fieldLabel}>Caption</span>
                       <p className={styles.caption}>
-                        {finalCaption || 'No RedNote caption provided.'}
+                        {handoffCaption || 'No RedNote caption provided.'}
                       </p>
                     </div>
                     <button
                       className={styles.copyButton}
                       type="button"
-                      onClick={() => copyField(finalCaption, 'Caption')}
+                      onClick={() => copyPreparedField('caption', 'Caption')}
+                      disabled={!preparedActionsAvailable}
                     >
                       Copy caption
                     </button>
                   </div>
-                  {missingTags.length > 0 && (
+                  {preparedMissingTags.length > 0 && (
                     <div className={styles.copyField}>
                       <div>
                         <span className={styles.fieldLabel}>Tags not already in the caption</span>
-                        <p>{formatTags(missingTags)}</p>
+                        <p>{formatTags(preparedMissingTags)}</p>
                       </div>
                       <button
                         className={styles.copyButton}
                         type="button"
-                        onClick={() => copyField(formatTags(missingTags), 'Tags')}
+                        onClick={() => copyPreparedField('tags', 'Tags')}
+                        disabled={!preparedActionsAvailable}
                       >
                         Copy tags
                       </button>
                     </div>
                   )}
+                  <div className={styles.copyField}>
+                    <div>
+                      <span className={styles.fieldLabel}>Caption plus final tags</span>
+                      <p>Copy the exact approved caption and final tags together.</p>
+                    </div>
+                    <button
+                      className={styles.copyButton}
+                      type="button"
+                      onClick={() => copyPreparedField('text', 'Caption and tags')}
+                      disabled={!preparedActionsAvailable}
+                    >
+                      Copy caption + tags
+                    </button>
+                  </div>
                 </div>
 
                 {copyStatus && (
@@ -2218,13 +3309,20 @@ export default function ReadyPostsPanel({
                 )}
 
                 <div className={styles.handoffActions}>
-                  <a
-                    className={styles.creatorButton}
-                    href={REDNOTE_CREATOR_PUBLISH_URL}
-                    {...SAFE_EXTERNAL_LINK_PROPS}
-                  >
-                    Open RedNote Creator
-                  </a>
+                  {preparedActionsAvailable ? (
+                    <a
+                      className={styles.creatorButton}
+                      href={REDNOTE_CREATOR_PUBLISH_URL}
+                      onClick={recordCreatorOpening}
+                      {...SAFE_EXTERNAL_LINK_PROPS}
+                    >
+                      Open RedNote Creator
+                    </a>
+                  ) : (
+                    <span className={styles.missingAsset}>
+                      Prepare the exact current packet before opening RedNote Creator
+                    </span>
+                  )}
                   <a
                     className={styles.linkButton}
                     href={selected.pageUrl}
@@ -2233,9 +3331,18 @@ export default function ReadyPostsPanel({
                     Open packet in Notion
                   </a>
                 </div>
+                {creatorOpenStatus && (
+                  <p
+                    className={styles.bootstrapWarning}
+                    role="status"
+                    aria-live="polite"
+                  >
+                    {creatorOpenStatus.message}
+                  </p>
+                )}
                 <p className={styles.backfillNotice}>
-                  Leave Notion Approved until the note ID and authenticated account ownership are
-                  verified. Successful verification moves the canonical row to Published without
+                  Leave the source unpublished until the note ID and authenticated account ownership
+                  are verified. Successful verification moves the canonical row to Published without
                   rewriting packet, copy, media, or needs flags. Public indexing is a later,
                   non-blocking audit attribute.
                 </p>

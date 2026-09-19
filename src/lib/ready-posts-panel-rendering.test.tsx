@@ -5,7 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react-dom/test-utils';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import ReadyPostsPanel from '@/app/admin/ReadyPostsPanel';
-import type { ReadyXhsPost } from '@/types/ready-post';
+import type { ReadyXhsPost, ReadyXhsPostsResponse } from '@/types/ready-post';
 
 vi.mock('next/image', () => ({
   default: (props: React.ImgHTMLAttributes<HTMLImageElement>) =>
@@ -47,10 +47,253 @@ afterEach(async () => {
   container?.remove();
   root = undefined;
   container = undefined;
+  window.sessionStorage.clear();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
 describe('ReadyPostsPanel handoff notice', () => {
+  it('prepares a Ready packet for mobile without mutating publication state', async () => {
+    vi.useFakeTimers();
+    const mobileReadyPost = {
+      ...readyPost,
+      status: 'Ready',
+      imageUrls: [
+        'https://images.xhs.justlikekatie.com/uploads/first.jpg',
+        'https://images.xhs.justlikekatie.com/uploads/second.jpg',
+      ],
+    };
+    const existingAttempt = {
+      id: 'existing-attempt',
+      notionPageId: mobileReadyPost.id,
+      status: 'queued',
+      createdAt: '2026-09-12T12:01:00.000Z',
+      updatedAt: '2026-09-12T12:01:00.000Z',
+      verificationAttempts: 0,
+    };
+    const attemptBatch = {
+      id: 'attempt-batch',
+      workspaceId: 'workspace-test',
+      kind: 'on_demand',
+      status: 'approved',
+      manifestHash: 'exact-manifest',
+      createdAt: '2026-09-12T12:01:00.000Z',
+      items: [{
+        id: 'attempt-item',
+        notionPageId: mobileReadyPost.id,
+        localPublishJobId: existingAttempt.id,
+        snapshot: {
+          notionPageId: mobileReadyPost.id,
+          headline: mobileReadyPost.headline,
+          title: 'Frozen title',
+          caption: mobileReadyPost.caption,
+          tags: mobileReadyPost.tags,
+          platform: 'RedNote',
+          mediaType: 'image',
+          mediaIndex: 0,
+          mediaUrl: mobileReadyPost.imageUrls[0],
+          media: mobileReadyPost.imageUrls.map((url, index) => ({
+            identity: `image:${index}`,
+            type: 'image',
+            url,
+          })),
+          notionLastEditedTime: mobileReadyPost.lastEditedTime,
+        },
+        itemHash: 'exact-item',
+        state: 'queued',
+        dispatchMode: 'post_now',
+        lateBySeconds: 0,
+      }],
+      blockedCandidates: [],
+    };
+    let readyPostsPayload: ReadyXhsPostsResponse = {
+      posts: [mobileReadyPost],
+      warnings: [],
+    };
+    const responses: Record<string, unknown> = {
+      '/admin/api/local-publish-jobs': {
+        jobs: [existingAttempt],
+        successAttestationCandidates: [],
+        attempts: [{
+          id: 'durable-attempt',
+          sourceLocalPublishJobId: existingAttempt.id,
+          payloadDigest: 'frozen-payload-digest',
+          payloadRevision: mobileReadyPost.lastEditedTime,
+          active: true,
+          approvedAt: '2026-09-12T12:01:00.000Z',
+          supersededByAttemptId: null,
+          terminalOutcome: null,
+        }],
+      },
+      '/admin/api/external-post-reconciliations': { reconciliations: [] },
+      '/admin/api/manual-reconciliations': { reconciliations: [] },
+      '/admin/api/publish-batches': { batches: [attemptBatch] },
+    };
+    let deferMediaPreparation = false;
+    const pendingMediaResponses: Array<(response: Response) => void> = [];
+    const requestSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async (input, init) => {
+        const path = String(input);
+        if (path === '/admin/api/ready-posts') {
+          return new Response(JSON.stringify(readyPostsPayload), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (!(path in responses)) {
+          if (path.startsWith('https://images.xhs.justlikekatie.com/')) {
+            if (deferMediaPreparation) {
+              return new Promise<Response>((resolve) => {
+                pendingMediaResponses.push(resolve);
+              });
+            }
+            return new Response(new Blob(['asset']), {
+              status: 200,
+              headers: { 'Content-Type': 'image/jpeg' },
+            });
+          }
+          throw new Error(`Unexpected request: ${init?.method ?? 'GET'} ${path}`);
+        }
+        return new Response(JSON.stringify(responses[path]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      },
+    );
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    let objectUrlSequence = 0;
+    const createObjectURL = vi.fn(
+      () => `blob:prepared-${++objectUrlSequence}`,
+    );
+    const revokeObjectURL = vi.fn();
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: createObjectURL,
+    });
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: revokeObjectURL,
+    });
+
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(createElement(ReadyPostsPanel, {
+        workspaceId: 'workspace-test',
+        initialNotionPageId: mobileReadyPost.id,
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const sendButton = Array.from(container.querySelectorAll('button'))
+      .find((button) => button.textContent === 'Prepare exact packet');
+    const handledButton = Array.from(container.querySelectorAll('button'))
+      .find((button) => button.textContent === 'Mark handled manually');
+    expect(sendButton).toBeDefined();
+    expect(handledButton).toBeDefined();
+    expect(handledButton?.disabled).toBe(false);
+    expect(container.querySelectorAll('a[download]')).toHaveLength(0);
+    expect(container.textContent).toContain('Prepare exact packet to save');
+
+    await act(async () => {
+      sendButton?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(writeText).not.toHaveBeenCalled();
+    expect(container.textContent).toContain(
+      'ordered assets prepared',
+    );
+    expect(Array.from(container.querySelectorAll('a[download]')).map((link) =>
+      link.getAttribute('download'))).toEqual([
+      'frozen-title-01.jpg',
+      'frozen-title-02.jpg',
+    ]);
+    expect(Array.from(container.querySelectorAll('a[download]')).map((link) =>
+      link.getAttribute('href'))).toEqual([
+      'blob:prepared-1',
+      'blob:prepared-2',
+    ]);
+    expect(createObjectURL).toHaveBeenCalledTimes(2);
+    expect(window.sessionStorage.getItem(
+      'xhs-mobile-handoff:workspace-test:available-notion-page',
+    )).toContain('"validatedAt":');
+    expect(requestSpy.mock.calls.filter(([, init]) =>
+      (init?.method ?? 'GET') !== 'GET')).toEqual([]);
+
+    readyPostsPayload = {
+      posts: [{
+        ...mobileReadyPost,
+        lastEditedTime: '2026-09-12T12:05:00.000Z',
+      }],
+      warnings: [],
+    };
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+      for (let index = 0; index < 8; index += 1) await Promise.resolve();
+    });
+    expect(container.querySelectorAll('a[download]')).toHaveLength(0);
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:prepared-1');
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:prepared-2');
+
+    readyPostsPayload = { posts: [mobileReadyPost], warnings: [] };
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+      for (let index = 0; index < 8; index += 1) await Promise.resolve();
+    });
+    await act(async () => {
+      sendButton?.click();
+      for (let index = 0; index < 12; index += 1) await Promise.resolve();
+    });
+    expect(container.querySelectorAll('a[download]')).toHaveLength(2);
+
+    deferMediaPreparation = true;
+    await act(async () => {
+      sendButton?.click();
+      for (let index = 0; index < 8; index += 1) await Promise.resolve();
+    });
+    expect(container.querySelectorAll('a[download]')).toHaveLength(0);
+    expect(window.sessionStorage.getItem(
+      'xhs-mobile-handoff:workspace-test:available-notion-page',
+    )).toBeNull();
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:prepared-3');
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:prepared-4');
+    expect(pendingMediaResponses).toHaveLength(2);
+
+    readyPostsPayload = {
+      posts: [{
+        ...mobileReadyPost,
+        lastEditedTime: '2026-09-12T12:06:00.000Z',
+      }],
+      warnings: [],
+    };
+    await act(async () => {
+      for (const resolve of pendingMediaResponses) {
+        resolve(new Response(new Blob(['asset']), {
+          status: 200,
+          headers: { 'Content-Type': 'image/jpeg' },
+        }));
+      }
+      for (let index = 0; index < 12; index += 1) await Promise.resolve();
+    });
+    expect(container.querySelectorAll('a[download]')).toHaveLength(0);
+    expect(container.textContent).toContain(
+      'Authority changed while media was being prepared',
+    );
+    await act(async () => root?.unmount());
+    root = undefined;
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:prepared-1');
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:prepared-2');
+  });
+
   it('keeps a missing requested record visible and passive after ready posts load', async () => {
     const responses: Record<string, unknown> = {
       '/admin/api/ready-posts': { posts: [readyPost], warnings: [] },

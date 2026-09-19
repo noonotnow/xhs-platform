@@ -2641,7 +2641,8 @@ export async function readRednotePublishingOperational(workspaceId: string) {
     id: string; notion_page_id: string; snapshot: Record<string, unknown>;
      status: string; updated_at: Date | string; attempt_id: string | null;
     job_created_at: Date | string; attempt_created_at: Date | string | null;
-    active: boolean | null; payload_revision: string | null;
+    active: boolean | null; payload_revision: string | null; payload_digest: string | null;
+    source_local_publish_job_id: string | null;
     terminal_outcome: string | null; receipt_lookup_state: string | null;
     terminal_at: Date | string | null; rednote_note_id: string | null;
      rednote_url: string | null; captured_at: Date | string | null; event_count: string;
@@ -2651,7 +2652,8 @@ export async function readRednotePublishingOperational(workspaceId: string) {
   }>(
     `SELECT job.id,job.notion_page_id,job.snapshot,job.status,job.updated_at,
       job.created_at AS job_created_at,
-      attempt.id AS attempt_id,attempt.active,attempt.payload_revision,
+      attempt.id AS attempt_id,attempt.active,attempt.payload_revision,attempt.payload_digest,
+      attempt.source_local_publish_job_id,
       attempt.created_at AS attempt_created_at,
       attempt.terminal_outcome,attempt.receipt_lookup_state,attempt.terminal_at,
        attempt.authorization_kind,attempt.approved_at,attempt.claim_expires_at,
@@ -2706,6 +2708,13 @@ export async function readRednotePublishingOperational(workspaceId: string) {
          row.dispatch_authorized_at === null &&
          row.superseded_by_attempt_id === null,
       activeAttempt: row.active === true,
+      sourceLocalPublishJobId: row.attempt_id ? row.source_local_publish_job_id : null,
+      payloadDigest: row.attempt_id ? row.payload_digest : null,
+      payloadRevision: row.attempt_id ? row.payload_revision : null,
+      active: row.attempt_id ? row.active : null,
+      approvedAt: row.attempt_id ? iso(row.approved_at) : null,
+      supersededByAttemptId: row.attempt_id ? row.superseded_by_attempt_id : null,
+      terminalOutcome: row.attempt_id ? row.terminal_outcome : null,
        authorization: row.authorization_kind === 'ready_x3'
          ? { kind: 'ready_x3', state: row.dispatch_authorized_at ? 'consumed' :
            row.active && row.approved_at ? 'ready' : 'invalidated',
