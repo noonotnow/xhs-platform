@@ -966,13 +966,20 @@ export default function ReadyPostsPanel({
 
   useEffect(() => {
     const timer = window.setInterval(() => {
+      void loadPosts();
       void loadJobs();
       void loadReconciliations();
       void loadManualReconciliations();
       void loadBatches();
     }, 10_000);
     return () => window.clearInterval(timer);
-  }, [loadBatches, loadJobs, loadManualReconciliations, loadReconciliations]);
+  }, [
+    loadBatches,
+    loadJobs,
+    loadManualReconciliations,
+    loadPosts,
+    loadReconciliations,
+  ]);
 
   useEffect(() => {
     setFinalTitle(selected?.headline ?? '');
@@ -1080,8 +1087,19 @@ export default function ReadyPostsPanel({
       frozenSnapshot.caption,
       frozenSnapshot.tags,
     );
-    setMobileHandoffBusy(true);
+    releasePreparedDownloadUrls();
+    setPreparedMobileHandoff(null);
+    try {
+      window.sessionStorage.removeItem(
+        mobileHandoffStorageKey(workspaceId, selectedPostId),
+      );
+    } catch {
+      // Session storage is an enhancement.
+    }
+    setCopyStatus(null);
     setMobileShareStatus(null);
+    setCreatorOpenStatus(null);
+    setMobileHandoffBusy(true);
     setMobileHandoffStatus({
       tone: 'warning',
       message: 'Revalidating the exact source revision and ordered media…',
@@ -1191,6 +1209,105 @@ export default function ReadyPostsPanel({
       }
 
       const files = await prepareOrderedMediaFiles(frozenSnapshot.title, orderedMedia);
+      const [finalPostsResponse, finalJobsResponse, finalBatchesResponse] =
+        await Promise.all([
+          adminApiFetch(workspaceId, '/admin/api/ready-posts', { cache: 'no-store' }),
+          adminApiFetch(
+            workspaceId,
+            '/admin/api/local-publish-jobs',
+            { cache: 'no-store' },
+          ),
+          adminApiFetch(workspaceId, '/admin/api/publish-batches', { cache: 'no-store' }),
+        ]);
+      const [finalPostsData, finalJobsData, finalBatchesData] = await Promise.all([
+        responseJson<ReadyXhsPostsResponse & ApiError>(
+          finalPostsResponse,
+          'GET /admin/api/ready-posts',
+        ),
+        responseJson<LocalJobsResponse>(
+          finalJobsResponse,
+          'GET /admin/api/local-publish-jobs',
+        ),
+        responseJson<PublishBatchesResponse>(
+          finalBatchesResponse,
+          'GET /admin/api/publish-batches',
+        ),
+      ]);
+      if (!finalPostsResponse.ok || !finalJobsResponse.ok || !finalBatchesResponse.ok) {
+        throw new Error(
+          'Final authority validation failed after media preparation. Prepare the exact packet again.',
+        );
+      }
+      const finalPost = finalPostsData.posts.find((post) => post.id === selectedPostId);
+      const finalParsedJobs = parseAdminLocalJobsResponse(finalJobsData);
+      const finalJob = finalParsedJobs.jobs.find((job) => job.id === attemptId);
+      const finalDurableAttempt = finalParsedJobs.attempts.find((attempt) =>
+        attempt.id === durableAttemptId
+        && isEligibleAdminRednoteAttempt(attempt, attemptId)
+        && attempt.payloadDigest === payloadDigest
+        && attempt.payloadRevision === payloadRevision);
+      const finalBatch = finalBatchesData.batches.find((batch) =>
+        batch.id === batchId
+        && batch.manifestHash === manifestHash
+        && ['approved', 'partially_approved'].includes(batch.status));
+      const finalItem = finalBatch?.items.find((item) =>
+        item.itemHash === itemHash
+        && item.localPublishJobId === attemptId
+        && item.notionPageId === selectedPostId
+        && !['failed', 'invalidated', 'reconciled'].includes(item.state));
+      const finalMediaIdentities = finalItem?.snapshot.media?.map(
+        (media) => media.identity,
+      ) ?? (
+        finalItem
+          ? [`${finalItem.snapshot.mediaType}:${finalItem.snapshot.mediaIndex}`]
+          : []
+      );
+      const finalAuthorityEligible = Boolean(
+        finalPost
+        && finalJob
+        && finalDurableAttempt
+        && finalItem
+        && finalPost.lastEditedTime === frozenSnapshot.notionLastEditedTime
+        && finalPost.status.trim().toLowerCase() !== 'published'
+        && finalPost.candidateKind === 'packet_ready'
+        && !hasLiveUnsafeAutomationOwnership(finalJob)
+        && isManualHandoffEligible({
+          destination: finalItem.snapshot.platform,
+          studioStatus: finalPost.status,
+          publishPacketReady: finalPost.publishPacketReady,
+          readinessBlockers: finalPost.automationBlockers,
+          workspace: {
+            requestedId: workspaceId,
+            packetId: finalBatch?.workspaceId ?? '',
+          },
+          postId: finalPost.id,
+          sourceRevision: finalPost.lastEditedTime,
+          packet: {
+            identity: finalItem.itemHash,
+            postId: finalItem.snapshot.notionPageId,
+            sourceRevision: finalItem.snapshot.notionLastEditedTime,
+            mediaIdentities: finalMediaIdentities,
+            expectedMediaIdentities: orderedMedia.map((media) => media.identity),
+          },
+          attempt: {
+            identity: finalDurableAttempt.id,
+            sourceLocalPublishJobId:
+              finalDurableAttempt.sourceLocalPublishJobId ?? '',
+            payloadDigest: finalDurableAttempt.payloadDigest ?? '',
+            payloadRevision: finalDurableAttempt.payloadRevision ?? '',
+            eligible: isEligibleAdminRednoteAttempt(
+              finalDurableAttempt,
+              attemptId,
+            ),
+          },
+          localPublishJobId: attemptId,
+        })
+      );
+      if (!finalAuthorityEligible) {
+        throw new Error(
+          'Authority changed while media was being prepared. The prior packet remains disabled; review and prepare the exact current attempt again.',
+        );
+      }
       const shareData: ShareData = {
         title: frozenSnapshot.title,
         text,

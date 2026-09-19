@@ -5,7 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react-dom/test-utils';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import ReadyPostsPanel from '@/app/admin/ReadyPostsPanel';
-import type { ReadyXhsPost } from '@/types/ready-post';
+import type { ReadyXhsPost, ReadyXhsPostsResponse } from '@/types/ready-post';
 
 vi.mock('next/image', () => ({
   default: (props: React.ImgHTMLAttributes<HTMLImageElement>) =>
@@ -48,11 +48,13 @@ afterEach(async () => {
   root = undefined;
   container = undefined;
   window.sessionStorage.clear();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
 describe('ReadyPostsPanel handoff notice', () => {
   it('prepares a Ready packet for mobile without mutating publication state', async () => {
+    vi.useFakeTimers();
     const mobileReadyPost = {
       ...readyPost,
       status: 'Ready',
@@ -104,8 +106,11 @@ describe('ReadyPostsPanel handoff notice', () => {
       }],
       blockedCandidates: [],
     };
+    let readyPostsPayload: ReadyXhsPostsResponse = {
+      posts: [mobileReadyPost],
+      warnings: [],
+    };
     const responses: Record<string, unknown> = {
-      '/admin/api/ready-posts': { posts: [mobileReadyPost], warnings: [] },
       '/admin/api/local-publish-jobs': {
         jobs: [existingAttempt],
         successAttestationCandidates: [],
@@ -124,11 +129,24 @@ describe('ReadyPostsPanel handoff notice', () => {
       '/admin/api/manual-reconciliations': { reconciliations: [] },
       '/admin/api/publish-batches': { batches: [attemptBatch] },
     };
+    let deferMediaPreparation = false;
+    const pendingMediaResponses: Array<(response: Response) => void> = [];
     const requestSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
       async (input, init) => {
         const path = String(input);
+        if (path === '/admin/api/ready-posts') {
+          return new Response(JSON.stringify(readyPostsPayload), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
         if (!(path in responses)) {
           if (path.startsWith('https://images.xhs.justlikekatie.com/')) {
+            if (deferMediaPreparation) {
+              return new Promise<Response>((resolve) => {
+                pendingMediaResponses.push(resolve);
+              });
+            }
             return new Response(new Blob(['asset']), {
               status: 200,
               headers: { 'Content-Type': 'image/jpeg' },
@@ -210,6 +228,66 @@ describe('ReadyPostsPanel handoff notice', () => {
     )).toContain('"validatedAt":');
     expect(requestSpy.mock.calls.filter(([, init]) =>
       (init?.method ?? 'GET') !== 'GET')).toEqual([]);
+
+    readyPostsPayload = {
+      posts: [{
+        ...mobileReadyPost,
+        lastEditedTime: '2026-09-12T12:05:00.000Z',
+      }],
+      warnings: [],
+    };
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+      for (let index = 0; index < 8; index += 1) await Promise.resolve();
+    });
+    expect(container.querySelectorAll('a[download]')).toHaveLength(0);
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:prepared-1');
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:prepared-2');
+
+    readyPostsPayload = { posts: [mobileReadyPost], warnings: [] };
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+      for (let index = 0; index < 8; index += 1) await Promise.resolve();
+    });
+    await act(async () => {
+      sendButton?.click();
+      for (let index = 0; index < 12; index += 1) await Promise.resolve();
+    });
+    expect(container.querySelectorAll('a[download]')).toHaveLength(2);
+
+    deferMediaPreparation = true;
+    await act(async () => {
+      sendButton?.click();
+      for (let index = 0; index < 8; index += 1) await Promise.resolve();
+    });
+    expect(container.querySelectorAll('a[download]')).toHaveLength(0);
+    expect(window.sessionStorage.getItem(
+      'xhs-mobile-handoff:workspace-test:available-notion-page',
+    )).toBeNull();
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:prepared-3');
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:prepared-4');
+    expect(pendingMediaResponses).toHaveLength(2);
+
+    readyPostsPayload = {
+      posts: [{
+        ...mobileReadyPost,
+        lastEditedTime: '2026-09-12T12:06:00.000Z',
+      }],
+      warnings: [],
+    };
+    await act(async () => {
+      for (const resolve of pendingMediaResponses) {
+        resolve(new Response(new Blob(['asset']), {
+          status: 200,
+          headers: { 'Content-Type': 'image/jpeg' },
+        }));
+      }
+      for (let index = 0; index < 12; index += 1) await Promise.resolve();
+    });
+    expect(container.querySelectorAll('a[download]')).toHaveLength(0);
+    expect(container.textContent).toContain(
+      'Authority changed while media was being prepared',
+    );
     await act(async () => root?.unmount());
     root = undefined;
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:prepared-1');
