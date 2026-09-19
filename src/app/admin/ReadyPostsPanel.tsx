@@ -29,7 +29,6 @@ import {
   copyHandoffText,
   formatTags,
   formatRednoteHandoffText,
-  getCanonicalVideoUrl,
   getMediaDownloadName,
   getMissingTags,
   getVideoDownloadName,
@@ -557,7 +556,6 @@ export default function ReadyPostsPanel({
   ) ?? mediaChoices[0];
   const isMovCompatibilityTrial = selectedMedia?.compatibilityTrial === 'unverified_mov';
   const movTrialIsEligible = selected ? isMovCompatibilityTrialEligible(selected) : false;
-  const canonicalVideoUrl = selected ? getCanonicalVideoUrl(selected.videoUrls) : undefined;
   const currentJob = selected
     ? displayedLocalPublishJob(jobs, selected.id)
     : undefined;
@@ -796,8 +794,6 @@ export default function ReadyPostsPanel({
       && (!currentJob || currentJob.status === 'failed' || currentJob.status === 'queued'),
     );
   const reviewedTags = tagsFromInput(finalTags);
-  const missingTags = getMissingTags(reviewedTags, finalCaption);
-  const showTitleCopy = shouldOfferTitleCopy(finalTitle, finalCaption);
   const timing = selected ? publishTiming(selected) : null;
   const selectedSchedule = selected
     ? getEditorialScheduleDisplay(selected.scheduledDate)
