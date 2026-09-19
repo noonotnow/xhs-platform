@@ -15,6 +15,62 @@ export interface CopyHandoffResult {
   message: string;
 }
 
+export interface ManualHandoffEligibility {
+  destination: string;
+  studioStatus: string;
+  publishPacketReady: boolean;
+  readinessBlockers: readonly string[];
+  workspace: {
+    requestedId: string;
+    packetId: string;
+  };
+  postId: string;
+  sourceRevision: string;
+  packet: {
+    identity: string;
+    postId: string;
+    sourceRevision: string;
+    mediaIdentities: readonly string[];
+    expectedMediaIdentities: readonly string[];
+  };
+  attempt: {
+    identity: string;
+    sourceLocalPublishJobId: string;
+    payloadDigest: string;
+    payloadRevision: string;
+    eligible: boolean;
+  };
+  localPublishJobId: string;
+}
+
+export function isManualHandoffEligible(
+  value: ManualHandoffEligibility,
+) {
+  const status = value.studioStatus.trim().toLowerCase();
+  return value.destination.trim().toLowerCase() === 'rednote'
+    && (status === 'ready' || status === 'approved')
+    && value.publishPacketReady
+    && value.readinessBlockers.length === 0
+    && Boolean(value.workspace.requestedId.trim())
+    && value.workspace.packetId === value.workspace.requestedId
+    && Boolean(value.postId.trim())
+    && Boolean(value.sourceRevision.trim())
+    && Boolean(value.packet.identity.trim())
+    && value.packet.postId === value.postId
+    && value.packet.sourceRevision === value.sourceRevision
+    && value.packet.mediaIdentities.length > 0
+    && value.packet.mediaIdentities.every((identity) => Boolean(identity.trim()))
+    && value.packet.mediaIdentities.length === value.packet.expectedMediaIdentities.length
+    && value.packet.mediaIdentities.every(
+      (identity, index) => identity === value.packet.expectedMediaIdentities[index],
+    )
+    && Boolean(value.attempt.identity.trim())
+    && value.attempt.sourceLocalPublishJobId === value.localPublishJobId
+    && Boolean(value.attempt.payloadDigest.trim())
+    && Boolean(value.attempt.payloadRevision.trim())
+    && value.attempt.eligible;
+}
+
 export async function copyHandoffText(
   clipboard: ClipboardWriter | undefined,
   value: string,

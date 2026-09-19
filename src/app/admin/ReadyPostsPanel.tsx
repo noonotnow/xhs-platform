@@ -33,6 +33,7 @@ import {
   getMediaDownloadName,
   getMissingTags,
   getVideoDownloadName,
+  isManualHandoffEligible,
   REDNOTE_CREATOR_PUBLISH_URL,
   SAFE_EXTERNAL_LINK_PROPS,
   shouldOfferTitleCopy,
@@ -560,6 +561,44 @@ export default function ReadyPostsPanel({
   const handoffMissingTags = getMissingTags(handoffTags, handoffCaption);
   const showHandoffTitleCopy = shouldOfferTitleCopy(handoffTitle, handoffCaption);
   const handoffVideoUrl = handoffMedia.find((media) => media.type === 'video')?.url;
+  const manualHandoffEligible = Boolean(
+    selected
+    && currentJob
+    && handoffAttempt
+    && handoffSnapshot
+    && isManualHandoffEligible({
+      destination: handoffSnapshot.platform,
+      studioStatus: selected.status,
+      publishPacketReady: selected.publishPacketReady,
+      readinessBlockers: selected.automationBlockers,
+      workspace: {
+        requestedId: workspaceId,
+        packetId: batches.find((batch) =>
+          batch.id === handoffAttempt.batchId)?.workspaceId ?? '',
+      },
+      postId: selected.id,
+      sourceRevision: selected.lastEditedTime,
+      packet: {
+        identity: handoffAttempt.item.itemHash,
+        postId: handoffSnapshot.notionPageId,
+        sourceRevision: handoffSnapshot.notionLastEditedTime,
+        mediaIdentities: handoffMedia.map((media) => media.identity),
+        expectedMediaIdentities: handoffMedia.map((media) => media.identity),
+      },
+      attempt: {
+        identity: handoffAttempt.durableAttempt.id,
+        sourceLocalPublishJobId:
+          handoffAttempt.durableAttempt.sourceLocalPublishJobId ?? '',
+        payloadDigest: handoffAttempt.durableAttempt.payloadDigest ?? '',
+        payloadRevision: handoffAttempt.durableAttempt.payloadRevision ?? '',
+        eligible: isEligibleAdminRednoteAttempt(
+          handoffAttempt.durableAttempt,
+          currentJob.id,
+        ),
+      },
+      localPublishJobId: currentJob.id,
+    }),
+  );
   const currentJobStatus = jobStatusCopy(currentJob, selected);
   const manualSchedulingCandidate = useMemo<ManualSchedulingAttestationEvidence | undefined>(
     () => directManualSchedulingCandidate(selected, batches, jobs),
@@ -739,7 +778,12 @@ export default function ReadyPostsPanel({
   }, [selected]);
 
   async function markSelectedHandledManually() {
-    if (!selected || currentManualHandling || selectedIsPublished) return;
+    if (
+      !selected
+      || !manualHandoffEligible
+      || currentManualHandling
+      || selectedIsPublished
+    ) return;
     const idempotencyKey =
       manualHandlingKeysRef.current[selected.id] ?? crypto.randomUUID();
     manualHandlingKeysRef.current[selected.id] = idempotencyKey;
@@ -793,6 +837,7 @@ export default function ReadyPostsPanel({
       || mobileHandoffBusy
       || selectedIsPublished
       || hasLiveManualOwnership
+      || !manualHandoffEligible
     ) return;
 
     const selectedPostId = selected.id;
@@ -865,10 +910,49 @@ export default function ReadyPostsPanel({
         && item.localPublishJobId === attemptId
         && item.notionPageId === selectedPostId
         && !['failed', 'invalidated', 'reconciled'].includes(item.state));
+      const currentHandoffEligible = Boolean(
+        currentDurableAttempt
+        && currentItem
+        && isManualHandoffEligible({
+          destination: currentItem.snapshot.platform,
+          studioStatus: current.status,
+          publishPacketReady: current.publishPacketReady,
+          readinessBlockers: current.automationBlockers,
+          workspace: {
+            requestedId: workspaceId,
+            packetId: currentBatch?.workspaceId ?? '',
+          },
+          postId: current.id,
+          sourceRevision: current.lastEditedTime,
+          packet: {
+            identity: currentItem.itemHash,
+            postId: currentItem.snapshot.notionPageId,
+            sourceRevision: currentItem.snapshot.notionLastEditedTime,
+            mediaIdentities: (
+              currentItem.snapshot.media?.map((media) => media.identity)
+              ?? [`${currentItem.snapshot.mediaType}:${currentItem.snapshot.mediaIndex}`]
+            ),
+            expectedMediaIdentities: orderedMedia.map((media) => media.identity),
+          },
+          attempt: {
+            identity: currentDurableAttempt.id,
+            sourceLocalPublishJobId:
+              currentDurableAttempt.sourceLocalPublishJobId ?? '',
+            payloadDigest: currentDurableAttempt.payloadDigest ?? '',
+            payloadRevision: currentDurableAttempt.payloadRevision ?? '',
+            eligible: isEligibleAdminRednoteAttempt(
+              currentDurableAttempt,
+              attemptId,
+            ),
+          },
+          localPublishJobId: attemptId,
+        }),
+      );
       if (
         !currentAttempt
         || !currentDurableAttempt
         || !currentItem
+        || !currentHandoffEligible
         || hasLiveUnsafeAutomationOwnership(currentAttempt)
         || current.status.trim().toLowerCase() === 'published'
         || current.candidateKind !== 'packet_ready'
@@ -2204,6 +2288,7 @@ export default function ReadyPostsPanel({
                       || !handoffAttempt
                       || !handoffSnapshot
                       || handoffMedia.length === 0
+                      || !manualHandoffEligible
                       || selectedIsPublished
                       || hasLiveManualOwnership
                     }
@@ -2281,9 +2366,7 @@ export default function ReadyPostsPanel({
                       disabled={
                         manualHandlingSubmitting
                         || hasLiveManualOwnership
-                        || !['approved', 'ready'].includes(
-                          selected.status.trim().toLowerCase(),
-                        )
+                        || !manualHandoffEligible
                       }
                     >
                       {manualHandlingSubmitting ? 'Recording…' : 'Mark handled manually'}

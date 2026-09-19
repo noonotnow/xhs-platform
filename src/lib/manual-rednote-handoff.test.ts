@@ -7,12 +7,105 @@ import {
   getMediaDownloadName,
   getMissingTags,
   getVideoDownloadName,
+  isManualHandoffEligible,
   REDNOTE_CREATOR_PUBLISH_URL,
   SAFE_EXTERNAL_LINK_PROPS,
   shouldOfferTitleCopy,
 } from '@/lib/manual-rednote-handoff';
 
 describe('manual Rednote handoff', () => {
+  const eligibility = {
+    destination: 'RedNote',
+    studioStatus: 'Ready',
+    publishPacketReady: true,
+    readinessBlockers: [],
+    workspace: {
+      requestedId: 'workspace-one',
+      packetId: 'workspace-one',
+    },
+    postId: 'post-one',
+    sourceRevision: '2026-09-19T12:00:00.000Z',
+    packet: {
+      identity: 'packet-five',
+      postId: 'post-one',
+      sourceRevision: '2026-09-19T12:00:00.000Z',
+      mediaIdentities: ['rendition-11:1', 'rendition-11:2'],
+      expectedMediaIdentities: ['rendition-11:1', 'rendition-11:2'],
+    },
+    attempt: {
+      identity: 'attempt-one',
+      sourceLocalPublishJobId: 'job-one',
+      payloadDigest: 'digest-one',
+      payloadRevision: 'packet-v5',
+      eligible: true,
+    },
+    localPublishJobId: 'job-one',
+  };
+
+  it('accepts only exact packet-ready Ready or compatible Approved handoffs', () => {
+    expect(isManualHandoffEligible(eligibility)).toBe(true);
+    expect(isManualHandoffEligible({
+      ...eligibility,
+      studioStatus: 'Approved',
+    })).toBe(true);
+    expect(isManualHandoffEligible({
+      ...eligibility,
+      publishPacketReady: false,
+    })).toBe(false);
+    expect(isManualHandoffEligible({
+      ...eligibility,
+      readinessBlockers: ['Caption is empty'],
+    })).toBe(false);
+  });
+
+  it('fails closed when Post, packet, revision, attempt, workspace, or media identity drifts', () => {
+    expect(isManualHandoffEligible({
+      ...eligibility,
+      destination: 'Weibo',
+    })).toBe(false);
+    expect(isManualHandoffEligible({
+      ...eligibility,
+      workspace: {
+        requestedId: 'workspace-one',
+        packetId: 'workspace-two',
+      },
+    })).toBe(false);
+    expect(isManualHandoffEligible({
+      ...eligibility,
+      packet: { ...eligibility.packet, postId: 'other-post' },
+    })).toBe(false);
+    expect(isManualHandoffEligible({
+      ...eligibility,
+      packet: { ...eligibility.packet, sourceRevision: 'stale-revision' },
+    })).toBe(false);
+    expect(isManualHandoffEligible({
+      ...eligibility,
+      packet: { ...eligibility.packet, mediaIdentities: [] },
+    })).toBe(false);
+    expect(isManualHandoffEligible({
+      ...eligibility,
+      packet: {
+        ...eligibility.packet,
+        mediaIdentities: ['rendition-11:2', 'rendition-11:1'],
+      },
+    })).toBe(false);
+    expect(isManualHandoffEligible({
+      ...eligibility,
+      packet: {
+        ...eligibility.packet,
+        mediaIdentities: ['rendition-11:1', 'different-rendition'],
+      },
+    })).toBe(false);
+    expect(isManualHandoffEligible({
+      ...eligibility,
+      attempt: { ...eligibility.attempt, sourceLocalPublishJobId: 'other-job' },
+    })).toBe(false);
+    expect(isManualHandoffEligible({
+      ...eligibility,
+      attempt: { ...eligibility.attempt, eligible: false },
+    })).toBe(false);
+  });
+
   it('uses the official Creator publish URL with safe external-link attributes', () => {
     expect(REDNOTE_CREATOR_PUBLISH_URL).toBe(
       'https://creator.rednote.com/publish/publish',
