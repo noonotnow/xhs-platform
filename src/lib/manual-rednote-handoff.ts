@@ -15,6 +15,20 @@ export interface CopyHandoffResult {
   message: string;
 }
 
+export interface FileShareCapability {
+  canShare?: (data: { files: File[] }) => boolean;
+}
+
+export function canSharePreparedFiles(
+  navigatorLike: FileShareCapability,
+  files: File[],
+) {
+  return Boolean(
+    navigatorLike.canShare
+    && navigatorLike.canShare({ files }),
+  );
+}
+
 export interface ManualHandoffEligibility {
   destination: string;
   studioStatus: string;
@@ -185,4 +199,26 @@ export function getMediaDownloadName(
     : 'jpg';
   const prefix = filenamePart(headline) || 'rednote-media';
   return `${prefix}-${String(order).padStart(2, '0')}.${safeExtension}`;
+}
+
+export async function prepareOrderedMediaFiles(
+  headline: string,
+  media: readonly { url: string }[],
+) {
+  return Promise.all(
+    media.map(async (asset, index) => {
+      const response = await fetch(asset.url, { cache: 'no-store' });
+      if (!response.ok) {
+        throw new Error(
+          `Asset ${index + 1} could not be prepared; no assets were prepared.`,
+        );
+      }
+      const blob = await response.blob();
+      return new File(
+        [blob],
+        getMediaDownloadName(headline, asset.url, index + 1),
+        { type: blob.type || 'application/octet-stream' },
+      );
+    }),
+  );
 }

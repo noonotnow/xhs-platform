@@ -47,6 +47,7 @@ afterEach(async () => {
   container?.remove();
   root = undefined;
   container = undefined;
+  window.sessionStorage.clear();
   vi.restoreAllMocks();
 });
 
@@ -127,6 +128,12 @@ describe('ReadyPostsPanel handoff notice', () => {
       async (input, init) => {
         const path = String(input);
         if (!(path in responses)) {
+          if (path.startsWith('https://images.xhs.justlikekatie.com/')) {
+            return new Response(new Blob(['asset']), {
+              status: 200,
+              headers: { 'Content-Type': 'image/jpeg' },
+            });
+          }
           throw new Error(`Unexpected request: ${init?.method ?? 'GET'} ${path}`);
         }
         return new Response(JSON.stringify(responses[path]), {
@@ -154,7 +161,7 @@ describe('ReadyPostsPanel handoff notice', () => {
     });
 
     const sendButton = Array.from(container.querySelectorAll('button'))
-      .find((button) => button.textContent === 'Send to Rednote');
+      .find((button) => button.textContent === 'Prepare exact packet');
     const handledButton = Array.from(container.querySelectorAll('button'))
       .find((button) => button.textContent === 'Mark handled manually');
     expect(sendButton).toBeDefined();
@@ -173,10 +180,13 @@ describe('ReadyPostsPanel handoff notice', () => {
       await Promise.resolve();
     });
 
-    expect(writeText).toHaveBeenCalledWith('Caption\n\n#ready');
+    expect(writeText).not.toHaveBeenCalled();
     expect(container.textContent).toContain(
-      'This browser could not share every media file together',
+      'ordered assets prepared',
     );
+    expect(window.sessionStorage.getItem(
+      'xhs-mobile-handoff:workspace-test:available-notion-page',
+    )).toContain('durable-attempt');
     expect(requestSpy.mock.calls.filter(([, init]) =>
       (init?.method ?? 'GET') !== 'GET')).toEqual([]);
   });

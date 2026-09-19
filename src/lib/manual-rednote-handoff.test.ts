@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   copyHandoffText,
+  canSharePreparedFiles,
   formatRednoteHandoffText,
   formatTags,
   getCanonicalVideoUrl,
@@ -8,12 +9,24 @@ import {
   getMissingTags,
   getVideoDownloadName,
   isManualHandoffEligible,
+  prepareOrderedMediaFiles,
   REDNOTE_CREATOR_PUBLISH_URL,
   SAFE_EXTERNAL_LINK_PROPS,
   shouldOfferTitleCopy,
 } from '@/lib/manual-rednote-handoff';
 
 describe('manual Rednote handoff', () => {
+  it('checks canShare with the complete ordered file set before offering file sharing', () => {
+    const files = [
+      new File(['one'], 'packet-01.jpg', { type: 'image/jpeg' }),
+      new File(['two'], 'packet-02.jpg', { type: 'image/jpeg' }),
+    ];
+    const canShare = vi.fn().mockReturnValue(true);
+    expect(canSharePreparedFiles({ canShare }, files)).toBe(true);
+    expect(canShare).toHaveBeenCalledWith({ files });
+    expect(canSharePreparedFiles({}, files)).toBe(false);
+  });
+
   const eligibility = {
     destination: 'RedNote',
     studioStatus: 'Ready',
@@ -183,5 +196,19 @@ describe('manual Rednote handoff', () => {
       'https://images.xhs.justlikekatie.com/uploads/second.webp?version=11',
       2,
     )).toBe('exact-packet-02.webp');
+  });
+
+  it('prepares every ordered asset and fails the whole preparation on one asset error', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(new Response(new Blob(['one']), {
+        status: 200,
+        headers: { 'Content-Type': 'image/jpeg' },
+      }))
+      .mockResolvedValueOnce(new Response(new Blob(['no']), { status: 503 })));
+    await expect(prepareOrderedMediaFiles('Exact packet', [
+      { url: 'https://example.com/first.jpg' },
+      { url: 'https://example.com/second.jpg' },
+    ])).rejects.toThrow('Asset 2 could not be prepared');
+    vi.unstubAllGlobals();
   });
 });
