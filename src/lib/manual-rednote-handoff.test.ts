@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   copyHandoffText,
+  formatRednoteHandoffText,
   formatTags,
   getCanonicalVideoUrl,
+  getMediaDownloadName,
   getMissingTags,
   getVideoDownloadName,
   REDNOTE_CREATOR_PUBLISH_URL,
@@ -68,5 +70,25 @@ describe('manual Rednote handoff', () => {
     expect(getMissingTags(['BTS', '#Studio'], 'Behind the scenes #BTS')).toEqual(['Studio']);
     expect(getMissingTags(['art'], 'A launch party')).toEqual(['art']);
     expect(formatTags(['Studio', 'DayOne'])).toBe('#Studio #DayOne');
+  });
+
+  it('formats approved copy without duplicating tags already in the caption', () => {
+    expect(formatRednoteHandoffText(
+      'Approved caption #existing',
+      ['existing', 'FinalTag'],
+    )).toBe('Approved caption #existing\n\n#FinalTag');
+  });
+
+  it('numbers media download names in canonical order', () => {
+    expect(getMediaDownloadName(
+      'Exact packet',
+      'https://images.xhs.justlikekatie.com/uploads/first.jpeg',
+      1,
+    )).toBe('exact-packet-01.jpeg');
+    expect(getMediaDownloadName(
+      'Exact packet',
+      'https://images.xhs.justlikekatie.com/uploads/second.webp?version=11',
+      2,
+    )).toBe('exact-packet-02.webp');
   });
 });

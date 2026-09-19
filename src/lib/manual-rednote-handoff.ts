@@ -105,3 +105,28 @@ export function getMissingTags(tags: string[], caption: string) {
 export function formatTags(tags: string[]) {
   return tags.map((tag) => `#${tag}`).join(' ');
 }
+
+export function formatRednoteHandoffText(caption: string, tags: string[]) {
+  const body = caption.trim();
+  const missingTags = getMissingTags(tags, body);
+  const tagLine = formatTags(missingTags);
+  return [body, tagLine].filter(Boolean).join('\n\n');
+}
+
+export function getMediaDownloadName(
+  headline: string,
+  mediaUrl: string,
+  order: number,
+) {
+  let extension = '';
+  try {
+    extension = new URL(mediaUrl).pathname.match(/\.([A-Za-z0-9]{2,5})$/)?.[1] ?? '';
+  } catch {
+    extension = '';
+  }
+  const safeExtension = /^(?:avif|heic|jpeg|jpg|mov|mp4|png|webp)$/i.test(extension)
+    ? extension.toLowerCase()
+    : 'jpg';
+  const prefix = filenamePart(headline) || 'rednote-media';
+  return `${prefix}-${String(order).padStart(2, '0')}.${safeExtension}`;
+}
