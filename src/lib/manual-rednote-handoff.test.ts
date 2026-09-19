@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   copyHandoffText,
-  canSharePreparedFiles,
+  canSharePreparedPacket,
   formatRednoteHandoffText,
   formatTags,
   getCanonicalVideoUrl,
@@ -9,6 +9,8 @@ import {
   getMissingTags,
   getVideoDownloadName,
   isManualHandoffEligible,
+  isPreparedHandoffFresh,
+  PREPARED_HANDOFF_FRESHNESS_MS,
   prepareOrderedMediaFiles,
   REDNOTE_CREATOR_PUBLISH_URL,
   SAFE_EXTERNAL_LINK_PROPS,
@@ -22,9 +24,28 @@ describe('manual Rednote handoff', () => {
       new File(['two'], 'packet-02.jpg', { type: 'image/jpeg' }),
     ];
     const canShare = vi.fn().mockReturnValue(true);
-    expect(canSharePreparedFiles({ canShare }, files)).toBe(true);
-    expect(canShare).toHaveBeenCalledWith({ files });
-    expect(canSharePreparedFiles({}, files)).toBe(false);
+    const shareData = {
+      title: 'Exact packet',
+      text: 'Approved text',
+      files,
+    };
+    expect(canSharePreparedPacket({ canShare }, shareData)).toBe(true);
+    expect(canShare).toHaveBeenCalledWith(shareData);
+    expect(canSharePreparedPacket({}, shareData)).toBe(false);
+  });
+
+  it('expires prepared authority after the documented short window', () => {
+    const validatedAt = Date.UTC(2026, 8, 19, 12);
+    expect(isPreparedHandoffFresh(validatedAt, validatedAt)).toBe(true);
+    expect(isPreparedHandoffFresh(
+      validatedAt,
+      validatedAt + PREPARED_HANDOFF_FRESHNESS_MS - 1,
+    )).toBe(true);
+    expect(isPreparedHandoffFresh(
+      validatedAt,
+      validatedAt + PREPARED_HANDOFF_FRESHNESS_MS,
+    )).toBe(false);
+    expect(isPreparedHandoffFresh(validatedAt, validatedAt - 1)).toBe(false);
   });
 
   const eligibility = {
@@ -190,12 +211,35 @@ describe('manual Rednote handoff', () => {
       'Exact packet',
       'https://images.xhs.justlikekatie.com/uploads/first.jpeg',
       1,
+      'image/jpeg',
     )).toBe('exact-packet-01.jpeg');
     expect(getMediaDownloadName(
       'Exact packet',
       'https://images.xhs.justlikekatie.com/uploads/second.webp?version=11',
       2,
+      'image/webp',
     )).toBe('exact-packet-02.webp');
+  });
+
+  it('uses validated MIME types when URL extensions are missing or disagree', () => {
+    expect(getMediaDownloadName(
+      'Exact packet',
+      'https://images.xhs.justlikekatie.com/uploads/no-extension',
+      1,
+      'image/png',
+    )).toBe('exact-packet-01.png');
+    expect(getMediaDownloadName(
+      'Exact packet',
+      'https://images.xhs.justlikekatie.com/uploads/wrong.jpg',
+      2,
+      'video/quicktime',
+    )).toBe('exact-packet-02.mov');
+    expect(() => getMediaDownloadName(
+      'Exact packet',
+      'https://images.xhs.justlikekatie.com/uploads/file.jpg',
+      3,
+      'application/octet-stream',
+    )).toThrow('Unsupported prepared asset type');
   });
 
   it('prepares every ordered asset and fails the whole preparation on one asset error', async () => {
@@ -209,6 +253,31 @@ describe('manual Rednote handoff', () => {
       { url: 'https://example.com/first.jpg' },
       { url: 'https://example.com/second.jpg' },
     ])).rejects.toThrow('Asset 2 could not be prepared');
+    vi.unstubAllGlobals();
+  });
+
+  it('prepares every asset in order with MIME-authoritative filenames', async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(new Blob(['one'], { type: 'image/png' }), {
+        status: 200,
+        headers: { 'Content-Type': 'image/png' },
+      }))
+      .mockResolvedValueOnce(new Response(new Blob(['two'], { type: 'video/quicktime' }), {
+        status: 200,
+        headers: { 'Content-Type': 'video/quicktime' },
+      }));
+    vi.stubGlobal('fetch', fetch);
+
+    const files = await prepareOrderedMediaFiles('Exact packet', [
+      { url: 'https://example.com/no-extension' },
+      { url: 'https://example.com/wrong.jpg' },
+    ]);
+
+    expect(files.map((file) => ({ name: file.name, type: file.type }))).toEqual([
+      { name: 'exact-packet-01.png', type: 'image/png' },
+      { name: 'exact-packet-02.mov', type: 'video/quicktime' },
+    ]);
+    expect(fetch.mock.calls.every(([, init]) => init?.cache === 'no-store')).toBe(true);
     vi.unstubAllGlobals();
   });
 });

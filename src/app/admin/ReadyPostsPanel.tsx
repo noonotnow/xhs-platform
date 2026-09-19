@@ -1,7 +1,14 @@
 'use client';
 
 import Image from 'next/image';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from 'react';
 import type {
   ExternalReconciliationSummary,
   LocalPublishJobSummary,
@@ -26,13 +33,14 @@ import {
 } from '@/lib/editorial-schedule';
 import { normalizeRednotePublicIdentity } from '@/lib/rednote-publication';
 import {
+  canSharePreparedPacket,
   copyHandoffText,
   formatTags,
   formatRednoteHandoffText,
-  getMediaDownloadName,
   getMissingTags,
-  getVideoDownloadName,
   isManualHandoffEligible,
+  isPreparedHandoffFresh,
+  PREPARED_HANDOFF_FRESHNESS_MS,
   prepareOrderedMediaFiles,
   REDNOTE_CREATOR_PUBLISH_URL,
   SAFE_EXTERNAL_LINK_PROPS,
@@ -134,16 +142,18 @@ type MobileHandoffIdentity = {
   caption: string;
   tags: string[];
   text: string;
+  validatedAt: number;
   preparation: 'prepared';
   shareable: boolean;
   clipboard: 'not_attempted' | 'succeeded' | 'failed';
-  share: 'not_attempted' | 'opened' | 'unsupported' | 'failed';
+  share: 'not_attempted' | 'completed' | 'unsupported' | 'failed';
   creator: 'not_attempted' | 'opening_attempted';
 };
 
 type PreparedMobileHandoff = {
   identity: MobileHandoffIdentity;
   files: File[];
+  downloadUrls: string[];
 };
 
 function mobileHandoffStorageKey(workspaceId: string, postId: string) {
@@ -459,6 +469,7 @@ export default function ReadyPostsPanel({
   const [mobileHandoffBusy, setMobileHandoffBusy] = useState(false);
   const [preparedMobileHandoff, setPreparedMobileHandoff] =
     useState<PreparedMobileHandoff | null>(null);
+  const [mobileHandoffClock, setMobileHandoffClock] = useState(() => Date.now());
   const [creatorOpenStatus, setCreatorOpenStatus] = useState<MobileHandoffStatus | null>(null);
   const [finalTitle, setFinalTitle] = useState('');
   const [finalCaption, setFinalCaption] = useState('');
@@ -472,6 +483,14 @@ export default function ReadyPostsPanel({
   const manualSchedulingKeysRef = useRef<Record<string, string>>({});
   const receiptKeysRef = useRef<Record<string, string>>({});
   const manualHandlingKeysRef = useRef<Record<string, string>>({});
+  const preparedDownloadUrlsRef = useRef<string[]>([]);
+  const releasePreparedDownloadUrls = useCallback(() => {
+    for (const url of preparedDownloadUrlsRef.current) {
+      URL.revokeObjectURL(url);
+    }
+    preparedDownloadUrlsRef.current = [];
+  }, []);
+  useEffect(() => releasePreparedDownloadUrls, [releasePreparedDownloadUrls]);
 
   const selected = useMemo(
     () => posts.find((post) => post.id === selectedId) ?? posts[0],
@@ -602,7 +621,7 @@ export default function ReadyPostsPanel({
     )
     : handoffMissingTags;
   const showHandoffTitleCopy = shouldOfferTitleCopy(handoffTitle, handoffCaption);
-  const handoffVideoUrl = handoffMedia.find((media) => media.type === 'video')?.url;
+  const handoffVideoIndex = handoffMedia.findIndex((media) => media.type === 'video');
   useEffect(() => {
     if (!selected) return;
     const key = mobileHandoffStorageKey(workspaceId, selected.id);
@@ -629,7 +648,7 @@ export default function ReadyPostsPanel({
         setCopyStatus(null);
         return;
       }
-      setPreparedMobileHandoff({ identity, files: [] });
+      setPreparedMobileHandoff({ identity, files: [], downloadUrls: [] });
       setMobileHandoffStatus({
         tone: 'warning',
         message:
@@ -638,9 +657,9 @@ export default function ReadyPostsPanel({
       });
       if (identity.share !== 'not_attempted') {
         setMobileShareStatus({
-          tone: identity.share === 'opened' ? 'success' : 'warning',
-          message: identity.share === 'opened'
-            ? 'The share sheet was previously opened for this exact attempt; publication still requires manual Creator action and receipt reconciliation.'
+          tone: identity.share === 'completed' ? 'success' : 'warning',
+          message: identity.share === 'completed'
+            ? 'The browser share request previously completed for this exact attempt. Verify every numbered asset and the text in Rednote; publication still requires manual Creator action and receipt reconciliation.'
             : 'File sharing was previously unavailable or failed for this exact attempt. Re-prepare files before trying again.',
         });
       } else {
@@ -743,10 +762,39 @@ export default function ReadyPostsPanel({
     && preparedMobileHandoff.files.length === handoffMedia.length
     && manualHandoffEligible,
   );
-  const preparedActionsAvailable = Boolean(preparedIdentityCurrent);
+  const preparedAuthorityFresh = Boolean(
+    preparedMobileHandoff
+    && isPreparedHandoffFresh(
+      preparedMobileHandoff.identity.validatedAt,
+      mobileHandoffClock,
+    ),
+  );
+  const preparedActionsAvailable = Boolean(
+    preparedIdentityCurrent
+    && preparedAuthorityFresh,
+  );
+  const preparedValidatedAt = preparedMobileHandoff?.identity.validatedAt;
+  const preparedFileCount = preparedMobileHandoff?.files.length ?? 0;
   useEffect(() => {
     if (!preparedMobileHandoff || preparedMobileHandoff.files.length === 0) return;
-    if (preparedIdentityCurrent) return;
+    const expiresAt =
+      preparedMobileHandoff.identity.validatedAt + PREPARED_HANDOFF_FRESHNESS_MS;
+    const remaining = expiresAt - Date.now();
+    if (remaining <= 0) {
+      setMobileHandoffClock(Date.now());
+      return;
+    }
+    const timer = window.setTimeout(
+      () => setMobileHandoffClock(Date.now()),
+      remaining,
+    );
+    return () => window.clearTimeout(timer);
+  }, [preparedFileCount, preparedMobileHandoff, preparedValidatedAt]);
+  useEffect(() => {
+    if (!preparedMobileHandoff || preparedMobileHandoff.files.length === 0) return;
+    if (preparedIdentityCurrent && preparedAuthorityFresh) return;
+    const expired = !preparedAuthorityFresh;
+    releasePreparedDownloadUrls();
     setPreparedMobileHandoff(null);
     try {
       window.sessionStorage.removeItem(
@@ -757,12 +805,20 @@ export default function ReadyPostsPanel({
     }
     setMobileHandoffStatus({
       tone: 'error',
-      message: 'The prepared packet changed while this page was open. Prepare the exact current attempt again.',
+      message: expired
+        ? 'The two-minute preparation window expired. Prepare and revalidate the exact current attempt again.'
+        : 'The prepared packet changed while this page was open. Prepare the exact current attempt again.',
     });
     setMobileShareStatus(null);
     setCreatorOpenStatus(null);
     setCopyStatus(null);
-  }, [preparedIdentityCurrent, preparedMobileHandoff, workspaceId]);
+  }, [
+    preparedAuthorityFresh,
+    preparedIdentityCurrent,
+    preparedMobileHandoff,
+    releasePreparedDownloadUrls,
+    workspaceId,
+  ]);
   const currentJobStatus = jobStatusCopy(currentJob, selected);
   const manualSchedulingCandidate = useMemo<ManualSchedulingAttestationEvidence | undefined>(
     () => directManualSchedulingCandidate(selected, batches, jobs),
@@ -1135,14 +1191,26 @@ export default function ReadyPostsPanel({
       }
 
       const files = await prepareOrderedMediaFiles(frozenSnapshot.title, orderedMedia);
+      const shareData: ShareData = {
+        title: frozenSnapshot.title,
+        text,
+        files,
+      };
       let shareable = false;
       try {
-        shareable = Boolean(
-          navigator.canShare
-          && navigator.canShare({ files }),
-        );
+        shareable = canSharePreparedPacket(navigator, shareData);
       } catch {
         shareable = false;
+      }
+      const validatedAt = Date.now();
+      const downloadUrls: string[] = [];
+      try {
+        for (const file of files) {
+          downloadUrls.push(URL.createObjectURL(file));
+        }
+      } catch (error) {
+        for (const url of downloadUrls) URL.revokeObjectURL(url);
+        throw error;
       }
       const identity: MobileHandoffIdentity = {
         workspaceId,
@@ -1160,13 +1228,17 @@ export default function ReadyPostsPanel({
         caption: frozenSnapshot.caption,
         tags: [...frozenSnapshot.tags],
         text,
+        validatedAt,
         preparation: 'prepared',
         shareable,
         clipboard: 'not_attempted',
         share: shareable ? 'not_attempted' : 'unsupported',
         creator: 'not_attempted',
       };
-      setPreparedMobileHandoff({ identity, files });
+      releasePreparedDownloadUrls();
+      preparedDownloadUrlsRef.current = downloadUrls;
+      setMobileHandoffClock(validatedAt);
+      setPreparedMobileHandoff({ identity, files, downloadUrls });
       try {
         window.sessionStorage.setItem(
           mobileHandoffStorageKey(workspaceId, selectedPostId),
@@ -1178,8 +1250,8 @@ export default function ReadyPostsPanel({
       setMobileHandoffStatus({
         tone: shareable ? 'success' : 'warning',
         message: shareable
-          ? `${files.length} ordered assets prepared. Tap “Share prepared packet” as a separate gesture to open the share sheet. Nothing was copied or published.`
-          : `${files.length} ordered assets prepared. This browser cannot share files through its share sheet; use the numbered downloads, separate copy controls, and then open Creator.`,
+          ? `${files.length} ordered assets prepared and revalidated for two minutes. Tap “Share prepared packet” as a separate gesture. Nothing was copied or published.`
+          : `${files.length} ordered assets prepared and revalidated for two minutes. This browser cannot share the complete packet through its share sheet; use the prepared numbered downloads, separate copy controls, and then open Creator.`,
       });
     } catch (handoffError) {
       setMobileHandoffStatus({
@@ -1216,11 +1288,17 @@ export default function ReadyPostsPanel({
 
   function sharePreparedMobileHandoff() {
     const prepared = preparedMobileHandoff;
-    if (!prepared || prepared.files.length === 0) {
+    if (
+      !prepared
+      || prepared.files.length === 0
+      || !preparedIdentityCurrent
+      || !isPreparedHandoffFresh(prepared.identity.validatedAt)
+    ) {
+      setMobileHandoffClock(Date.now());
       persistMobileHandoffIdentity({ share: 'failed' });
       setMobileShareStatus({
         tone: 'error',
-        message: 'Prepare the complete packet again before sharing; no files are available on this page.',
+        message: 'The prepared authority is unavailable or expired. Prepare and revalidate the complete packet again before sharing.',
       });
       return;
     }
@@ -1239,7 +1317,7 @@ export default function ReadyPostsPanel({
     };
     let shareable = false;
     try {
-      shareable = navigator.canShare({ files: prepared.files });
+      shareable = canSharePreparedPacket(navigator, shareData);
     } catch {
       shareable = false;
     }
@@ -1256,10 +1334,10 @@ export default function ReadyPostsPanel({
       message: 'Opening the share sheet for the complete ordered packet. Opening it does not publish.',
     });
     void navigator.share(shareData).then(() => {
-      persistMobileHandoffIdentity({ share: 'opened' });
+      persistMobileHandoffIdentity({ share: 'completed' });
       setMobileShareStatus({
         tone: 'success',
-        message: `The share sheet opened with all ${prepared.files.length} ordered assets and the approved text. Sharing did not publish this Post.`,
+        message: `The browser share request completed with the prepared packet of ${prepared.files.length} numbered assets. Verify the text and every numbered asset in Rednote before publishing.`,
       });
     }).catch((error: unknown) => {
       const aborted = error instanceof DOMException && error.name === 'AbortError';
@@ -1273,8 +1351,14 @@ export default function ReadyPostsPanel({
     });
   }
 
-  function recordCreatorOpening() {
-    if (!preparedActionsAvailable) {
+  function recordCreatorOpening(event: ReactMouseEvent<HTMLAnchorElement>) {
+    if (
+      !preparedActionsAvailable
+      || !preparedMobileHandoff
+      || !isPreparedHandoffFresh(preparedMobileHandoff.identity.validatedAt)
+    ) {
+      event.preventDefault();
+      setMobileHandoffClock(Date.now());
       setCreatorOpenStatus({
         tone: 'error',
         message: 'Prepare and revalidate the exact current packet before opening Creator.',
@@ -1860,7 +1944,12 @@ export default function ReadyPostsPanel({
     field: 'title' | 'caption' | 'tags' | 'text',
     label: string,
   ) {
-    if (!preparedActionsAvailable || !preparedMobileHandoff) {
+    if (
+      !preparedActionsAvailable
+      || !preparedMobileHandoff
+      || !isPreparedHandoffFresh(preparedMobileHandoff.identity.validatedAt)
+    ) {
+      setMobileHandoffClock(Date.now());
       setCopyStatus({
         ok: false,
         message: 'Prepare and revalidate the exact current packet before copying.',
@@ -1871,6 +1960,22 @@ export default function ReadyPostsPanel({
       ? formatTags(preparedMobileHandoff.identity.tags)
       : preparedMobileHandoff.identity[field];
     void copyField(value, label);
+  }
+
+  function guardPreparedDownload(event: ReactMouseEvent<HTMLAnchorElement>) {
+    if (
+      preparedActionsAvailable
+      && preparedMobileHandoff
+      && isPreparedHandoffFresh(preparedMobileHandoff.identity.validatedAt)
+    ) {
+      return;
+    }
+    event.preventDefault();
+    setMobileHandoffClock(Date.now());
+    setMobileHandoffStatus({
+      tone: 'error',
+      message: 'Prepare and revalidate the exact current packet before downloading assets.',
+    });
   }
 
   function postButton(post: ReadyXhsPost) {
@@ -2743,7 +2848,8 @@ export default function ReadyPostsPanel({
                   <p>
                     Preparation revalidates and fetches every numbered asset but does not copy,
                     share, or open Creator. Clipboard, share-sheet, and Creator actions are
-                    separate explicit gestures. None marks the Post Published.
+                    separate explicit gestures available for two minutes. None marks the Post
+                    Published.
                   </p>
                   {mobileHandoffStatus && (
                     <p
@@ -2956,25 +3062,31 @@ export default function ReadyPostsPanel({
                     <span>{handoffMedia.length} asset{handoffMedia.length === 1 ? '' : 's'}</span>
                   </div>
                   <ol>
-                    {handoffMedia.map((media, index) => (
-                      <li key={media.identity}>
-                        <span>
-                          {String(index + 1).padStart(2, '0')} · {media.type}
-                        </span>
-                        <a
-                          className={styles.secondaryButton}
-                          href={media.url}
-                          download={getMediaDownloadName(
-                            handoffSnapshot?.title ?? finalTitle,
-                            media.url,
-                            index + 1,
+                    {handoffMedia.map((media, index) => {
+                      const preparedUrl = preparedMobileHandoff?.downloadUrls[index];
+                      const preparedFile = preparedMobileHandoff?.files[index];
+                      return (
+                        <li key={media.identity}>
+                          <span>
+                            {String(index + 1).padStart(2, '0')} · {media.type}
+                          </span>
+                          {preparedActionsAvailable && preparedUrl && preparedFile ? (
+                            <a
+                              className={styles.secondaryButton}
+                              href={preparedUrl}
+                              download={preparedFile.name}
+                              onClick={guardPreparedDownload}
+                            >
+                              Save asset {index + 1}
+                            </a>
+                          ) : (
+                            <span className={styles.missingAsset}>
+                              Prepare exact packet to save
+                            </span>
                           )}
-                          {...SAFE_EXTERNAL_LINK_PROPS}
-                        >
-                          Save asset {index + 1}
-                        </a>
-                      </li>
-                    ))}
+                        </li>
+                      );
+                    })}
                   </ol>
                 </div>
 
@@ -2983,17 +3095,24 @@ export default function ReadyPostsPanel({
                     <strong>Prepare the canonical video</strong>
                     <p>Download the MP4, then select that file in Creator.</p>
                   </div>
-                  {handoffVideoUrl ? (
+                  {preparedActionsAvailable
+                    && handoffVideoIndex >= 0
+                    && preparedMobileHandoff?.downloadUrls[handoffVideoIndex]
+                    && preparedMobileHandoff.files[handoffVideoIndex] ? (
                     <a
                       className={styles.secondaryButton}
-                      href={handoffVideoUrl}
-                      download={getVideoDownloadName(handoffTitle, handoffVideoUrl)}
-                      {...SAFE_EXTERNAL_LINK_PROPS}
+                      href={preparedMobileHandoff.downloadUrls[handoffVideoIndex]}
+                      download={preparedMobileHandoff.files[handoffVideoIndex].name}
+                      onClick={guardPreparedDownload}
                     >
                       Download video
                     </a>
                   ) : (
-                    <span className={styles.missingAsset}>Canonical MEDIA video unavailable</span>
+                    <span className={styles.missingAsset}>
+                      {handoffVideoIndex >= 0
+                        ? 'Prepare exact packet to download the canonical video'
+                        : 'Canonical MEDIA video unavailable'}
+                    </span>
                   )}
                 </div>
 

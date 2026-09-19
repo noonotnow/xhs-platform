@@ -147,6 +147,19 @@ describe('ReadyPostsPanel handoff notice', () => {
       configurable: true,
       value: { writeText },
     });
+    let objectUrlSequence = 0;
+    const createObjectURL = vi.fn(
+      () => `blob:prepared-${++objectUrlSequence}`,
+    );
+    const revokeObjectURL = vi.fn();
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: createObjectURL,
+    });
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: revokeObjectURL,
+    });
 
     container = document.createElement('div');
     document.body.append(container);
@@ -167,11 +180,8 @@ describe('ReadyPostsPanel handoff notice', () => {
     expect(sendButton).toBeDefined();
     expect(handledButton).toBeDefined();
     expect(handledButton?.disabled).toBe(false);
-    expect(Array.from(container.querySelectorAll('a[download]')).map((link) =>
-      link.getAttribute('download'))).toEqual([
-      'available-post-01.jpg',
-      'available-post-02.jpg',
-    ]);
+    expect(container.querySelectorAll('a[download]')).toHaveLength(0);
+    expect(container.textContent).toContain('Prepare exact packet to save');
 
     await act(async () => {
       sendButton?.click();
@@ -184,11 +194,26 @@ describe('ReadyPostsPanel handoff notice', () => {
     expect(container.textContent).toContain(
       'ordered assets prepared',
     );
+    expect(Array.from(container.querySelectorAll('a[download]')).map((link) =>
+      link.getAttribute('download'))).toEqual([
+      'frozen-title-01.jpg',
+      'frozen-title-02.jpg',
+    ]);
+    expect(Array.from(container.querySelectorAll('a[download]')).map((link) =>
+      link.getAttribute('href'))).toEqual([
+      'blob:prepared-1',
+      'blob:prepared-2',
+    ]);
+    expect(createObjectURL).toHaveBeenCalledTimes(2);
     expect(window.sessionStorage.getItem(
       'xhs-mobile-handoff:workspace-test:available-notion-page',
-    )).toContain('durable-attempt');
+    )).toContain('"validatedAt":');
     expect(requestSpy.mock.calls.filter(([, init]) =>
       (init?.method ?? 'GET') !== 'GET')).toEqual([]);
+    await act(async () => root?.unmount());
+    root = undefined;
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:prepared-1');
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:prepared-2');
   });
 
   it('keeps a missing requested record visible and passive after ready posts load', async () => {

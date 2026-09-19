@@ -6,6 +6,8 @@ export const SAFE_EXTERNAL_LINK_PROPS = {
   rel: 'noopener noreferrer',
 } as const;
 
+export const PREPARED_HANDOFF_FRESHNESS_MS = 2 * 60 * 1000;
+
 interface ClipboardWriter {
   writeText(value: string): Promise<void>;
 }
@@ -16,17 +18,26 @@ export interface CopyHandoffResult {
 }
 
 export interface FileShareCapability {
-  canShare?: (data: { files: File[] }) => boolean;
+  canShare?: (data: ShareData) => boolean;
 }
 
-export function canSharePreparedFiles(
+export function canSharePreparedPacket(
   navigatorLike: FileShareCapability,
-  files: File[],
+  shareData: ShareData,
 ) {
   return Boolean(
     navigatorLike.canShare
-    && navigatorLike.canShare({ files }),
+    && navigatorLike.canShare(shareData),
   );
+}
+
+export function isPreparedHandoffFresh(
+  validatedAt: number,
+  now = Date.now(),
+) {
+  return Number.isFinite(validatedAt)
+    && validatedAt <= now
+    && now - validatedAt < PREPARED_HANDOFF_FRESHNESS_MS;
 }
 
 export interface ManualHandoffEligibility {
@@ -187,16 +198,34 @@ export function getMediaDownloadName(
   headline: string,
   mediaUrl: string,
   order: number,
+  mimeType: string,
 ) {
-  let extension = '';
-  try {
-    extension = new URL(mediaUrl).pathname.match(/\.([A-Za-z0-9]{2,5})$/)?.[1] ?? '';
-  } catch {
-    extension = '';
+  const normalizedMimeType = mimeType.trim().toLowerCase().split(';', 1)[0];
+  const supportedExtensions: Record<string, readonly string[]> = {
+    'image/avif': ['avif'],
+    'image/heic': ['heic'],
+    'image/heif': ['heif'],
+    'image/jpeg': ['jpg', 'jpeg'],
+    'image/png': ['png'],
+    'image/webp': ['webp'],
+    'video/mp4': ['mp4'],
+    'video/quicktime': ['mov'],
+  };
+  const allowedExtensions = supportedExtensions[normalizedMimeType];
+  if (!allowedExtensions) {
+    throw new Error(`Unsupported prepared asset type: ${mimeType || 'missing Content-Type'}.`);
   }
-  const safeExtension = /^(?:avif|heic|jpeg|jpg|mov|mp4|png|webp)$/i.test(extension)
-    ? extension.toLowerCase()
-    : 'jpg';
+
+  let urlExtension = '';
+  try {
+    urlExtension = new URL(mediaUrl).pathname.match(/\.([A-Za-z0-9]{2,5})$/)?.[1]
+      ?.toLowerCase() ?? '';
+  } catch {
+    urlExtension = '';
+  }
+  const safeExtension = allowedExtensions.includes(urlExtension)
+    ? urlExtension
+    : allowedExtensions[0];
   const prefix = filenamePart(headline) || 'rednote-media';
   return `${prefix}-${String(order).padStart(2, '0')}.${safeExtension}`;
 }
@@ -214,10 +243,16 @@ export async function prepareOrderedMediaFiles(
         );
       }
       const blob = await response.blob();
+      const downloadName = getMediaDownloadName(
+        headline,
+        asset.url,
+        index + 1,
+        blob.type,
+      );
       return new File(
         [blob],
-        getMediaDownloadName(headline, asset.url, index + 1),
-        { type: blob.type || 'application/octet-stream' },
+        downloadName,
+        { type: blob.type },
       );
     }),
   );
