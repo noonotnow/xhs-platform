@@ -53,6 +53,7 @@ const migrationFiles = [
   '036_allow_stable_browser_closed_pre_publish.sql',
   '037_on_demand_publish_batches.sql',
   '038_exact_job_dispatch_activations.sql',
+  '039_ready_x3_schedule_edit_operations.sql',
 ] as const;
 
 function stable(value: unknown): string {
@@ -2243,7 +2244,11 @@ describe('canonical local publishing migration chain', () => {
       'workspace-approval',
     );
 
-    const jobs = await database.query(
+    const jobs = await database.query<{
+      id: string;
+      batch_item_id: string;
+      status: string;
+    }>(
       `SELECT id, batch_item_id, status
        FROM local_publish_jobs
        WHERE workspace_id = 'workspace-approval'
@@ -2602,6 +2607,8 @@ describe('canonical local publishing migration chain', () => {
             'DROP CONSTRAINT IF EXISTS rednote_publish_batches_kind_check',
           ) || statement.includes(
             'CREATE TABLE IF NOT EXISTS local_publish_dispatch_activations',
+          ) || statement.includes(
+            'CREATE TABLE IF NOT EXISTS ready_x3_schedule_edit_operations',
           )) {
             await previousSchema.exec(statement);
             return { rows: [], rowCount: 1 };
@@ -2614,7 +2621,7 @@ describe('canonical local publishing migration chain', () => {
       expect(before['030']).toBe(false);
       const applied = await applyExpectedRednoteSchemaMigrations(
         client,
-        ['030', '031', '032', '033', '034', '035', '036', '037', '038'],
+        ['030', '031', '032', '033', '034', '035', '036', '037', '038', '039'],
       );
       expect(applied.applied).toEqual([
         '030',
@@ -2626,6 +2633,7 @@ describe('canonical local publishing migration chain', () => {
         '036',
         '037',
         '038',
+        '039',
       ]);
       expect(applied.after['030']).toBe(true);
       expect(applied.after['031']).toBe(true);
@@ -2636,6 +2644,7 @@ describe('canonical local publishing migration chain', () => {
       expect(applied.after['036']).toBe(true);
       expect(applied.after['037']).toBe(true);
       expect(applied.after['038']).toBe(true);
+      expect(applied.after['039']).toBe(true);
 
       await previousSchema.exec(`
         DROP FUNCTION rednote_publish_revision_blockers(TEXT, TEXT, TEXT);
