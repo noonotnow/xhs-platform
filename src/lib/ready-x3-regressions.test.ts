@@ -160,6 +160,7 @@ describe('Ready x3 queue regression contract', () => {
   it('preserves optional identity evidence and enters verification on schedule mismatch', async () => {
     attempt.get.mockResolvedValue({
       payload: {
+        timingMode: 'scheduled',
         expectedAccountId: stored.snapshot.expectedAccountId,
         targetPublishAt: future,
       },
@@ -199,6 +200,7 @@ describe('Ready x3 queue regression contract', () => {
         completeReconciliation: vi.fn(),
         backfill: vi.fn(),
         recordScheduledAcknowledgement,
+        recordLateTerminal: vi.fn().mockResolvedValue(null),
       },
     )).resolves.toMatchObject({
       status: 'verification_pending',

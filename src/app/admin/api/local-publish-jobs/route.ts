@@ -78,7 +78,7 @@ export async function POST(request: NextRequest) {
     }
     const result = await queueLocalPublishJob(body, idempotencyKey, workspaceId);
     return NextResponse.json(
-      { job: result.job, attempt: result.attempt },
+      { job: result.job, attempt: result.attempt, replayed: !result.created },
       { status: result.created ? 201 : 200, headers: NO_STORE_HEADERS },
     );
   } catch (error) {
