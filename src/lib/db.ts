@@ -16,9 +16,19 @@ export function getPool() {
   }
   pool = new Pool({
     connectionString,
+    connectionTimeoutMillis: 5_000,
+    statement_timeout: 4_000,
+    query_timeout: 5_000,
+    idleTimeoutMillis: 1_000,
+    allowExitOnIdle: true,
     ssl: process.env.NODE_ENV === 'production'
       ? { rejectUnauthorized: false }
       : undefined,
+  });
+  // Serverless instances may resume after Neon has closed an idle socket.
+  // pg removes that connection; do not turn its idle error into a process crash.
+  pool.on('error', () => {
+    console.warn('XHS database idle connection closed');
   });
   return pool;
 }
