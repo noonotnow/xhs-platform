@@ -70,7 +70,7 @@ describe('admin local publish jobs route', () => {
     expect(mocks.listAttestations).toHaveBeenCalledWith('legacy-local-publish');
   });
   it.each([true, false])('reports a reused operation accurately when created=%s', async created => {
-    mocks.queue.mockResolvedValue({ created, job: { id: 'job-1' }, attempt: { id: 'attempt-1' } });
+    mocks.queue.mockResolvedValue({ created, job: { id: 'job-1', status: 'queued' }, attempt: { id: 'attempt-1' } });
     const response = await POST(new NextRequest('https://test.invalid/admin/api/local-publish-jobs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Workspace-Id': 'legacy-local-publish',
@@ -79,9 +79,33 @@ describe('admin local publish jobs route', () => {
     }));
     expect(response.status).toBe(created ? 201 : 200);
     expect(await response.json()).toEqual({
-      job: { id: 'job-1' }, attempt: { id: 'attempt-1' }, replayed: !created,
+      job: { id: 'job-1', status: 'queued' },
+      attempt: { id: 'attempt-1', state: 'queued' }, replayed: !created,
     });
     expect(response.headers.get('cache-control')).toContain('no-store');
+  });
+  it.each([
+    { status: 'failed', receiptLookupState: 'not_required', expected: 'failed' },
+    { status: 'published', receiptLookupState: 'identity_pending', expected: 'identity_pending' },
+  ])('returns canonical replay state without inventing success: $expected', async ({ status, receiptLookupState, expected }) => {
+    mocks.queue.mockResolvedValue({
+      created: false,
+      job: { id: 'job-1', status },
+      attempt: { id: 'attempt-1', receiptLookupState },
+    });
+    const response = await POST(new NextRequest('https://test.invalid/admin/api/local-publish-jobs', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Workspace-Id': 'legacy-local-publish',
+        'Idempotency-Key': '22222222-2222-4222-8222-222222222222',
+      },
+      body: '{}',
+    }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      attempt: { id: 'attempt-1', state: expected }, replayed: true,
+    });
   });
   it('never queues an unauthorized submission', async () => {
     mocks.requireOperator.mockResolvedValue(new Response(null, { status: 401 }));
