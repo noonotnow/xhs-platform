@@ -1,4 +1,5 @@
 import { Pool, QueryResultRow } from 'pg';
+import { readyX3SourceTransactionContext } from '@/lib/ready-x3-source-transaction';
 
 let pool: Pool | null = null;
 
@@ -46,5 +47,5 @@ export async function sql<T extends QueryResultRow = QueryResultRow>(
     (acc, str, i) => acc + (i > 0 ? `$${i}` : '') + str,
     '',
   );
-  return getPool().query<T>(text, values);
+  return (readyX3SourceTransactionContext.getStore()?.client ?? getPool()).query<T>(text, values);
 }

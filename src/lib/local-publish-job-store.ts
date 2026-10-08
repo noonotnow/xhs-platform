@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'crypto';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { isDeepStrictEqual } from 'util';
 import { getPool, sql } from '@/lib/db';
+import { readyX3SourceTransactionContext } from '@/lib/ready-x3-source-transaction';
 import {
   LocalPublishJobError,
   normalizeLocalPublishTags,
@@ -379,13 +380,24 @@ export async function insertLocalPublishJob(
   idempotencyKey: string,
   workspaceId = 'legacy-local-publish',
 ) {
-  const client = await getPool().connect();
-  try {
-    await client.query('BEGIN');
-    await client.query(
-      'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
-      [`${workspaceId}:${snapshot.notionPageId}`],
+  const active = readyX3SourceTransactionContext.getStore();
+  if (active && active.sourceLockKey !== `${workspaceId}:${snapshot.notionPageId}`) {
+    throw new LocalPublishJobError(
+      'The Ready x3 transaction belongs to a different source.',
+      'READY_X3_TRANSACTION_SOURCE_MISMATCH',
+      409,
     );
+  }
+  const ownsTransaction = !active;
+  const client = active?.client ?? await getPool().connect();
+  try {
+    if (ownsTransaction) {
+      await client.query('BEGIN');
+      await client.query(
+        'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+        [`${workspaceId}:${snapshot.notionPageId}`],
+      );
+    }
     const existingKey = await client.query<LocalPublishJobRow>(
       `SELECT *
        FROM local_publish_jobs
@@ -403,7 +415,7 @@ export async function insertLocalPublishJob(
           409,
         );
       }
-      await client.query('COMMIT');
+      if (ownsTransaction) await client.query('COMMIT');
       return { job, created: false };
     }
     const blocker = await client.query<PublishLifecycleBlocker>(
@@ -439,13 +451,13 @@ export async function insertLocalPublishJob(
         503,
       );
     }
-    await client.query('COMMIT');
+    if (ownsTransaction) await client.query('COMMIT');
     return { job: mapRow(inserted.rows[0]), created: true };
   } catch (error) {
-    await client.query('ROLLBACK');
+    if (ownsTransaction) await client.query('ROLLBACK');
     throw error;
   } finally {
-    client.release();
+    if (ownsTransaction) client.release();
   }
 }
 

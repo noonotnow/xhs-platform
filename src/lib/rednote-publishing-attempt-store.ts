@@ -1,5 +1,5 @@
 import { createHash } from 'crypto';
-import { AsyncLocalStorage } from 'async_hooks';
+import { readyX3SourceTransactionContext } from '@/lib/ready-x3-source-transaction';
 import { isDeepStrictEqual } from 'util';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { getPool } from '@/lib/db';
@@ -77,7 +77,6 @@ async function assertAttemptReceiptMatches(
   }
 }
 
-const readyX3SourceLockContext = new AsyncLocalStorage<string>();
 const LEGACY_READY_X3_LATE_FALLBACK_POLICY = {
   action: 'post_now',
   maxLateMinutes: 30,
@@ -373,6 +372,8 @@ function validatePayload(payload: FrozenRednoteAttemptPayload) {
 }
 
 async function transaction<T>(work: (client: PoolClient) => Promise<T>) {
+  const active = readyX3SourceTransactionContext.getStore();
+  if (active) return work(active.client);
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
@@ -445,7 +446,7 @@ export async function createRednotePublishAttempt(input: {
   validatePayload(input.payload);
   return transaction(async (client) => {
     const sourceLockKey = `${input.workspaceId}:${input.payload.sourceNotionPageId}`;
-    if (readyX3SourceLockContext.getStore() !== sourceLockKey) {
+    if (readyX3SourceTransactionContext.getStore()?.sourceLockKey !== sourceLockKey) {
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
         sourceLockKey,
       ]);
@@ -543,7 +544,7 @@ export async function withReadyX3SourceLock<T>(
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
       sourceLockKey,
     ]);
-    return readyX3SourceLockContext.run(sourceLockKey, operation);
+    return readyX3SourceTransactionContext.run({ sourceLockKey, client }, operation);
   });
 }
 
@@ -705,7 +706,7 @@ export async function getRednotePublishAttempt(workspaceId: string, id: string) 
 }
 
 export async function getLinkedRednotePublishAttempt(workspaceId: string, localJobId: string) {
-  const result = await getPool().query<AttemptRow>(
+  const result = await (readyX3SourceTransactionContext.getStore()?.client ?? getPool()).query<AttemptRow>(
     `SELECT * FROM rednote_publish_attempts
      WHERE workspace_id=$1 AND source_local_publish_job_id=$2::uuid
      ORDER BY created_at DESC LIMIT 1`,
