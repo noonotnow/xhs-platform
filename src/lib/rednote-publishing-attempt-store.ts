@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { inspectReadyX3SourceMutation } from '@/lib/ready-x3-source-mutation-safety';
 import { readyX3SourceTransactionContext } from '@/lib/ready-x3-source-transaction';
 import { isDeepStrictEqual } from 'util';
 import type { PoolClient, QueryResultRow } from 'pg';
@@ -928,6 +929,10 @@ export async function fenceReadyX3SourceMutation(
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
       `${workspaceId}:${sourceNotionPageId}`,
     ]);
+    const mutationSafety = await inspectReadyX3SourceMutation(client, workspaceId, sourceNotionPageId);
+    if (mutationSafety.applicable && !mutationSafety.safe) {
+      return { publicationMayHaveStarted: true };
+    }
     const started = await client.query<{ attempt_id: string; job_id: string | null }>(
       `SELECT attempt.id AS attempt_id, attempt.source_local_publish_job_id AS job_id
        FROM rednote_publish_attempts attempt

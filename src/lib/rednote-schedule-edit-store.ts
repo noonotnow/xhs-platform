@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { inspectReadyX3SourceMutation } from '@/lib/ready-x3-source-mutation-safety';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { getPool } from '@/lib/db';
 import { LocalPublishJobError } from '@/lib/local-publish-job-input';
@@ -497,6 +498,13 @@ export async function prepareReadyX3ScheduleEditOperation(input: {
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
       `${input.workspaceId}:${input.sourceNotionPageId}`,
     ]);
+    const mutationSafety = await inspectReadyX3SourceMutation(client, input.workspaceId, input.sourceNotionPageId);
+    if (mutationSafety.applicable && !mutationSafety.safe) {
+      throw new LocalPublishJobError(
+        'Publication truth no longer proves this source safe to reschedule.',
+        'READY_X3_PUBLICATION_MAY_HAVE_STARTED', 409,
+      );
+    }
     const replay = await client.query<OperationRow>(
       `SELECT * FROM ready_x3_schedule_edit_operations
        WHERE workspace_id=$1 AND idempotency_key=$2 FOR UPDATE`,
