@@ -1,9 +1,10 @@
-const CANONICAL_MEDIA_HOST = 'images.xhs.justlikekatie.com';
-
 function canonicalMediaUrl(url: string) {
   try {
+    const authority = new URL(process.env.NEXT_PUBLIC_CANONICAL_MEDIA_ORIGIN ?? 'https://images.xhs.justlikekatie.com');
+    if (authority.protocol !== 'https:' || authority.username || authority.password ||
+        authority.port || authority.pathname !== '/' || authority.search || authority.hash) return null;
     const parsed = new URL(url);
-    return parsed.protocol === 'https:' && parsed.hostname === CANONICAL_MEDIA_HOST
+    return parsed.protocol === 'https:' && !parsed.username && !parsed.password && parsed.origin === authority.origin
       ? parsed
       : null;
   } catch {

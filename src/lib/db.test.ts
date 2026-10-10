@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   Pool: vi.fn(function Pool(_options?: unknown) {
     void _options;
-    return { query: vi.fn() };
+    return { query: vi.fn(), on: vi.fn() };
   }),
 }));
 

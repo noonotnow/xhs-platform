@@ -1,4 +1,5 @@
 import { Pool, QueryResultRow } from 'pg';
+import { readyX3SourceTransactionContext } from '@/lib/ready-x3-source-transaction';
 
 let pool: Pool | null = null;
 
@@ -16,9 +17,19 @@ export function getPool() {
   }
   pool = new Pool({
     connectionString,
+    connectionTimeoutMillis: 5_000,
+    statement_timeout: 4_000,
+    query_timeout: 5_000,
+    idleTimeoutMillis: 1_000,
+    allowExitOnIdle: true,
     ssl: process.env.NODE_ENV === 'production'
       ? { rejectUnauthorized: false }
       : undefined,
+  });
+  // Serverless instances may resume after Neon has closed an idle socket.
+  // pg removes that connection; do not turn its idle error into a process crash.
+  pool.on('error', () => {
+    console.warn('XHS database idle connection closed');
   });
   return pool;
 }
@@ -36,5 +47,5 @@ export async function sql<T extends QueryResultRow = QueryResultRow>(
     (acc, str, i) => acc + (i > 0 ? `$${i}` : '') + str,
     '',
   );
-  return getPool().query<T>(text, values);
+  return (readyX3SourceTransactionContext.getStore()?.client ?? getPool()).query<T>(text, values);
 }

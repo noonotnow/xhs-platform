@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'crypto';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { isDeepStrictEqual } from 'util';
 import { getPool, sql } from '@/lib/db';
+import { readyX3SourceTransactionContext } from '@/lib/ready-x3-source-transaction';
 import {
   LocalPublishJobError,
   normalizeLocalPublishTags,
@@ -379,13 +380,24 @@ export async function insertLocalPublishJob(
   idempotencyKey: string,
   workspaceId = 'legacy-local-publish',
 ) {
-  const client = await getPool().connect();
-  try {
-    await client.query('BEGIN');
-    await client.query(
-      'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
-      [`${workspaceId}:${snapshot.notionPageId}`],
+  const active = readyX3SourceTransactionContext.getStore();
+  if (active && active.sourceLockKey !== `${workspaceId}:${snapshot.notionPageId}`) {
+    throw new LocalPublishJobError(
+      'The Ready x3 transaction belongs to a different source.',
+      'READY_X3_TRANSACTION_SOURCE_MISMATCH',
+      409,
     );
+  }
+  const ownsTransaction = !active;
+  const client = active?.client ?? await getPool().connect();
+  try {
+    if (ownsTransaction) {
+      await client.query('BEGIN');
+      await client.query(
+        'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+        [`${workspaceId}:${snapshot.notionPageId}`],
+      );
+    }
     const existingKey = await client.query<LocalPublishJobRow>(
       `SELECT *
        FROM local_publish_jobs
@@ -403,7 +415,7 @@ export async function insertLocalPublishJob(
           409,
         );
       }
-      await client.query('COMMIT');
+      if (ownsTransaction) await client.query('COMMIT');
       return { job, created: false };
     }
     const blocker = await client.query<PublishLifecycleBlocker>(
@@ -439,13 +451,13 @@ export async function insertLocalPublishJob(
         503,
       );
     }
-    await client.query('COMMIT');
+    if (ownsTransaction) await client.query('COMMIT');
     return { job: mapRow(inserted.rows[0]), created: true };
   } catch (error) {
-    await client.query('ROLLBACK');
+    if (ownsTransaction) await client.query('ROLLBACK');
     throw error;
   } finally {
-    client.release();
+    if (ownsTransaction) client.release();
   }
 }
 
@@ -533,6 +545,7 @@ export async function claimNextStoredLocalPublishJob(
           AND status = 'claimed'
           AND claim_token = ${claimToken}::uuid
           AND claim_expires_at > CURRENT_TIMESTAMP
+          AND ready_x3_schedule_edit_hold_id IS NULL
         )
         OR (
           ${lane} IN ('all', 'dispatch')
@@ -542,6 +555,7 @@ export async function claimNextStoredLocalPublishJob(
             WHERE dispatch_hold.state IN ('active', 'consumed')
           )
           AND status = 'queued'
+          AND ready_x3_schedule_edit_hold_id IS NULL
           AND EXISTS (
             SELECT 1
             FROM rednote_publish_attempts AS dispatch_attempt
@@ -553,6 +567,7 @@ export async function claimNextStoredLocalPublishJob(
               AND dispatch_attempt.terminal_outcome IS NULL
               AND dispatch_attempt.dispatch_authorized_at IS NULL
               AND dispatch_attempt.superseded_by_attempt_id IS NULL
+              AND dispatch_attempt.ready_x3_schedule_edit_hold_id IS NULL
               AND (
                  dispatch_attempt.claim_token IS NULL
                  OR dispatch_attempt.claim_expires_at <= CURRENT_TIMESTAMP
@@ -770,6 +785,7 @@ export async function claimExactActivatedStoredLocalPublishJob(
          AND activation.state = 'active'
          AND activation.expires_at > CURRENT_TIMESTAMP
          AND job.status = 'queued'
+          AND job.ready_x3_schedule_edit_hold_id IS NULL
          AND job.snapshot->>'notionLastEditedTime' =
            activation.source_revision
          AND item.state = 'queued'
@@ -830,6 +846,7 @@ export async function claimExactActivatedStoredLocalPublishJob(
          AND attempt.terminal_outcome IS NULL
          AND attempt.dispatch_authorized_at IS NULL
          AND attempt.superseded_by_attempt_id IS NULL
+          AND attempt.ready_x3_schedule_edit_hold_id IS NULL
          AND attempt.payload_revision = (
            SELECT source_revision
            FROM local_publish_dispatch_activations
@@ -867,6 +884,7 @@ export async function claimExactActivatedStoredLocalPublishJob(
          AND workspace_id = $2
          AND status = 'queued'
          AND external_disposition_request_id IS NULL
+          AND ready_x3_schedule_edit_hold_id IS NULL
        RETURNING *`,
       [expectedJobId, workspaceId, claimToken, leaseSeconds],
     );
@@ -887,6 +905,7 @@ export async function claimExactActivatedStoredLocalPublishJob(
          AND approved_at IS NOT NULL
          AND terminal_outcome IS NULL
          AND dispatch_authorized_at IS NULL
+          AND ready_x3_schedule_edit_hold_id IS NULL
        RETURNING id`,
       [attempt.rows[0].id, claimToken, claimed.claim_expires_at],
     );
@@ -1364,6 +1383,7 @@ export async function authorizeStoredLocalPublishJob(id: string, claimToken: str
       AND claim_token = ${claimToken}::uuid
       AND claim_expires_at > CURRENT_TIMESTAMP
       AND external_disposition_request_id IS NULL
+      AND ready_x3_schedule_edit_hold_id IS NULL
       AND NOT EXISTS (
         SELECT 1
         FROM plan_operator_scheduled_posts AS manual_handling

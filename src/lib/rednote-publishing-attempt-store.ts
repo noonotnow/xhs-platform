@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
-import { AsyncLocalStorage } from 'async_hooks';
+import { inspectReadyX3SourceMutation } from '@/lib/ready-x3-source-mutation-safety';
+import { readyX3SourceTransactionContext } from '@/lib/ready-x3-source-transaction';
 import { isDeepStrictEqual } from 'util';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { getPool } from '@/lib/db';
@@ -77,7 +78,6 @@ async function assertAttemptReceiptMatches(
   }
 }
 
-const readyX3SourceLockContext = new AsyncLocalStorage<string>();
 const LEGACY_READY_X3_LATE_FALLBACK_POLICY = {
   action: 'post_now',
   maxLateMinutes: 30,
@@ -373,6 +373,8 @@ function validatePayload(payload: FrozenRednoteAttemptPayload) {
 }
 
 async function transaction<T>(work: (client: PoolClient) => Promise<T>) {
+  const active = readyX3SourceTransactionContext.getStore();
+  if (active) return work(active.client);
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
@@ -445,7 +447,7 @@ export async function createRednotePublishAttempt(input: {
   validatePayload(input.payload);
   return transaction(async (client) => {
     const sourceLockKey = `${input.workspaceId}:${input.payload.sourceNotionPageId}`;
-    if (readyX3SourceLockContext.getStore() !== sourceLockKey) {
+    if (readyX3SourceTransactionContext.getStore()?.sourceLockKey !== sourceLockKey) {
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
         sourceLockKey,
       ]);
@@ -461,7 +463,70 @@ export async function createRednotePublishAttempt(input: {
       ) {
         throw new LocalPublishJobError('Idempotency-Key was used for a different frozen attempt', 'IDEMPOTENCY_CONFLICT', 409);
       }
+      // An explicit replay of the same Ready x3 authorization may recover the
+      // narrowly attested pre-submit form rejection. Keep the original job and
+      // immutable failed attempt; the SQL protocol archives its negative receipt
+      // and creates an execution generation with the unchanged approved payload.
+      const old = replay.rows[0];
+      if (input.readyX3 === true && input.approve === true &&
+          old.authorization_kind === 'ready_x3' && old.source_local_publish_job_id &&
+          old.terminal_outcome === 'known_failed') {
+        const rejection = await client.query<{ eligible: boolean }>(
+          `SELECT (
+             job.error_code='STAGED_FORM_CHANGED'
+             AND job.error_message='Creator is no longer showing the staged publish form'
+             AND job.receipt_contract_version='rednote-worker-result/v2'
+             AND job.receipt_outcome='rejected'
+           ) OR EXISTS (
+             SELECT 1 FROM rednote_ready_x3_form_recoveries r
+             WHERE r.workspace_id=$1 AND r.local_publish_job_id=job.id
+               AND r.failed_attempt_id=$3::uuid
+           ) AS eligible
+           FROM local_publish_jobs job WHERE job.workspace_id=$1 AND job.id=$2::uuid`,
+          [input.workspaceId, old.source_local_publish_job_id, old.id],
+        );
+        if (rejection.rows[0]?.eligible === true) {
+          let recovered;
+          try {
+            recovered = await client.query<{ replacement_attempt_id: string }>(
+              `SELECT * FROM recover_ready_x3_rejected_form(
+                $1,$2::uuid,$3::uuid,$4,$5,$6,$7::timestamptz,$8
+              )`,
+              [input.workspaceId, old.source_local_publish_job_id, old.id,
+                input.payload.sourceNotionPageId, input.payload.payloadRevision,
+                input.payload.payloadDigest, input.payload.browserPayload.targetPublishAt,
+                'ready_x3_exact_packet_replay'],
+            );
+          } catch (error) {
+            if ((error as { code?: string }).code === '23514') {
+              throw new LocalPublishJobError(
+                'The rejected operation needs reconciliation or a reviewed future slot before retry.',
+                'READY_X3_FORM_RECOVERY_UNSAFE', 409,
+              );
+            }
+            throw error;
+          }
+          const replacement = await client.query<AttemptRow>(
+            `SELECT * FROM rednote_publish_attempts WHERE workspace_id=$1 AND id=$2::uuid`,
+            [input.workspaceId, recovered.rows[0].replacement_attempt_id],
+          );
+          return { attempt: publicAttempt(replacement.rows[0]), created: false };
+        }
+      }
       return { attempt: publicAttempt(replay.rows[0]), created: false };
+    }
+    const scheduleEditHold = await client.query(
+      `SELECT id FROM ready_x3_schedule_edit_operations
+       WHERE workspace_id=$1 AND source_notion_page_id=$2 AND state='prepared'
+       LIMIT 1`,
+      [input.workspaceId, input.payload.sourceNotionPageId],
+    );
+    if (scheduleEditHold.rows[0]) {
+      throw new LocalPublishJobError(
+        'A Ready x3 schedule edit is awaiting source reconciliation.',
+        'SCHEDULE_EDIT_RECONCILIATION_REQUIRED',
+        409,
+      );
     }
     if (input.supersedesAttemptId) {
       const superseded = await client.query<AttemptRow>(
@@ -530,7 +595,7 @@ export async function withReadyX3SourceLock<T>(
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
       sourceLockKey,
     ]);
-    return readyX3SourceLockContext.run(sourceLockKey, operation);
+    return readyX3SourceTransactionContext.run({ sourceLockKey, client }, operation);
   });
 }
 
@@ -541,6 +606,19 @@ export async function supersedeUnclaimedReadyX3Schedule(
 ) {
   if (!snapshot.publishAt) return false;
   return transaction(async (client) => {
+    const scheduleEditHold = await client.query(
+      `SELECT id FROM ready_x3_schedule_edit_operations
+       WHERE workspace_id=$1 AND source_notion_page_id=$2 AND state='prepared'
+       LIMIT 1`,
+      [workspaceId, snapshot.notionPageId],
+    );
+    if (scheduleEditHold.rows[0]) {
+      throw new LocalPublishJobError(
+        'A Ready x3 schedule edit is awaiting source reconciliation.',
+        'SCHEDULE_EDIT_RECONCILIATION_REQUIRED',
+        409,
+      );
+    }
     const old = await client.query<{
       job_id: string;
       attempt_id: string;
@@ -679,7 +757,7 @@ export async function getRednotePublishAttempt(workspaceId: string, id: string) 
 }
 
 export async function getLinkedRednotePublishAttempt(workspaceId: string, localJobId: string) {
-  const result = await getPool().query<AttemptRow>(
+  const result = await (readyX3SourceTransactionContext.getStore()?.client ?? getPool()).query<AttemptRow>(
     `SELECT * FROM rednote_publish_attempts
      WHERE workspace_id=$1 AND source_local_publish_job_id=$2::uuid
      ORDER BY created_at DESC LIMIT 1`,
@@ -699,7 +777,8 @@ export async function approveRednotePublishAttempt(workspaceId: string, id: stri
   const result = await getPool().query<AttemptRow>(
     `UPDATE rednote_publish_attempts SET approved_at=COALESCE(approved_at,CURRENT_TIMESTAMP),active=true
      WHERE workspace_id=$1 AND id=$2::uuid AND executor_type='worker'
-       AND terminal_outcome IS NULL AND superseded_by_attempt_id IS NULL RETURNING *`,
+       AND terminal_outcome IS NULL AND superseded_by_attempt_id IS NULL
+       AND ready_x3_schedule_edit_hold_id IS NULL RETURNING *`,
     [workspaceId, id],
   );
   if (result.rows[0]) return publicAttempt(result.rows[0]);
@@ -712,6 +791,7 @@ export async function claimRednotePublishAttempt(workspaceId: string, leaseSecon
        SELECT id FROM rednote_publish_attempts
        WHERE workspace_id=$1 AND active AND approved_at IS NOT NULL
          AND terminal_outcome IS NULL AND dispatch_authorized_at IS NULL
+          AND ready_x3_schedule_edit_hold_id IS NULL
          AND NOT EXISTS (
            SELECT 1 FROM local_publish_dispatch_activations
            WHERE state IN ('active', 'consumed')
@@ -732,7 +812,8 @@ export async function authorizeRednotePublishAttempt(workspaceId: string, id: st
     `UPDATE rednote_publish_attempts SET dispatch_authorized_at=CURRENT_TIMESTAMP
      WHERE workspace_id=$1 AND id=$2::uuid AND claim_token=$3::uuid
        AND claim_expires_at>CURRENT_TIMESTAMP AND active AND terminal_outcome IS NULL
-       AND dispatch_authorized_at IS NULL RETURNING *`,
+        AND dispatch_authorized_at IS NULL
+        AND ready_x3_schedule_edit_hold_id IS NULL RETURNING *`,
     [workspaceId, id, claimToken],
   );
   if (!result.rows[0]) throw new LocalPublishJobError('Dispatch authorization is stale or already consumed', 'DISPATCH_NOT_AUTHORIZED', 409);
@@ -755,6 +836,7 @@ export async function bindLinkedAttemptClaim(
      WHERE workspace_id=$1 AND source_local_publish_job_id=$2::uuid AND active
        AND approved_at IS NOT NULL AND terminal_outcome IS NULL
        AND dispatch_authorized_at IS NULL
+        AND ready_x3_schedule_edit_hold_id IS NULL
        AND (claim_expires_at IS NULL OR claim_expires_at<=CURRENT_TIMESTAMP)
      RETURNING *`,
     [workspaceId, localJobId, claimToken, claimExpiresAt],
@@ -765,6 +847,7 @@ export async function bindLinkedAttemptClaim(
        WHERE workspace_id=$1 AND source_local_publish_job_id=$2::uuid AND active
          AND approved_at IS NOT NULL AND terminal_outcome IS NULL
          AND dispatch_authorized_at IS NULL AND claim_token=$3::uuid
+          AND ready_x3_schedule_edit_hold_id IS NULL
          AND claim_expires_at>CURRENT_TIMESTAMP`,
       [workspaceId, localJobId, claimToken],
     );
@@ -840,6 +923,7 @@ export async function consumeLinkedReadyX3DispatchAuthorization(
          WHERE id=$2::uuid AND workspace_id=$1 AND claim_token=$3::uuid
            AND status='staged' AND claim_expires_at>CURRENT_TIMESTAMP
            AND dispatch_authorized_at IS NULL AND external_disposition_request_id IS NULL
+           AND ready_x3_schedule_edit_hold_id IS NULL
          FOR UPDATE
        ), attempt AS (
          UPDATE rednote_publish_attempts attempt
@@ -851,6 +935,7 @@ export async function consumeLinkedReadyX3DispatchAuthorization(
            AND attempt.terminal_outcome IS NULL AND attempt.superseded_by_attempt_id IS NULL
            AND attempt.claim_expires_at>CURRENT_TIMESTAMP
            AND attempt.dispatch_authorized_at IS NULL
+            AND attempt.ready_x3_schedule_edit_hold_id IS NULL
          RETURNING attempt.*
        )
        UPDATE local_publish_jobs job
@@ -894,6 +979,10 @@ export async function fenceReadyX3SourceMutation(
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
       `${workspaceId}:${sourceNotionPageId}`,
     ]);
+    const mutationSafety = await inspectReadyX3SourceMutation(client, workspaceId, sourceNotionPageId);
+    if (mutationSafety.applicable && !mutationSafety.safe) {
+      return { publicationMayHaveStarted: true };
+    }
     const started = await client.query<{ attempt_id: string; job_id: string | null }>(
       `SELECT attempt.id AS attempt_id, attempt.source_local_publish_job_id AS job_id
        FROM rednote_publish_attempts attempt
@@ -914,7 +1003,7 @@ export async function fenceReadyX3SourceMutation(
       `UPDATE rednote_publish_attempts SET active=false,
          terminal_outcome='known_failed', terminal_at=CURRENT_TIMESTAMP,
          receipt_lookup_state='not_required', receipt_lookup_updated_at=CURRENT_TIMESTAMP,
-         claim_expires_at=CURRENT_TIMESTAMP
+          claim_expires_at=CURRENT_TIMESTAMP, ready_x3_schedule_edit_hold_id=NULL
        WHERE workspace_id=$1 AND source_notion_page_id=$2
          AND authorization_kind='ready_x3' AND active
          AND approved_at IS NOT NULL AND terminal_outcome IS NULL
@@ -925,12 +1014,49 @@ export async function fenceReadyX3SourceMutation(
     const jobs = await client.query<{ id: string }>(
       `UPDATE local_publish_jobs SET status='failed', completed_at=CURRENT_TIMESTAMP,
          updated_at=CURRENT_TIMESTAMP, error_code='READY_X3_SOURCE_STALE',
-         error_message='Invalidated by a Workbench source mutation before dispatch.'
+          error_message='Invalidated by a Workbench source mutation before dispatch.',
+          ready_x3_schedule_edit_hold_id=NULL
        WHERE workspace_id=$1 AND notion_page_id=$2 AND status IN ('queued','claimed','staged')
          AND dispatch_authorized_at IS NULL
        RETURNING id`,
       [workspaceId, sourceNotionPageId],
     );
+    const clearedAttempts = await client.query(
+      `UPDATE rednote_publish_attempts
+       SET ready_x3_schedule_edit_hold_id=NULL
+       WHERE workspace_id=$1 AND source_notion_page_id=$2
+         AND ready_x3_schedule_edit_hold_id IS NOT NULL
+       RETURNING id`,
+      [workspaceId, sourceNotionPageId],
+    );
+    const clearedJobs = await client.query(
+      `UPDATE local_publish_jobs
+       SET ready_x3_schedule_edit_hold_id=NULL
+       WHERE workspace_id=$1 AND notion_page_id=$2
+         AND ready_x3_schedule_edit_hold_id IS NOT NULL
+       RETURNING id`,
+      [workspaceId, sourceNotionPageId],
+    );
+    const pendingEdits = await client.query<{
+      id: string;
+    }>(
+      `UPDATE ready_x3_schedule_edit_operations
+        SET state='consent_cleared', source_revision_after=$3,
+            completed_at=CURRENT_TIMESTAMP,
+           state_reason='A later canonical source mutation superseded the prepared timing edit.'
+        WHERE workspace_id=$1 AND source_notion_page_id=$2 AND state='prepared'
+       RETURNING id`,
+       [workspaceId, sourceNotionPageId, revision],
+    );
+    for (const operation of pendingEdits.rows) {
+      await client.query(
+        `INSERT INTO ready_x3_schedule_edit_operation_events
+           (operation_id,event_type,actor_type,actor_id,evidence)
+         VALUES ($1::uuid,'consent_cleared','admin','ready_x3_mutation_fence',
+           jsonb_build_object('reason','source_mutation','sourceRevision',$2::text))`,
+        [operation.id, revision],
+      );
+    }
     for (const attempt of attempts.rows) {
       await client.query(
         `INSERT INTO rednote_publish_attempt_events(attempt_id,event_type,occurred_at,actor_type,actor_id)
@@ -938,7 +1064,14 @@ export async function fenceReadyX3SourceMutation(
         [attempt.id],
       );
     }
-    return { publicationMayHaveStarted: false, invalidatedAttemptIds: attempts.rows.map((row) => row.id), invalidatedJobIds: jobs.rows.map((row) => row.id) };
+    return {
+      publicationMayHaveStarted: false,
+      invalidatedAttemptIds: attempts.rows.map((row) => row.id),
+      invalidatedJobIds: jobs.rows.map((row) => row.id),
+      clearedScheduleEditOperationIds: pendingEdits.rows.map((row) => row.id),
+      clearedScheduleEditAttemptHoldIds: clearedAttempts.rows.map((row) => row.id),
+      clearedScheduleEditJobHoldIds: clearedJobs.rows.map((row) => row.id),
+    };
   });
 }
 
@@ -2648,6 +2781,13 @@ export async function readRednotePublishingOperational(workspaceId: string) {
      authorization_kind: string | null; approved_at: Date | string | null;
      claim_expires_at: Date | string | null; dispatch_authorized_at: Date | string | null;
     superseded_by_attempt_id: string | null;
+     schedule_edit_id: string | null;
+     schedule_edit_state: 'prepared' | 'committed' | 'consent_cleared' | 'aborted' | null;
+     schedule_edit_operation_kind: 'retarget' | 'invalidate' | null;
+     schedule_edit_holds_cleared: boolean | null;
+     schedule_edit_state_reason: string | null;
+     schedule_edit_retargeted_attempt_id: string | null;
+     schedule_edit_retargeted_local_publish_job_id: string | null;
   }>(
     `SELECT job.id,job.notion_page_id,job.snapshot,job.status,job.updated_at,
       job.created_at AS job_created_at,
@@ -2658,12 +2798,45 @@ export async function readRednotePublishingOperational(workspaceId: string) {
        attempt.dispatch_authorized_at,attempt.superseded_by_attempt_id,
       receipt.rednote_note_id,receipt.rednote_url,receipt.captured_at,
       COALESCE((SELECT count(*) FROM rednote_publish_attempt_events e
-        WHERE e.attempt_id=attempt.id),0)::text AS event_count
+         WHERE e.attempt_id=attempt.id),0)::text AS event_count,
+       schedule_edit.operation_id AS schedule_edit_id,
+       schedule_edit.state AS schedule_edit_state,
+       schedule_edit.operation_kind AS schedule_edit_operation_kind,
+       schedule_edit.holds_cleared AS schedule_edit_holds_cleared,
+       schedule_edit.state_reason AS schedule_edit_state_reason,
+       schedule_edit.retargeted_attempt_id AS schedule_edit_retargeted_attempt_id,
+       schedule_edit.retargeted_local_publish_job_id
+         AS schedule_edit_retargeted_local_publish_job_id
      FROM local_publish_jobs job
      LEFT JOIN rednote_publish_attempts attempt
        ON attempt.workspace_id=job.workspace_id
       AND attempt.source_local_publish_job_id=job.id
      LEFT JOIN rednote_publish_attempt_receipts receipt ON receipt.attempt_id=attempt.id
+      LEFT JOIN LATERAL (
+        SELECT operation.id AS operation_id,
+          operation.state,
+          operation.operation_kind,
+          operation.state_reason,
+          operation.retargeted_attempt_id,
+          operation.retargeted_local_publish_job_id,
+          (
+            NOT EXISTS (
+              SELECT 1 FROM local_publish_jobs held_job
+              WHERE held_job.workspace_id=operation.workspace_id
+                AND held_job.ready_x3_schedule_edit_hold_id=operation.id
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM rednote_publish_attempts held_attempt
+              WHERE held_attempt.workspace_id=operation.workspace_id
+                AND held_attempt.ready_x3_schedule_edit_hold_id=operation.id
+            )
+          ) AS holds_cleared
+        FROM ready_x3_schedule_edit_operations operation
+        WHERE operation.workspace_id=job.workspace_id
+          AND operation.source_notion_page_id=job.notion_page_id
+        ORDER BY operation.created_at DESC,operation.id DESC
+        LIMIT 1
+      ) schedule_edit ON true
      WHERE job.workspace_id=$1
        AND job.id IN (
          SELECT recent.id
@@ -2719,6 +2892,15 @@ export async function readRednotePublishingOperational(workspaceId: string) {
       receipt,
       failure: row.terminal_outcome === 'known_failed' ? 'Publishing attempt failed' :
         row.terminal_outcome === 'outcome_unknown' ? 'Publishing outcome requires reconciliation' : null,
+      readyX3ScheduleEdit: row.schedule_edit_id ? {
+        id: row.schedule_edit_id,
+        state: row.schedule_edit_state!,
+        operationKind: row.schedule_edit_operation_kind!,
+        holdsCleared: row.schedule_edit_holds_cleared === true,
+        stateReason: row.schedule_edit_state_reason,
+        retargetedAttemptId: row.schedule_edit_retargeted_attempt_id,
+        retargetedLocalPublishJobId: row.schedule_edit_retargeted_local_publish_job_id,
+      } : null,
     };
   };
   const currentByJob = new Map<string, typeof result.rows[number]>();
