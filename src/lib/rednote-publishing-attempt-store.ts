@@ -463,6 +463,56 @@ export async function createRednotePublishAttempt(input: {
       ) {
         throw new LocalPublishJobError('Idempotency-Key was used for a different frozen attempt', 'IDEMPOTENCY_CONFLICT', 409);
       }
+      // An explicit replay of the same Ready x3 authorization may recover the
+      // narrowly attested pre-submit form rejection. Keep the original job and
+      // immutable failed attempt; the SQL protocol archives its negative receipt
+      // and creates an execution generation with the unchanged approved payload.
+      const old = replay.rows[0];
+      if (input.readyX3 === true && input.approve === true &&
+          old.authorization_kind === 'ready_x3' && old.source_local_publish_job_id &&
+          old.terminal_outcome === 'known_failed') {
+        const rejection = await client.query<{ eligible: boolean }>(
+          `SELECT (
+             job.error_code='STAGED_FORM_CHANGED'
+             AND job.error_message='Creator is no longer showing the staged publish form'
+             AND job.receipt_contract_version='rednote-worker-result/v2'
+             AND job.receipt_outcome='rejected'
+           ) OR EXISTS (
+             SELECT 1 FROM rednote_ready_x3_form_recoveries r
+             WHERE r.workspace_id=$1 AND r.local_publish_job_id=job.id
+               AND r.failed_attempt_id=$3::uuid
+           ) AS eligible
+           FROM local_publish_jobs job WHERE job.workspace_id=$1 AND job.id=$2::uuid`,
+          [input.workspaceId, old.source_local_publish_job_id, old.id],
+        );
+        if (rejection.rows[0]?.eligible === true) {
+          let recovered;
+          try {
+            recovered = await client.query<{ replacement_attempt_id: string }>(
+              `SELECT * FROM recover_ready_x3_rejected_form(
+                $1,$2::uuid,$3::uuid,$4,$5,$6,$7::timestamptz,$8
+              )`,
+              [input.workspaceId, old.source_local_publish_job_id, old.id,
+                input.payload.sourceNotionPageId, input.payload.payloadRevision,
+                input.payload.payloadDigest, input.payload.browserPayload.targetPublishAt,
+                'ready_x3_exact_packet_replay'],
+            );
+          } catch (error) {
+            if ((error as { code?: string }).code === '23514') {
+              throw new LocalPublishJobError(
+                'The rejected operation needs reconciliation or a reviewed future slot before retry.',
+                'READY_X3_FORM_RECOVERY_UNSAFE', 409,
+              );
+            }
+            throw error;
+          }
+          const replacement = await client.query<AttemptRow>(
+            `SELECT * FROM rednote_publish_attempts WHERE workspace_id=$1 AND id=$2::uuid`,
+            [input.workspaceId, recovered.rows[0].replacement_attempt_id],
+          );
+          return { attempt: publicAttempt(replacement.rows[0]), created: false };
+        }
+      }
       return { attempt: publicAttempt(replay.rows[0]), created: false };
     }
     const scheduleEditHold = await client.query(
