@@ -989,6 +989,9 @@ export async function fenceReadyX3SourceMutation(
        WHERE attempt.workspace_id=$1 AND attempt.source_notion_page_id=$2
          AND attempt.authorization_kind='ready_x3'
          AND attempt.dispatch_authorized_at IS NOT NULL
+         AND NOT rednote_ready_x3_pre_submit_rejection_is_proven(
+           attempt.workspace_id,attempt.source_local_publish_job_id,attempt.id
+         )
        ORDER BY attempt.dispatch_authorized_at DESC LIMIT 1`,
       [workspaceId, sourceNotionPageId],
     );

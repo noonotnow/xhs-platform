@@ -16,6 +16,7 @@ export interface MutationSafetyRow extends QueryResultRow {
   share_url: unknown;
   success_attestation_id: unknown;
   receipt_outcome: string | null;
+  proven_no_submit?: boolean;
 }
 
 // Editing/revoking an unconsumed authorization is not retrying a failed job.
@@ -29,6 +30,20 @@ export function assessReadyX3SourceMutation(
   const applicable = orphanReadyX3Attempts ||
     rows.some((row) => row.authorization_kind === 'ready_x3');
   const safe = applicable && !orphanAttempts && rows.length > 0 && rows.every((row) => {
+    // Only the database's exact acknowledged pre-submit predicate can prove
+    // that a consumed activation never reached the provider submit control.
+    // This permits source editing, never reusing or resetting the old consent.
+    if (row.proven_no_submit === true &&
+        row.authorization_kind === 'ready_x3' &&
+        row.status === 'failed' && row.active === false &&
+        row.terminal_outcome === 'known_failed' &&
+        row.receipt_lookup_state === 'not_required' &&
+        row.receipt_outcome === 'rejected' &&
+        row.job_dispatch_authorized_at != null &&
+        row.attempt_dispatch_authorized_at != null &&
+        [row.dispatched_at, row.verified_at, row.reconciled_at,
+          row.note_id, row.share_url, row.success_attestation_id]
+          .every((value) => value === null)) return true;
     const noActivationOrReceipt = row.authorization_kind === 'ready_x3' &&
       row.receipt_lookup_state === 'not_required' &&
       [
@@ -59,7 +74,10 @@ export async function inspectReadyX3SourceMutation(
        job.dispatch_authorized_at AS job_dispatch_authorized_at,
        attempt.dispatch_authorized_at AS attempt_dispatch_authorized_at,
        job.dispatched_at, job.verified_at, job.reconciled_at,
-       job.note_id, job.share_url, job.success_attestation_id, job.receipt_outcome
+       job.note_id, job.share_url, job.success_attestation_id, job.receipt_outcome,
+       rednote_ready_x3_pre_submit_rejection_is_proven(
+         job.workspace_id,job.id,attempt.id
+       ) AS proven_no_submit
      FROM local_publish_jobs job
      LEFT JOIN rednote_publish_attempts attempt
        ON attempt.workspace_id=job.workspace_id

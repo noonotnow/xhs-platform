@@ -13,6 +13,29 @@ const failed = (): MutationSafetyRow => ({
 });
 
 describe('Ready x3 source mutation authority, not retry authority', () => {
+  const proven = (): MutationSafetyRow => ({
+    ...failed(), proven_no_submit: true,
+    job_dispatch_authorized_at: 'timestamp',
+    attempt_dispatch_authorized_at: 'timestamp',
+  });
+  it('permits correction after a database-proven acknowledged pre-submit rejection', () => {
+    expect(assessReadyX3SourceMutation([failed(), proven()], false, false).safe).toBe(true);
+  });
+  it.each([false, undefined])('does not infer no-submit proof when the database returns %s', (proof) => {
+    expect(assessReadyX3SourceMutation([{ ...proven(), proven_no_submit: proof }], false, false).safe).toBe(false);
+  });
+  it.each([
+    ['active', true], ['status', 'scheduled'], ['receipt_outcome', 'ambiguous'],
+    ['terminal_outcome', 'outcome_unknown'], ['receipt_lookup_state', 'identity_pending'],
+    ['note_id', 'provider-id'], ['share_url', 'provider-url'], ['dispatched_at', 'timestamp'],
+    ['verified_at', 'timestamp'], ['reconciled_at', 'timestamp'], ['success_attestation_id', 'id'],
+    ['authorization_kind', 'manual'],
+  ])('still blocks %s even alongside a no-submit projection', (key, value) => {
+    expect(assessReadyX3SourceMutation([{ ...proven(), [key]: value }], false, false).safe).toBe(false);
+  });
+  it('cannot hide another ambiguous historical operation behind a proven rejection', () => {
+    expect(assessReadyX3SourceMutation([proven(), { ...failed(), receipt_outcome: 'ambiguous' }], false, false).safe).toBe(false);
+  });
   it('permits an old, affirmatively pre-activation failure without batch recovery metadata', () => {
     expect(assessReadyX3SourceMutation([failed()], false, false)).toEqual({ applicable: true, safe: true });
   });
