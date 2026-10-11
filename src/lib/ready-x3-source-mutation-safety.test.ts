@@ -10,6 +10,7 @@ const failed = (): MutationSafetyRow => ({
   job_dispatch_authorized_at: null, attempt_dispatch_authorized_at: null,
   dispatched_at: null, verified_at: null, reconciled_at: null, note_id: null,
   share_url: null, success_attestation_id: null, receipt_outcome: 'rejected',
+  has_receipt_evidence: false,
 });
 
 describe('Ready x3 source mutation authority, not retry authority', () => {
@@ -35,6 +36,17 @@ describe('Ready x3 source mutation authority, not retry authority', () => {
   });
   it('cannot hide another ambiguous historical operation behind a proven rejection', () => {
     expect(assessReadyX3SourceMutation([proven(), { ...failed(), receipt_outcome: 'ambiguous' }], false, false).safe).toBe(false);
+  });
+  it.each(['queued', 'claimed', 'staged'])('permits the %s initial pending placeholder only before activation', (status) => {
+    const pending = { ...failed(), status, active: true, terminal_outcome: null,
+      receipt_outcome: null, receipt_lookup_state: 'pending' };
+    expect(assessReadyX3SourceMutation([pending], false, false).safe).toBe(true);
+    expect(assessReadyX3SourceMutation([{ ...pending, has_receipt_evidence: true }], false, false).safe).toBe(false);
+    expect(assessReadyX3SourceMutation([{ ...pending, has_receipt_evidence: undefined }], false, false).safe).toBe(false);
+    expect(assessReadyX3SourceMutation([{ ...pending, job_dispatch_authorized_at: 'timestamp' }], false, false).safe).toBe(false);
+  });
+  it('does not hide stored evidence behind a projected no-submit proof', () => {
+    expect(assessReadyX3SourceMutation([{ ...proven(), has_receipt_evidence: true }], false, false).safe).toBe(false);
   });
   it('permits an old, affirmatively pre-activation failure without batch recovery metadata', () => {
     expect(assessReadyX3SourceMutation([failed()], false, false)).toEqual({ applicable: true, safe: true });

@@ -17,6 +17,7 @@ export interface MutationSafetyRow extends QueryResultRow {
   success_attestation_id: unknown;
   receipt_outcome: string | null;
   proven_no_submit?: boolean;
+  has_receipt_evidence?: boolean;
 }
 
 // Editing/revoking an unconsumed authorization is not retrying a failed job.
@@ -30,6 +31,7 @@ export function assessReadyX3SourceMutation(
   const applicable = orphanReadyX3Attempts ||
     rows.some((row) => row.authorization_kind === 'ready_x3');
   const safe = applicable && !orphanAttempts && rows.length > 0 && rows.every((row) => {
+    if (row.has_receipt_evidence === true) return false;
     // Only the database's exact acknowledged pre-submit predicate can prove
     // that a consumed activation never reached the provider submit control.
     // This permits source editing, never reusing or resetting the old consent.
@@ -45,7 +47,13 @@ export function assessReadyX3SourceMutation(
           row.note_id, row.share_url, row.success_attestation_id]
           .every((value) => value === null)) return true;
     const noActivationOrReceipt = row.authorization_kind === 'ready_x3' &&
-      row.receipt_lookup_state === 'not_required' &&
+      (row.receipt_lookup_state === 'not_required' ||
+        // A newly approved, unconsumed attempt starts at pending by schema
+        // default. That placeholder is not an uncertain provider submission.
+        (row.receipt_lookup_state === 'pending' &&
+          row.has_receipt_evidence === false && row.active === true &&
+          row.terminal_outcome === null && row.receipt_outcome === null &&
+          ['queued', 'claimed', 'staged'].includes(row.status))) &&
       [
         row.job_dispatch_authorized_at, row.attempt_dispatch_authorized_at,
         row.dispatched_at, row.verified_at, row.reconciled_at,
@@ -77,7 +85,14 @@ export async function inspectReadyX3SourceMutation(
        job.note_id, job.share_url, job.success_attestation_id, job.receipt_outcome,
        rednote_ready_x3_pre_submit_rejection_is_proven(
          job.workspace_id,job.id,attempt.id
-       ) AS proven_no_submit
+       ) AS proven_no_submit,
+       (EXISTS (SELECT 1 FROM rednote_publish_attempt_receipts receipt
+          WHERE receipt.attempt_id=attempt.id)
+        OR EXISTS (SELECT 1 FROM rednote_publication_evidence evidence
+          WHERE evidence.workspace_id=job.workspace_id
+            AND (evidence.local_publish_job_id=job.id OR evidence.attempt_id=attempt.id))
+        OR EXISTS (SELECT 1 FROM local_publish_job_success_attestations attestation
+          WHERE attestation.local_publish_job_id=job.id)) AS has_receipt_evidence
      FROM local_publish_jobs job
      LEFT JOIN rednote_publish_attempts attempt
        ON attempt.workspace_id=job.workspace_id
