@@ -21,6 +21,7 @@ import {
 } from '@/lib/rednote-publishing-contract-v1';
 import { readLocalPublishWorkerHeartbeat } from '@/lib/local-publish-worker-heartbeat';
 import { CLAIM_LEASE_EXPIRED_MESSAGE } from '@/lib/local-publish-job-store';
+import { rednoteDispatchOutcome } from '@/lib/rednote-dispatch-outcome';
 
 interface AttemptRow extends QueryResultRow {
   id: string;
@@ -2863,11 +2864,16 @@ export async function readRednotePublishingOperational(workspaceId: string) {
   ]);
   const item = (row: typeof result.rows[number]) => {
     const snapshot = row.snapshot;
+    const outcome = rednoteDispatchOutcome({
+      status: row.status,
+      terminalOutcome: row.terminal_outcome,
+      receiptLookupState: row.receipt_lookup_state,
+    });
     const receipt = row.attempt_id ? {
       state: row.receipt_lookup_state ?? 'pending',
       attemptId: row.attempt_id,
       action: row.receipt_lookup_state === 'identity_pending' ? 'Backfill receipt' : null,
-      acceptedAt: iso(row.terminal_at),
+      acceptedAt: outcome.providerAccepted ? iso(row.terminal_at) : null,
       noteId: row.rednote_note_id,
       canonicalUrl: row.rednote_url,
       verifiedAt: iso(row.captured_at),
@@ -2879,7 +2885,7 @@ export async function readRednotePublishingOperational(workspaceId: string) {
       title: typeof snapshot.title === 'string' ? snapshot.title : 'Untitled Rednote revision',
       scheduledDate: typeof snapshot.publishAt === 'string' ? snapshot.publishAt : null,
       mode: snapshot.publishAt ? 'schedule' as const : 'publish' as const,
-      state: row.receipt_lookup_state === 'identity_pending' ? 'identity_pending' : row.status,
+      state: outcome.state,
        eligible: row.status === 'queued' && row.active === true &&
          row.approved_at !== null && row.terminal_outcome === null &&
          row.dispatch_authorized_at === null &&
@@ -2896,8 +2902,7 @@ export async function readRednotePublishingOperational(workspaceId: string) {
         (typeof snapshot.notionLastEditedTime === 'string' ? snapshot.notionLastEditedTime : 'unknown'),
       updatedAt: iso(row.updated_at),
       receipt,
-      failure: row.terminal_outcome === 'known_failed' ? 'Publishing attempt failed' :
-        row.terminal_outcome === 'outcome_unknown' ? 'Publishing outcome requires reconciliation' : null,
+      failure: outcome.failure,
       readyX3ScheduleEdit: row.schedule_edit_id ? {
         id: row.schedule_edit_id,
         state: row.schedule_edit_state!,
@@ -2943,7 +2948,11 @@ export async function readRednotePublishingOperational(workspaceId: string) {
       active: count((row) => row.active === true),
       awaitingIdentity: count((row) => row.receipt_lookup_state === 'identity_pending'),
       awaitingVerification: count((row) => ['submitted', 'scheduled', 'verification_pending', 'verified'].includes(row.status)),
-      failed: count((row) => row.terminal_outcome === 'known_failed' || row.terminal_outcome === 'outcome_unknown'),
+      failed: count((row) => rednoteDispatchOutcome({
+        status: row.status,
+        terminalOutcome: row.terminal_outcome,
+        receiptLookupState: row.receipt_lookup_state,
+      }).failed),
       published: count((row) => Boolean(row.rednote_note_id)),
     },
     queue,
