@@ -8,11 +8,15 @@ export function rednoteDispatchOutcome(input: {
   const failed = input.terminalOutcome === 'known_failed' ||
     (input.status === 'failed' && input.terminalOutcome === null);
   return {
-    state: providerAccepted && input.status === 'scheduled'
-      ? 'scheduled'
-      : input.receiptLookupState === 'identity_pending'
+    state: failed
+      ? 'failed'
+      : input.terminalOutcome === 'outcome_unknown'
         ? 'identity_pending'
-        : input.status,
+        : providerAccepted && input.status === 'scheduled'
+          ? 'scheduled'
+          : input.receiptLookupState === 'identity_pending'
+            ? 'identity_pending'
+            : input.status,
     providerAccepted,
     failed,
     failure: failed ? 'Publishing attempt failed' : null,

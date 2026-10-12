@@ -34,4 +34,16 @@ describe('canonical Dispatch outcome projection', () => {
       status: 'failed', terminalOutcome: 'outcome_unknown', receiptLookupState: 'identity_pending',
     }).failed).toBe(false);
   });
+  it('projects a legacy unknown failure as unconfirmed without lookup metadata', () => {
+    expect(rednoteDispatchOutcome({
+      status: 'failed', terminalOutcome: 'outcome_unknown', receiptLookupState: null,
+    }).state).toBe('identity_pending');
+  });
+  it('does not hide a known negative outcome behind pending lookup metadata', () => {
+    const projected = rednoteDispatchOutcome({
+      status: 'failed', terminalOutcome: 'known_failed', receiptLookupState: 'identity_pending',
+    });
+    expect(projected.state).toBe('failed');
+    expect(projected.failed).toBe(true);
+  });
 });
