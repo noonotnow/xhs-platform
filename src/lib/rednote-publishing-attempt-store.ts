@@ -474,7 +474,10 @@ export async function createRednotePublishAttempt(input: {
         const rejection = await client.query<{ eligible: boolean }>(
           `SELECT (
              job.error_code='STAGED_FORM_CHANGED'
-             AND job.error_message='Creator is no longer showing the staged publish form'
+             AND job.error_message IN (
+               'Creator is no longer showing the staged publish form',
+               'Creator form no longer matches the staged title, caption, and tags'
+             )
              AND job.receipt_contract_version='rednote-worker-result/v2'
              AND job.receipt_outcome='rejected'
            ) OR EXISTS (
