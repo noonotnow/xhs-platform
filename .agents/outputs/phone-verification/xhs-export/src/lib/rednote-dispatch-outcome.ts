@@ -18,6 +18,8 @@ export function rednoteDispatchOutcome(input: {
       ? 'failed'
       : input.terminalOutcome === 'outcome_unknown' && !recoveredSchedule
         ? 'identity_pending'
+        : recoveredSchedule && input.status === 'verification_pending'
+          ? 'scheduled'
         : providerAccepted && input.status === 'scheduled'
           ? 'scheduled'
           : input.receiptLookupState === 'identity_pending'

@@ -8,7 +8,7 @@ describe('canonical Dispatch outcome projection', () => {
       receiptLookupState: 'found', receiptOutcome: 'scheduled',
       receiptAcknowledgedAt: '2026-10-12T21:19:13.916Z',
     })).toEqual({
-      state: 'verification_pending', providerAccepted: true, failed: false, failure: null,
+      state: 'scheduled', providerAccepted: true, failed: false, failure: null,
     });
   });
   it('requires both a bound identity and a real acceptance timestamp for recovery', () => {
