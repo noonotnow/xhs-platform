@@ -77,8 +77,16 @@ export async function POST(request: NextRequest) {
       );
     }
     const result = await queueLocalPublishJob(body, idempotencyKey, workspaceId);
+    // Command acknowledgements use the same persisted state as the operational
+    // read projection. A successful/replayed write is not a publication receipt.
+    const attempt = result.attempt ? {
+      ...result.attempt,
+      state: result.attempt.receiptLookupState === 'identity_pending'
+        ? 'identity_pending'
+        : result.job.status,
+    } : result.attempt;
     return NextResponse.json(
-      { job: result.job, attempt: result.attempt },
+      { job: result.job, attempt, replayed: !result.created },
       { status: result.created ? 201 : 200, headers: NO_STORE_HEADERS },
     );
   } catch (error) {

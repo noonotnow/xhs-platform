@@ -596,6 +596,51 @@ export async function queueLocalPublishJob(
         409,
       );
     }
+    if (hasReadyX3Consent && existing.status === 'failed' &&
+        existing.errorCode === 'STAGED_FORM_CHANGED' &&
+        existingAttempt.terminalOutcome === 'known_failed') {
+      // Retry only an explicit request for the still-current approved packet.
+      // Account health is not source freshness; re-read CREATE before reopening
+      // the original operation, and never manufacture a newer source revision.
+      const sourcePost = await dependencies.getPost(input.notionPageId);
+      if (sourcePost.status !== 'Ready' || sourcePost.publishPacketReady !== true ||
+          sourcePost.needsMedia !== false || sourcePost.needsCaption !== false) {
+        throw new LocalPublishJobError(
+          'The source needs review before retrying its rejected operation.',
+          'READY_X3_FORM_RECOVERY_UNSAFE', 409,
+        );
+      }
+      const fresh = buildLocalPublishSnapshot(sourcePost, input);
+      const accountId = process.env.REDNOTE_EXPECTED_ACCOUNT_ID?.trim();
+      const samePacket = accountId && accountId === existing.snapshot.expectedAccountId &&
+        fresh.notionLastEditedTime === existing.snapshot.notionLastEditedTime &&
+        fresh.title === existing.snapshot.title &&
+        fresh.caption === existing.snapshot.caption &&
+        isDeepStrictEqual(fresh.tags, existing.snapshot.tags) &&
+        fresh.mediaType === existing.snapshot.mediaType &&
+        fresh.mediaUrl === existing.snapshot.mediaUrl &&
+        isDeepStrictEqual(fresh.media, existing.snapshot.media) &&
+        (fresh.thumbnailUrl ?? null) === (existing.snapshot.thumbnailUrl ?? null) &&
+        Date.parse(fresh.publishAt ?? '') === Date.parse(existing.snapshot.publishAt ?? '');
+      if (!samePacket) {
+        throw new LocalPublishJobError(
+          'The current source or destination no longer matches the approved packet.',
+          'READY_X3_FORM_RECOVERY_UNSAFE', 409,
+        );
+      }
+      const repaired = await createLinkedRednotePublishAttempt(
+        existing.snapshot, idempotencyKey, workspaceId, existing.id,
+        input.mode === 'publish' ? 'post_now' : 'schedule',
+        createRednotePublishAttempt,
+      );
+      const current = await dependencies.findByIdempotencyKey(idempotencyKey, workspaceId);
+      if (!current) {
+        throw new LocalPublishJobError(
+          'Recovered operation could not be read back.', 'RECOVERY_READBACK_FAILED', 503,
+        );
+      }
+      return { job: jobSummary(current), attempt: repaired.attempt, created: false };
+    }
     return {
       job: jobSummary(existing),
       attempt: existingAttempt,

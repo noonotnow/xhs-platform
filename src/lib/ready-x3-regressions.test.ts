@@ -28,7 +28,7 @@ import {
   queueLocalPublishJob,
   submitLocalPublishJobResult,
 } from '@/lib/local-publish-jobs';
-import { LocalPublishJobError } from '@/lib/local-publish-job-input';
+import { LocalPublishJobError, buildLocalPublishSnapshot } from '@/lib/local-publish-job-input';
 import type { ReadyXhsPost } from '@/types/ready-post';
 
 const pageId = '11111111-1111-4111-8111-111111111111';
@@ -46,7 +46,7 @@ const post: ReadyXhsPost = {
   automationBlockers: [], manualWarnings: [], publishBlockers: [],
 };
 const body = {
-  notionPageId: pageId, lastEditedTime: post.lastEditedTime, confirmed: true, title: 'Title',
+  notionPageId: pageId, lastEditedTime: post.lastEditedTime, confirmed: true as const, title: 'Title',
   caption: 'Caption', tags: ['Tag'], media: { type: 'video' as const, index: 0 }, consent: 'ready_x3' as const,
 };
 const stored = {
@@ -64,6 +64,71 @@ describe('Ready x3 queue regression contract', () => {
     vi.clearAllMocks();
     vi.stubEnv('REDNOTE_EXPECTED_ACCOUNT_ID', 'creator-account-1');
   });
+
+  it('replays a rejected form against fresh source data and reads back the same queued operation', async () => {
+    const failed = {
+      ...stored, status: 'failed' as const, errorCode: 'STAGED_FORM_CHANGED',
+      snapshot: {
+        ...buildLocalPublishSnapshot(post, { ...body, compatibilityTrialConfirmed: false }),
+        automationConsent: 'ready_x3' as const,
+        expectedAccountId: 'creator-account-1',
+      },
+    };
+    attempt.get.mockResolvedValueOnce({
+      id: 'failed-attempt', terminalOutcome: 'known_failed',
+      readyX3Authorization: { kind: 'ready_x3', action: 'schedule' },
+    });
+    attempt.create.mockResolvedValueOnce({ attempt: { id: 'replacement-attempt' }, created: false });
+    const dependencies = {
+      getPost: vi.fn().mockResolvedValue(post),
+      findByIdempotencyKey: vi.fn().mockResolvedValueOnce(failed)
+        .mockResolvedValueOnce({ ...failed, status: 'queued', errorCode: undefined }),
+      insert: vi.fn(),
+    };
+    await expect(queueLocalPublishJob(body, key, 'workspace-1', dependencies))
+      .resolves.toMatchObject({
+        job: { id: stored.id, status: 'queued' }, attempt: { id: 'replacement-attempt' }, created: false,
+      });
+    expect(dependencies.getPost).toHaveBeenCalledWith(pageId);
+    expect(dependencies.insert).not.toHaveBeenCalled();
+    expect(attempt.create).toHaveBeenCalledWith(expect.objectContaining({
+      readyX3: true, approve: true,
+      payload: expect.objectContaining({ sourceLocalPublishJobId: stored.id }),
+    }));
+  });
+
+  it.each(['slot', 'cover', 'readiness', 'account'])(
+    'blocks rejected-form replay when current %s differs', async field => {
+      const failed = {
+        ...stored, status: 'failed' as const, errorCode: 'STAGED_FORM_CHANGED',
+        snapshot: {
+          ...buildLocalPublishSnapshot(post, { ...body, compatibilityTrialConfirmed: false }),
+          automationConsent: 'ready_x3' as const,
+          expectedAccountId: 'creator-account-1',
+        },
+      };
+      const current = {
+        ...post,
+        ...(field === 'slot' ? { publishAt: '2099-08-04T14:30:00.000Z' } : {}),
+        ...(field === 'cover' ? { thumbnailUrl: 'https://images.xhs.justlikekatie.com/other.jpg' } : {}),
+        ...(field === 'readiness' ? { publishPacketReady: false } : {}),
+      };
+      if (field === 'account') vi.stubEnv('REDNOTE_EXPECTED_ACCOUNT_ID', 'other-account');
+      attempt.get.mockResolvedValueOnce({
+        id: 'failed-attempt', terminalOutcome: 'known_failed',
+        readyX3Authorization: { kind: 'ready_x3', action: 'schedule' },
+      });
+      const dependencies = {
+        getPost: vi.fn().mockResolvedValue(current),
+        findByIdempotencyKey: vi.fn().mockResolvedValue(failed),
+        insert: vi.fn(),
+      };
+      await expect(queueLocalPublishJob(body, key, 'workspace-1', dependencies))
+        .rejects.toMatchObject({ code: 'READY_X3_FORM_RECOVERY_UNSAFE' });
+      expect(attempt.create).not.toHaveBeenCalled();
+      expect(dependencies.insert).not.toHaveBeenCalled();
+    },
+  );
 
   it('requires an exact future Ready x3 schedule before it writes work', async () => {
     const dependencies = {
@@ -160,6 +225,7 @@ describe('Ready x3 queue regression contract', () => {
   it('preserves optional identity evidence and enters verification on schedule mismatch', async () => {
     attempt.get.mockResolvedValue({
       payload: {
+        timingMode: 'scheduled',
         expectedAccountId: stored.snapshot.expectedAccountId,
         targetPublishAt: future,
       },
@@ -199,6 +265,7 @@ describe('Ready x3 queue regression contract', () => {
         completeReconciliation: vi.fn(),
         backfill: vi.fn(),
         recordScheduledAcknowledgement,
+        recordLateTerminal: vi.fn().mockResolvedValue(null),
       },
     )).resolves.toMatchObject({
       status: 'verification_pending',
