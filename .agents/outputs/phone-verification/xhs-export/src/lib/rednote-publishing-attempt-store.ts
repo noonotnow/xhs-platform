@@ -104,6 +104,7 @@ function publicAttempt(row: AttemptRow) {
     requestedAt: iso(row.requested_at),
     createdAt: iso(row.created_at),
     approvedAt: iso(row.approved_at),
+    dispatchAuthorizedAt: iso(row.dispatch_authorized_at),
     terminalOutcome: row.terminal_outcome,
     terminalAt: iso(row.terminal_at),
     receiptLookupState: row.receipt_lookup_state,
