@@ -5,12 +5,12 @@ export const NATIVE_RECEIPT_RECOVERY = 'native-schedule-recovery/v1' as const;
 
 /** Observation only: this claim never grants permission to stage or submit. */
 export function nativeReceiptLookupClaim<T extends {
-  status: string; noteId?: string; receiptOutcome?: string;
+  status: string; noteId?: string; receiptOutcome?: string; dispatchAuthorizedAt?: string;
 }>(job: T, attempt: {
   active: boolean; terminalOutcome: string | null;
   dispatchAuthorizedAt: string | null;
 }) {
-  const { receiptOutcome: _receiptOutcome, ...observationClaim } = job;
+  const { receiptOutcome: _receiptOutcome, dispatchAuthorizedAt: _dispatchAuthority, ...observationClaim } = job;
   if (job.status !== 'verification_pending' || job.noteId ||
       job.receiptOutcome !== 'ambiguous' || attempt.active ||
       !['accepted', 'outcome_unknown'].includes(attempt.terminalOutcome || '') ||

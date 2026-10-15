@@ -35,6 +35,15 @@ describe('read-only native receipt recovery', () => {
       expect(nativeReceiptLookupClaim(job,{...attempt,...changed}).status).toBe(job.status);
     }
   });
+  it('does not expose dispatch authorization or internal routing metadata on observation claims', () => {
+    const result = nativeReceiptLookupClaim({
+      status:'verification_pending',receiptOutcome:'ambiguous',
+      dispatchAuthorizedAt:attempt.dispatchAuthorizedAt!,
+    },attempt);
+    expect(result).toMatchObject({status:'identity_pending',receiptLookup:{attemptedAt:attempt.dispatchAuthorizedAt}});
+    expect(result).not.toHaveProperty('dispatchAuthorizedAt');
+    expect(result).not.toHaveProperty('receiptOutcome');
+  });
   it('requires exact frozen slot, owned account, copy and fresh observations', () => {
     expect(() => assertNativeRecoveryBinding(snapshot,frozen,receipt,now)).not.toThrow();
     for (const changed of [{scheduledFor:new Date(now).toISOString()},
