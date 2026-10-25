@@ -21,7 +21,7 @@ import {
 } from '@/lib/rednote-publishing-contract-v1';
 import { readLocalPublishWorkerHeartbeat } from '@/lib/local-publish-worker-heartbeat';
 import { CLAIM_LEASE_EXPIRED_MESSAGE } from '@/lib/local-publish-job-store';
-import { rednoteDispatchOutcome } from '@/lib/rednote-dispatch-outcome';
+import { rednoteDispatchOutcome, rednotePublicReceiptVerified } from '@/lib/rednote-dispatch-outcome';
 
 interface AttemptRow extends QueryResultRow {
   id: string;
@@ -104,6 +104,7 @@ function publicAttempt(row: AttemptRow) {
     requestedAt: iso(row.requested_at),
     createdAt: iso(row.created_at),
     approvedAt: iso(row.approved_at),
+    dispatchAuthorizedAt: iso(row.dispatch_authorized_at),
     terminalOutcome: row.terminal_outcome,
     terminalAt: iso(row.terminal_at),
     receiptLookupState: row.receipt_lookup_state,
@@ -474,11 +475,15 @@ export async function createRednotePublishAttempt(input: {
           old.terminal_outcome === 'known_failed') {
         const rejection = await client.query<{ eligible: boolean }>(
           `SELECT (
-             job.error_code='STAGED_FORM_CHANGED'
-             AND job.error_message IN (
+             ((job.error_code='STAGED_FORM_CHANGED'
+              AND job.error_message IN (
                'Creator is no longer showing the staged publish form',
                'Creator form no longer matches the staged title, caption, and tags'
-             )
+              )) OR (
+                job.error_code='NOT_LOGGED_IN'
+                AND job.staged_at IS NULL AND job.dispatch_authorized_at IS NULL
+                AND job.dispatched_at IS NULL
+              ))
              AND job.receipt_contract_version='rednote-worker-result/v2'
              AND job.receipt_outcome='rejected'
            ) OR EXISTS (
@@ -2784,6 +2789,9 @@ export async function readRednotePublishingOperational(workspaceId: string) {
     active: boolean | null; payload_revision: string | null;
     terminal_outcome: string | null; receipt_lookup_state: string | null;
     terminal_at: Date | string | null; rednote_note_id: string | null;
+     error_code: string | null;
+    receipt_outcome: string | null; receipt_acknowledged_at: Date | string | null;
+    public_index_status: string | null; job_verified_at: Date | string | null;
      rednote_url: string | null; captured_at: Date | string | null; event_count: string;
      authorization_kind: string | null; approved_at: Date | string | null;
      claim_expires_at: Date | string | null; dispatch_authorized_at: Date | string | null;
@@ -2797,6 +2805,8 @@ export async function readRednotePublishingOperational(workspaceId: string) {
      schedule_edit_retargeted_local_publish_job_id: string | null;
   }>(
     `SELECT job.id,job.notion_page_id,job.snapshot,job.status,job.updated_at,
+       job.receipt_outcome,job.receipt_acknowledged_at,job.public_index_status,job.error_code,
+      job.verified_at AS job_verified_at,
       job.created_at AS job_created_at,
       attempt.id AS attempt_id,attempt.active,attempt.payload_revision,
       attempt.created_at AS attempt_created_at,
@@ -2868,16 +2878,26 @@ export async function readRednotePublishingOperational(workspaceId: string) {
       status: row.status,
       terminalOutcome: row.terminal_outcome,
       receiptLookupState: row.receipt_lookup_state,
+      receiptOutcome: row.receipt_outcome,
+      receiptAcknowledgedAt: iso(row.receipt_acknowledged_at),
+      errorCode: row.error_code,
+      failureAt: iso(row.terminal_at),
+    });
+    const publiclyVerified = rednotePublicReceiptVerified({
+      status: row.status, publicIndexStatus: row.public_index_status,
+      canonicalUrl: row.rednote_url, verifiedAt: iso(row.job_verified_at),
     });
     const receipt = row.attempt_id ? {
       state: row.receipt_lookup_state ?? 'pending',
       attemptId: row.attempt_id,
       action: row.receipt_lookup_state === 'identity_pending' ? 'Backfill receipt' : null,
-      acceptedAt: outcome.providerAccepted ? iso(row.terminal_at) : null,
+      acceptedAt: outcome.providerAccepted
+        ? iso(row.receipt_acknowledged_at ?? row.terminal_at) : null,
       noteId: row.rednote_note_id,
       canonicalUrl: row.rednote_url,
-      verifiedAt: iso(row.captured_at),
-      reconciliationState: row.rednote_note_id ? 'verified' : null,
+      verifiedAt: publiclyVerified ? iso(row.job_verified_at) : null,
+      reconciliationState: publiclyVerified ? 'verified'
+        : row.rednote_note_id ? 'receipt_pending' : null,
     } : null;
     return {
       id: row.id,
@@ -2953,7 +2973,10 @@ export async function readRednotePublishingOperational(workspaceId: string) {
         terminalOutcome: row.terminal_outcome,
         receiptLookupState: row.receipt_lookup_state,
       }).failed),
-      published: count((row) => Boolean(row.rednote_note_id)),
+      published: count((row) => rednotePublicReceiptVerified({
+        status: row.status, publicIndexStatus: row.public_index_status,
+        canonicalUrl: row.rednote_url, verifiedAt: iso(row.job_verified_at),
+      })),
     },
     queue,
     attempts,

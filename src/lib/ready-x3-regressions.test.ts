@@ -65,9 +65,9 @@ describe('Ready x3 queue regression contract', () => {
     vi.stubEnv('REDNOTE_EXPECTED_ACCOUNT_ID', 'creator-account-1');
   });
 
-  it('replays a rejected form against fresh source data and reads back the same queued operation', async () => {
+  it.each(['STAGED_FORM_CHANGED', 'NOT_LOGGED_IN'])('replays %s against fresh source data and reads back the same queued operation', async errorCode => {
     const failed = {
-      ...stored, status: 'failed' as const, errorCode: 'STAGED_FORM_CHANGED',
+      ...stored, status: 'failed' as const, errorCode,
       snapshot: {
         ...buildLocalPublishSnapshot(post, { ...body, compatibilityTrialConfirmed: false }),
         automationConsent: 'ready_x3' as const,
@@ -97,10 +97,34 @@ describe('Ready x3 queue regression contract', () => {
     }));
   });
 
+  it('never reopens an unknown provider outcome even when its error looks like a login failure', async () => {
+    const failed = {
+      ...stored, status: 'failed' as const, errorCode: 'NOT_LOGGED_IN',
+      snapshot: {
+        ...buildLocalPublishSnapshot(post, { ...body, compatibilityTrialConfirmed: false }),
+        automationConsent: 'ready_x3' as const,
+        expectedAccountId: 'creator-account-1',
+      },
+    };
+    attempt.get.mockResolvedValueOnce({
+      id: 'unknown-attempt', terminalOutcome: 'outcome_unknown',
+      readyX3Authorization: { kind: 'ready_x3', action: 'schedule' },
+    });
+    const dependencies = {
+      getPost: vi.fn().mockResolvedValue(post),
+      findByIdempotencyKey: vi.fn().mockResolvedValue(failed),
+      insert: vi.fn(),
+    };
+    await expect(queueLocalPublishJob(body, key, 'workspace-1', dependencies))
+      .resolves.toMatchObject({ job: { id: stored.id, status: 'failed' }, created: false });
+    expect(attempt.create).not.toHaveBeenCalled();
+    expect(dependencies.insert).not.toHaveBeenCalled();
+  });
+
   it.each(['slot', 'cover', 'readiness', 'account'])(
     'blocks rejected-form replay when current %s differs', async field => {
       const failed = {
-        ...stored, status: 'failed' as const, errorCode: 'STAGED_FORM_CHANGED',
+        ...stored, status: 'failed' as const, errorCode: 'NOT_LOGGED_IN',
         snapshot: {
           ...buildLocalPublishSnapshot(post, { ...body, compatibilityTrialConfirmed: false }),
           automationConsent: 'ready_x3' as const,

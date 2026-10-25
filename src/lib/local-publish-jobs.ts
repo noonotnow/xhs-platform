@@ -33,6 +33,8 @@ import {
   heartbeatStoredLocalPublishJob,
 } from '@/lib/local-publish-job-store';
 import { dispatchActivationNonceDigest } from '@/lib/local-publish-dispatch-activation';
+import { nativeReceiptLookupClaim, NATIVE_RECEIPT_RECOVERY } from './native-receipt-recovery';
+import { recoverStoredNativeSchedule, deferStoredNativeReceiptLookup } from './local-publish-job-store';
 import {
   type ExactJobActivationSelectors,
   validateExactJobActivationSelectors,
@@ -182,6 +184,7 @@ function assertExactKeys(value: Record<string, unknown>, expected: string[]) {
 }
 
 export type LocalPublishWorkerResult =
+  | { status: 'identity_pending'; code: string; message: string }
   | {
       contractVersion: 'rednote-worker-result/v2';
       outcome: 'acknowledged';
@@ -194,6 +197,7 @@ export type LocalPublishWorkerResult =
   | {
       contractVersion: 'rednote-worker-result/v2';
       outcome: 'scheduled';
+      reconciliation?: typeof NATIVE_RECEIPT_RECOVERY;
       acknowledgedAt: string;
       scheduledFor: string;
       authenticatedAccount: AuthenticatedAccountEvidence;
@@ -220,7 +224,9 @@ export type LocalPublishWorkerResult =
       code: string;
       message: string;
     }
-  | { status: 'verified'; noteId: string; shareUrl: string }
+  | { status: 'verified'; noteId: string; shareUrl: string;
+      publicReceipt?: { contractVersion: 'rednote-public-receipt/v1'; noteId: string;
+        canonicalUrl: string; capturedAt: string; source: 'anonymous_public_page' } }
   | { status: 'failed'; code: string; message: string };
 
 function cleanCode(value: unknown) {
@@ -404,6 +410,12 @@ export function parseLocalPublishWorkerResult(value: unknown): LocalPublishWorke
         'scheduledFor',
       ];
       if (body.noteId !== undefined) expected.push('noteId');
+      if (body.reconciliation !== undefined) {
+        if (body.reconciliation !== NATIVE_RECEIPT_RECOVERY) {
+          throw new LocalPublishJobError('Unsupported receipt recovery contract', 'VALIDATION_ERROR', 400);
+        }
+        expected.push('reconciliation');
+      }
       assertExactKeys(body, expected.sort());
       const noteId = body.noteId === undefined
         ? undefined
@@ -426,6 +438,7 @@ export function parseLocalPublishWorkerResult(value: unknown): LocalPublishWorke
       return {
         contractVersion: 'rednote-worker-result/v2',
         outcome: 'scheduled',
+        ...(body.reconciliation ? { reconciliation: NATIVE_RECEIPT_RECOVERY } : {}),
         acknowledgedAt: cleanTimestamp(body.acknowledgedAt, 'acknowledgedAt'),
         scheduledFor: cleanTimestamp(body.scheduledFor, 'scheduledFor'),
         authenticatedAccount: account,
@@ -451,6 +464,10 @@ export function parseLocalPublishWorkerResult(value: unknown): LocalPublishWorke
   if (body.status === 'staged') {
     assertExactKeys(body, ['status']);
     return { status: 'staged' };
+  }
+  if (body.status === 'identity_pending') {
+    assertExactKeys(body, ['code', 'message', 'status']);
+    return { status: 'identity_pending', code: cleanCode(body.code), message: cleanFailureMessage(body.message) };
   }
   if (
     body.status === 'submitted' ||
@@ -484,8 +501,29 @@ export function parseLocalPublishWorkerResult(value: unknown): LocalPublishWorke
     body.status === 'verified' ||
     body.status === 'succeeded'
   ) {
-    assertExactKeys(body, ['noteId', 'shareUrl', 'status']);
-    return { status: 'verified', ...publicationIdentifiers(body) };
+    const identifiers = publicationIdentifiers(body);
+    const keys = ['noteId', 'shareUrl', 'status'];
+    let publicReceipt: Extract<LocalPublishWorkerResult, {status: 'verified'}>['publicReceipt'];
+    if (body.publicReceipt !== undefined) {
+      keys.push('publicReceipt');
+      const proof = body.publicReceipt as Record<string, unknown>;
+      if (!proof || typeof proof !== 'object' || Array.isArray(proof)) {
+        throw new LocalPublishJobError('Public receipt is invalid', 'PUBLIC_RECEIPT_REQUIRED', 400);
+      }
+      assertExactKeys(proof, ['canonicalUrl', 'capturedAt', 'contractVersion', 'noteId', 'source']);
+      if (proof.contractVersion !== 'rednote-public-receipt/v1' ||
+          proof.source !== 'anonymous_public_page' ||
+          proof.noteId !== identifiers.noteId || proof.canonicalUrl !== identifiers.shareUrl) {
+        throw new LocalPublishJobError('Public receipt identity is invalid', 'PUBLIC_RECEIPT_REQUIRED', 400);
+      }
+      publicReceipt = {
+        contractVersion: 'rednote-public-receipt/v1', source: 'anonymous_public_page',
+        noteId: identifiers.noteId, canonicalUrl: identifiers.shareUrl,
+        capturedAt: cleanTimestamp(proof.capturedAt, 'capturedAt'),
+      };
+    }
+    assertExactKeys(body, keys.sort());
+    return { status: 'verified', ...identifiers, ...(publicReceipt ? {publicReceipt} : {}) };
   }
   if (body.status === 'failed') {
     assertExactKeys(body, ['code', 'message', 'status']);
@@ -597,7 +635,7 @@ export async function queueLocalPublishJob(
       );
     }
     if (hasReadyX3Consent && existing.status === 'failed' &&
-        existing.errorCode === 'STAGED_FORM_CHANGED' &&
+        ['STAGED_FORM_CHANGED', 'NOT_LOGGED_IN'].includes(existing.errorCode ?? '') &&
         existingAttempt.terminalOutcome === 'known_failed') {
       // Retry only an explicit request for the still-current approved packet.
       // Account health is not source freshness; re-read CREATE before reopening
@@ -821,6 +859,9 @@ export async function claimNextLocalPublishJob(
     }
     if (!job) return job;
     const linked = await getLinkedRednotePublishAttempt(workspaceId, job.id);
+    if (job.status !== 'claimed' && job.status !== 'staged') {
+      return nativeReceiptLookupClaim(job, linked);
+    }
     const readyX3Authorization = readyX3AuthorizationFor(job, linked);
     if (readyX3Authorization) {
       const current = await assertReadyX3SourceCurrent(
@@ -1128,7 +1169,13 @@ export async function submitLocalPublishJobResult(
     : workspaceOrDependencies;
   const durableAttempt = typeof workspaceOrDependencies === 'string';
   const result = parseLocalPublishWorkerResult(rawResult);
+  if ('status' in result && result.status === 'identity_pending') {
+    return jobSummary(await deferStoredNativeReceiptLookup(id, claimToken, result.code, result.message, workspaceId));
+  }
   if ('contractVersion' in result) {
+    if (result.outcome === 'scheduled' && result.reconciliation === NATIVE_RECEIPT_RECOVERY) {
+      return jobSummary(await recoverStoredNativeSchedule(id, claimToken, result, workspaceId));
+    }
     if (
       durableAttempt
       && result.outcome !== 'acknowledged'
@@ -1437,6 +1484,12 @@ export async function submitLocalPublishJobResult(
     { status: 'submitted' | 'verified' }
   >;
   const receiptTime = new Date().toISOString();
+  if (durableAttempt && !publicationResult.publicReceipt) {
+    throw new LocalPublishJobError(
+      'An independent anonymous public-page receipt is required; Creator visibility alone is not publication',
+      'PUBLIC_RECEIPT_REQUIRED', 409,
+    );
+  }
   if (durableAttempt) await recordLinkedAttemptOutcome({
     workspaceId,
     localJobId: id,
@@ -1446,7 +1499,7 @@ export async function submitLocalPublishJobResult(
       rednoteNoteId: publicationResult.noteId,
       rednoteUrl: publicationResult.shareUrl,
       platformPublishTime: receiptTime,
-      provenance: { kind: 'verified_local_worker_result' },
+      provenance: { kind: 'verified_local_worker_result', publicReceipt: publicationResult.publicReceipt },
     },
   });
   const prepared = await dependencies.prepareVerification(
