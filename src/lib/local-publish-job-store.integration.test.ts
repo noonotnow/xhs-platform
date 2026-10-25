@@ -291,7 +291,8 @@ describe('local publish job PostgreSQL execution', () => {
         public_index_status text,
         public_index_checked_at timestamptz,
         provider_restriction_status text,
-        provider_restriction_reported_at timestamptz
+        provider_restriction_reported_at timestamptz,
+        ready_x3_schedule_edit_hold_id uuid
       );
       CREATE TABLE local_publish_dispatch_activations (
         state text NOT NULL
@@ -348,6 +349,7 @@ describe('local publish job PostgreSQL execution', () => {
         claim_expires_at timestamptz,
         target_publish_at timestamptz,
         authorization_kind text,
+        ready_x3_schedule_edit_hold_id uuid,
         frozen_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
         created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
       );

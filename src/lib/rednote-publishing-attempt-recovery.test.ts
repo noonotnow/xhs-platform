@@ -1268,6 +1268,9 @@ describe('Ready x3 source serialization', () => {
     const lockCalls = mocks.query.mock.calls.filter(([statement]) =>
       String(statement).includes('pg_advisory_xact_lock'));
     expect(lockCalls).toHaveLength(1);
+    expect(mocks.query.mock.calls.filter(([statement]) => statement === 'BEGIN')).toHaveLength(1);
+    expect(mocks.query.mock.calls.filter(([statement]) => statement === 'COMMIT')).toHaveLength(1);
+    expect(mocks.release).toHaveBeenCalledTimes(1);
   });
 
   it('supersedes the same frozen packet across schedule and Post now actions', async () => {

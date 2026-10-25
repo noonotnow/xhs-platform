@@ -89,6 +89,7 @@ const migrations = [
   '036_allow_stable_browser_closed_pre_publish.sql',
   '037_on_demand_publish_batches.sql',
   '038_exact_job_dispatch_activations.sql',
+  '039_ready_x3_schedule_edit_operations.sql',
 ] as const;
 
 const workspaceId = 'activation-integration';

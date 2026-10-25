@@ -24,6 +24,7 @@ export const REDNOTE_SCHEMA_MIGRATIONS = [
   '036',
   '037',
   '038',
+  '039',
 ] as const;
 export type RednoteSchemaMigration = (typeof REDNOTE_SCHEMA_MIGRATIONS)[number];
 export type RednoteSchemaReadiness = Record<RednoteSchemaMigration, boolean>;
@@ -94,6 +95,7 @@ const migrationFiles: Record<RednoteSchemaMigration, readonly string[]> = {
   '036': ['036_allow_stable_browser_closed_pre_publish.sql'],
   '037': ['037_on_demand_publish_batches.sql'],
   '038': ['038_exact_job_dispatch_activations.sql'],
+  '039': ['039_ready_x3_schedule_edit_operations.sql'],
 };
 
 const READINESS_SQL = `
@@ -281,7 +283,33 @@ const READINESS_SQL = `
       ('038', 'trigger', 'rednote_publish_attempts',
         'rednote_publish_attempt_insert_activation_hold'),
       ('038', 'trigger', 'rednote_publish_attempts',
-        'rednote_publish_attempt_status_activation_hold')
+        'rednote_publish_attempt_status_activation_hold'),
+      ('039', 'table', NULL, 'ready_x3_schedule_edit_operations'),
+      ('039', 'table', NULL, 'ready_x3_schedule_edit_operation_events'),
+      ('039', 'column', 'ready_x3_schedule_edit_operations', 'source_revision_before'),
+      ('039', 'column', 'ready_x3_schedule_edit_operations', 'packet_identity'),
+      ('039', 'column', 'ready_x3_schedule_edit_operations', 'operation_kind'),
+      ('039', 'column', 'ready_x3_schedule_edit_operations', 'state'),
+      ('039', 'column', 'ready_x3_schedule_edit_operations', 'parent_attempt_id'),
+      ('039', 'column', 'ready_x3_schedule_edit_operation_events', 'operation_id'),
+      ('039', 'column', 'ready_x3_schedule_edit_operation_events', 'event_type'),
+      ('039', 'column', 'local_publish_jobs', 'ready_x3_schedule_edit_hold_id'),
+      ('039', 'column', 'rednote_publish_attempts', 'ready_x3_schedule_edit_hold_id'),
+      ('039', 'index_definition', 'ready_x3_schedule_edit_operations',
+        'ready_x3_schedule_edit_one_pending_post_idx'),
+      ('039', 'routine', NULL, 'guard_ready_x3_schedule_edit_operation_update'),
+      ('039', 'routine', NULL, 'guard_ready_x3_schedule_edit_hold_pointer'),
+       ('039', 'routine', NULL, 'prevent_ready_x3_schedule_edit_event_mutation'),
+      ('039', 'trigger', 'ready_x3_schedule_edit_operations',
+        'ready_x3_schedule_edit_operation_immutable'),
+      ('039', 'trigger', 'ready_x3_schedule_edit_operation_events',
+        'ready_x3_schedule_edit_event_immutable'),
+       ('039', 'trigger', 'ready_x3_schedule_edit_operation_events',
+         'ready_x3_schedule_edit_event_truncate_guard'),
+      ('039', 'trigger', 'local_publish_jobs',
+        'local_publish_jobs_schedule_edit_hold_guard'),
+      ('039', 'trigger', 'rednote_publish_attempts',
+        'rednote_publish_attempts_schedule_edit_hold_guard')
   )
   SELECT
     migration,
@@ -397,6 +425,11 @@ const READINESS_SQL = `
                 AND indexdef LIKE '%((true))%'
                 AND indexdef LIKE '%''active''%'
                 AND indexdef LIKE '%''consumed''%'
+              )
+              OR (
+                object_name = 'ready_x3_schedule_edit_one_pending_post_idx'
+                AND indexdef LIKE '%(workspace_id, source_notion_page_id)%'
+                AND indexdef LIKE '%state = ''prepared''%'
               )
             )
         )

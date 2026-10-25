@@ -64,7 +64,6 @@ import {
   claimNextStoredLocalPublishJob,
 } from '@/lib/local-publish-job-store';
 import {
-  PublishJobRecoveryError,
   recoverStoredApprovedPublishJob,
   recoverStoredBrowserClosedPrePublishJob,
 } from '@/lib/rednote-publish-job-recovery-store';
@@ -80,6 +79,11 @@ import {
   readRednotePublishingOperational,
   requeueReadyX3NotLoggedInFailure,
 } from '@/lib/rednote-publishing-attempt-store';
+
+type ExpectedPublishJobRecoveryError = {
+  code: string;
+  status: number;
+};
 
 const MIGRATIONS = [
   '002_xhs_publish_receipts.sql',
@@ -121,6 +125,7 @@ const MIGRATIONS = [
   '036_allow_stable_browser_closed_pre_publish.sql',
   '037_on_demand_publish_batches.sql',
   '038_exact_job_dispatch_activations.sql',
+  '039_ready_x3_schedule_edit_operations.sql',
 ] as const;
 
 const EXACT_JOB_ID = 'c6203283-be7d-46ce-a38b-9a7f90eef75d';
@@ -949,7 +954,7 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
     )).rejects.toMatchObject({
       code: 'RECOVERY_PRECONDITION_FAILED',
       status: 409,
-    } satisfies Partial<PublishJobRecoveryError>);
+    } satisfies ExpectedPublishJobRecoveryError);
     expect(await readRecoveryMutationState(fixture.jobId)).toEqual(before);
   });
 
@@ -1014,7 +1019,7 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
       )).rejects.toMatchObject({
         code: 'RECOVERY_PRECONDITION_FAILED',
         status: 409,
-      } satisfies Partial<PublishJobRecoveryError>);
+      } satisfies ExpectedPublishJobRecoveryError);
       expect(await readRecoveryMutationState(fixture.jobId)).toEqual(before);
       await database.query(
         `UPDATE local_publish_jobs SET ${evidence.clear} WHERE id = $1`,
@@ -1039,7 +1044,7 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
     )).rejects.toMatchObject({
       code: 'RECOVERY_PRECONDITION_FAILED',
       status: 409,
-    } satisfies Partial<PublishJobRecoveryError>);
+    } satisfies ExpectedPublishJobRecoveryError);
     expect(await readRecoveryMutationState(fixture.jobId))
       .toEqual(beforePublicationEvidence);
   });
@@ -1505,7 +1510,7 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
     )).rejects.toMatchObject({
       code: 'RECOVERY_PRECONDITION_FAILED',
       status: 409,
-    } satisfies Partial<PublishJobRecoveryError>);
+    } satisfies ExpectedPublishJobRecoveryError);
     expect(await countRows(
       'rednote_publish_job_recoveries',
       'WHERE local_publish_job_id = $1',
@@ -1857,7 +1862,7 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
     )).rejects.toMatchObject({
       code: 'RECOVERY_PRECONDITION_FAILED',
       status: 409,
-    } satisfies Partial<PublishJobRecoveryError>);
+    } satisfies ExpectedPublishJobRecoveryError);
 
     const multiple = await insertRecoverableFixture();
     const secondAttemptId = crypto.randomUUID();
@@ -1888,7 +1893,7 @@ describe.sequential('exact publish-job recovery to claim invariant', () => {
     )).rejects.toMatchObject({
       code: 'RECOVERY_PRECONDITION_FAILED',
       status: 409,
-    } satisfies Partial<PublishJobRecoveryError>);
+    } satisfies ExpectedPublishJobRecoveryError);
 
     for (const fixture of [zero, multiple]) {
       expect(await countRows(

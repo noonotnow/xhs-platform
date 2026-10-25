@@ -11,7 +11,7 @@ import {
 
 describe('RedNote publishing schema migration gate', () => {
   it('normalizes an exact expected set into migration order', () => {
-    expect(parseExpectedMissing(['038', '037', '036', '035', '034', '033', '021', '018', '020', '018']))
+    expect(parseExpectedMissing(['039', '038', '037', '036', '035', '034', '033', '021', '018', '020', '018']))
       .toEqual([
       '018',
       '020',
@@ -22,11 +22,12 @@ describe('RedNote publishing schema migration gate', () => {
       '036',
       '037',
       '038',
+      '039',
     ]);
   });
 
   it('rejects migration names outside the controlled set', () => {
-    expect(() => parseExpectedMissing(['039'])).toThrow(
+    expect(() => parseExpectedMissing(['999'])).toThrow(
       'expectedMissing contains an unsupported migration',
     );
   });
@@ -54,7 +55,8 @@ describe('RedNote publishing schema migration gate', () => {
       '036': false,
       '037': false,
       '038': false,
-    })).toEqual(['019', '020', '023', '034', '035', '036', '037', '038']);
+      '039': false,
+    })).toEqual(['019', '020', '023', '034', '035', '036', '037', '038', '039']);
   });
 
   it('retains expected and actual state for a safe 409 response', () => {
