@@ -10,7 +10,9 @@ export function nativeReceiptLookupClaim<T extends {
   active: boolean; terminalOutcome: string | null;
   dispatchAuthorizedAt: string | null;
 }) {
-  const { receiptOutcome: _receiptOutcome, dispatchAuthorizedAt: _dispatchAuthority, ...observationClaim } = job;
+  const observationClaim = { ...job };
+  delete observationClaim.receiptOutcome;
+  delete observationClaim.dispatchAuthorizedAt;
   if (job.status !== 'verification_pending' || job.noteId ||
       job.receiptOutcome !== 'ambiguous' || attempt.active ||
       !['accepted', 'outcome_unknown'].includes(attempt.terminalOutcome || '') ||
