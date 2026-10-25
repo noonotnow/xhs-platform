@@ -1,3 +1,125 @@
+import { assertNativeRecoveryBinding } from './native-receipt-recovery';
+
+/** Atomic receipt recovery, never a dispatch/retry authorization. */
+export async function recoverStoredNativeSchedule(
+  id: string, claimToken: string,
+  receipt: {
+    noteId?: string; scheduledFor: string; acknowledgedAt: string;
+    authenticatedAccount: { accountId: string; capturedAt: string; ownership: string };
+  },
+  workspaceId: string,
+) {
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    await client.query("SET LOCAL lock_timeout='5s'");
+    const selected = await client.query<LocalPublishJobRow & {
+      attempt_id: string; frozen_payload: Record<string, unknown>;
+      terminal_outcome: string; active: boolean; payload_revision: string;
+      superseded_by_attempt_id: string | null; attempt_authorized_at: Date | null;
+      lease_live: boolean;
+    }>(
+      `SELECT job.*,job.claim_expires_at>CURRENT_TIMESTAMP AS lease_live,
+        attempt.id AS attempt_id,attempt.frozen_payload,
+        attempt.terminal_outcome,attempt.active,attempt.payload_revision,
+        attempt.superseded_by_attempt_id,attempt.dispatch_authorized_at AS attempt_authorized_at
+       FROM local_publish_jobs job JOIN rednote_publish_attempts attempt
+         ON attempt.workspace_id=job.workspace_id AND attempt.source_local_publish_job_id=job.id
+       WHERE job.id=$1::uuid AND job.workspace_id=$2 FOR UPDATE OF job,attempt`,
+      [id, workspaceId],
+    );
+    const row = selected.rows[0];
+    const reject = () => { throw new LocalPublishJobError(
+      'Receipt lookup lease or original operation is no longer eligible',
+      'NATIVE_RECEIPT_RECOVERY_STALE', 409,
+    ); };
+    if (selected.rows.length !== 1 || !row || row.claim_token !== claimToken ||
+        row.active || row.superseded_by_attempt_id || !row.attempt_authorized_at ||
+        !['accepted', 'outcome_unknown'].includes(row.terminal_outcome) ||
+        row.snapshot.notionLastEditedTime !== row.payload_revision) reject();
+    const existing = await client.query<{ rednote_note_id: string }>(
+      'SELECT rednote_note_id FROM rednote_publish_attempt_receipts WHERE attempt_id=$1::uuid',
+      [row.attempt_id],
+    );
+    // Lost response replay is a no-op even after the completed lease expires.
+    if (existing.rows[0]?.rednote_note_id === receipt.noteId &&
+        row.note_id === receipt.noteId && row.receipt_outcome === 'scheduled' &&
+        row.snapshot.expectedAccountId === receipt.authenticatedAccount.accountId &&
+        Date.parse(String(row.snapshot.publishAt)) === Date.parse(receipt.scheduledFor)) {
+      await client.query('COMMIT');
+      return mapRow(row);
+    }
+    if (row.status !== 'verification_pending' || row.note_id ||
+        row.receipt_outcome !== 'ambiguous' || existing.rows.length ||
+        !row.lease_live) reject();
+    assertNativeRecoveryBinding(row.snapshot as unknown as Record<string, unknown>, row.frozen_payload, receipt);
+    const provenance = JSON.stringify({
+      kind: 'native_schedule_receipt_recovery/v1',
+      scheduledFor: receipt.scheduledFor, observedAt: receipt.acknowledgedAt,
+      accountCapturedAt: receipt.authenticatedAccount.capturedAt,
+      approvedPacketVerified: true, publicationVerified: false,
+      legacyPlatformPublishTimeMeaning: 'schedule_acceptance_observation_not_publication',
+    });
+    await client.query(
+      `UPDATE rednote_publish_attempts SET receipt_lookup_state='found',
+       receipt_lookup_updated_at=CURRENT_TIMESTAMP WHERE id=$1::uuid`, [row.attempt_id],
+    );
+    await client.query(
+      `INSERT INTO rednote_publish_attempt_receipts(
+       attempt_id,rednote_note_id,rednote_url,platform_publish_time,provenance)
+       VALUES($1::uuid,$2,NULL,$3::timestamptz,$4::jsonb)`,
+      [row.attempt_id, receipt.noteId, receipt.acknowledgedAt, provenance],
+    );
+    const updated = await client.query<LocalPublishJobRow>(
+      `UPDATE local_publish_jobs SET status='scheduled',note_id=$3,
+       receipt_contract_version='rednote-worker-result/v2',receipt_outcome='scheduled',
+       receipt_acknowledged_at=$4::timestamptz,authenticated_account_id=$5,
+       authenticated_account_at=$6::timestamptz,public_index_status='pending',
+       next_verification_at=GREATEST(CURRENT_TIMESTAMP,$7::timestamptz)+INTERVAL '15 minutes',
+       verification_attempts=0,claim_expires_at=CURRENT_TIMESTAMP,
+       error_code=NULL,error_message=NULL,updated_at=CURRENT_TIMESTAMP
+       WHERE id=$1::uuid AND workspace_id=$2 RETURNING *`,
+      [id, workspaceId, receipt.noteId, receipt.acknowledgedAt,
+        receipt.authenticatedAccount.accountId, receipt.authenticatedAccount.capturedAt, receipt.scheduledFor],
+    );
+    await client.query(
+      `INSERT INTO rednote_publish_attempt_events(attempt_id,event_type,occurred_at,actor_type,actor_id,evidence)
+       VALUES($1::uuid,'receipt_lookup',CURRENT_TIMESTAMP,'worker','native-receipt-recovery',$2::jsonb)`,
+      [row.attempt_id, provenance],
+    );
+    await client.query('COMMIT');
+    return mapRow(updated.rows[0]);
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+}
+
+export async function deferStoredNativeReceiptLookup(
+  id: string, claimToken: string, code: string, message: string, workspaceId: string,
+) {
+  const result = await sql<LocalPublishJobRow>`
+    UPDATE local_publish_jobs SET verification_attempts=verification_attempts+1,
+      next_verification_at=CASE WHEN verification_attempts>=5 THEN NULL ELSE
+        CURRENT_TIMESTAMP+LEAST(3600,60*POWER(2,LEAST(verification_attempts,6)))*INTERVAL '1 second' END,
+      claim_expires_at=CURRENT_TIMESTAMP,
+      error_code=CASE WHEN verification_attempts>=5 THEN 'RECEIPT_LOOKUP_NEEDS_ACTION' ELSE ${code} END,
+      error_message=CASE WHEN verification_attempts>=5
+        THEN 'Read-only receipt checks could not identify this packet. Review in Creator; do not submit again.'
+        ELSE ${message} END,
+      updated_at=CURRENT_TIMESTAMP
+    WHERE id=${id}::uuid AND workspace_id=${workspaceId}
+      AND claim_token=${claimToken}::uuid AND claim_expires_at>CURRENT_TIMESTAMP
+      AND status='verification_pending' AND receipt_outcome='ambiguous' AND note_id IS NULL
+      AND EXISTS(SELECT 1 FROM rednote_publish_attempts attempt
+        WHERE attempt.workspace_id=local_publish_jobs.workspace_id
+          AND attempt.source_local_publish_job_id=local_publish_jobs.id
+          AND attempt.terminal_outcome IN ('accepted','outcome_unknown')
+          AND NOT attempt.active AND attempt.dispatch_authorized_at IS NOT NULL)
+    RETURNING *`;
+  if (!result.rows[0]) throw new LocalPublishJobError('Receipt lookup lease expired', 'NATIVE_RECEIPT_RECOVERY_STALE', 409);
+  return mapRow(result.rows[0]);
+}
 import { createHash, randomUUID } from 'crypto';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { isDeepStrictEqual } from 'util';
@@ -1161,7 +1283,9 @@ export async function releaseExpiredStoredLocalPublishClaims() {
 async function claimedResponse(
   row: LocalPublishJobRow,
   transactionClient?: Pick<PoolClient, 'query'>,
-): Promise<ClaimedLocalPublishJob> {
+): Promise<ClaimedLocalPublishJob & {
+  receiptOutcome?: StoredLocalPublishJob['receiptOutcome'];
+}> {
   if (!row.claim_token || !row.claim_expires_at) {
     throw new LocalPublishJobError(
       'The local publish job does not have a current claim',
@@ -1351,6 +1475,7 @@ async function claimedResponse(
       status: job.status,
       ...(job.noteId ? { noteId: job.noteId } : {}),
       ...(job.shareUrl ? { shareUrl: job.shareUrl } : {}),
+      receiptOutcome: job.receiptOutcome,
       verificationAttempts: job.verificationAttempts,
       nextVerificationAt: job.nextVerificationAt,
     };
@@ -2716,6 +2841,8 @@ export async function prepareStoredLocalPublishVerification(
   const result = await sql<LocalPublishJobRow>`
     UPDATE local_publish_jobs
     SET status = 'verified',
+        public_index_status = 'indexed',
+        public_index_checked_at = CURRENT_TIMESTAMP,
         note_id = COALESCE(note_id, ${noteId}),
         share_url = COALESCE(share_url, ${shareUrl}),
         verified_at = COALESCE(verified_at, CURRENT_TIMESTAMP),
